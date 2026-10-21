@@ -610,9 +610,12 @@ fn resolve_schema_loc(
 /// rename, preserving the mode of an existing file.
 fn atomic_write(path: &str, contents: &str) -> Result<(), String> {
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    #[cfg(unix)]
     let mut mode: u32 = 0o644;
+    #[cfg(unix)]
     if let Ok(md) = std::fs::metadata(path) {
         mode = md.permissions().mode() & 0o777;
     }
@@ -638,9 +641,12 @@ fn atomic_write(path: &str, contents: &str) -> Result<(), String> {
     };
     let done = (|| -> std::io::Result<()> {
         f.write_all(contents.as_bytes())?;
-        let mut perms = f.metadata()?.permissions();
-        perms.set_mode(mode);
-        f.set_permissions(perms)?;
+        #[cfg(unix)]
+        {
+            let mut perms = f.metadata()?.permissions();
+            perms.set_mode(mode);
+            f.set_permissions(perms)?;
+        }
         f.flush()?;
         drop(f);
         std::fs::rename(&tmp_path, path)
