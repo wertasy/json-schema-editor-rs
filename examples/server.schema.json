@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Server Configuration",
+  "type": "object",
+  "required": ["name", "server"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "title": "Name",
+      "description": "service name, lowercase",
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "examples": ["webapp"]
+    },
+    "mode": {
+      "type": "string",
+      "title": "Mode",
+      "description": "listen protocol",
+      "enum": ["http", "grpc", "tcp"],
+      "default": "http"
+    },
+    "server": {
+      "type": "object",
+      "title": "Server",
+      "required": ["port"],
+      "properties": {
+        "port": {
+          "type": "integer",
+          "title": "Port",
+          "minimum": 1024,
+          "maximum": 65535,
+          "default": 8080
+        },
+        "host": {"type": "string", "title": "Host", "default": "0.0.0.0"},
+        "debug": {"type": "boolean", "title": "Debug", "default": false},
+        "ratio": {"type": "number", "title": "Ratio", "minimum": 0, "maximum": 1}
+      }
+    },
+    "logging": {
+      "type": "object",
+      "title": "Logging",
+      "properties": {
+        "levels": {
+          "type": "array",
+          "title": "Levels",
+          "items": {"enum": ["debug", "info", "warn", "error"]},
+          "minItems": 1
+        },
+        "tags": {
+          "type": "array",
+          "title": "Tags",
+          "items": {"type": "string", "title": "Tag", "minLength": 1}
+        }
+      }
+    },
+    "mounts": {
+      "type": "array",
+      "title": "Mounts",
+      "items": {
+        "type": "object",
+        "title": "Mount",
+        "required": ["src"],
+        "properties": {
+          "src": {"type": "string", "title": "Source", "minLength": 1},
+          "dst": {"type": "string", "title": "Target"}
+        }
+      }
+    },
+    "auth": {
+      "title": "Auth",
+      "oneOf": [
+        {"const": "none", "title": "None"},
+        {
+          "type": "object",
+          "title": "Token",
+          "required": ["token"],
+          "properties": {
+            "token": {"type": "string", "title": "Token", "minLength": 8}
+          }
+        }
+      ]
+    }
+  }
+}

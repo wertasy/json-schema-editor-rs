@@ -1,0 +1,38 @@
+# Binaries
+json-schema-editor
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test
+*.test
+*.out
+coverage.*
+
+# Go workspace
+go.work
+go.work.sum
+
+# Build
+dist/
+bin/
+# Local source export, never commit
+/json-schema-editor.tar.xz
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Local secret-bearing config (sing-box credentials) — never commit
+config.json
+
+
+# Added by cargo
+
+/target

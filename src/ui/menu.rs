@@ -1,0 +1,2146 @@
+//! The menu TUI core: App state, the crossterm event loop, key dispatch and
+//! rendering (Go menu.go). Populated by the core porting slice.
+//!
+//! Rust port of `internal/ui/menu.go`. The bubbletea `listModel` becomes
+//! [`App`]; the 16 nullable overlay fields + `routeKey` priority chain become
+//! a single `Option<Overlay>`. Per-file state lives in
+//! [`FileState`](crate::ui::files::FileState); the active file is
+//! `files[cur]`. View rendering keeps Go's string-builder approach: a tiny
+//! `style` layer emits the same ANSI SGR sequences lipgloss produced.
+
+use std::collections::HashMap;
+use std::sync::LazyLock;
+
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::execute;
+use regex::Regex;
+
+use crate::doc::jsondoc::path_string;
+use crate::doc::{Doc, NodeId, PathSeg, Value};
+use crate::smodel::{EnumOpt, FormNode, FormNodeId};
+use crate::ui::files::new_app;
+use crate::ui::history::{Inputs, list_mode, typing};
+use crate::ui::nav::{Nav, NavGo};
+use crate::ui::rows::{
+    MergeView, MergedKey, RowsEnv, SynthKey, dynamic_variants, match_variant_list, menu_rows_for,
+    parse_issue, pinned_one_of_menu, unknown_key_issues,
+};
+use crate::ui::widgets::{TextArea, TextInput};
+use crate::ui::{FileSession, Issue, MenuCtx, MenuKind, MenuState, Options, Outcome, Row, RowKind};
+
+pub use crate::ui::files::FileState;
+
+// --- styles (Go lipgloss constants) ---------------------------------------------
+
+/// Tiny style layer producing the ANSI SGR sequences lipgloss emitted. Each
+/// render closes with ESC[0m like lipgloss.
+pub mod style {
+    fn render(codes: &str, s: &str) -> String {
+        if codes.is_empty() {
+            return s.to_string();
+        }
+        format!("\x1b[{}m{}\x1b[0m", codes, s)
+    }
+    pub fn bold(s: &str) -> String {
+        render("1", s)
+    }
+    pub fn faint(s: &str) -> String {
+        render("2", s)
+    }
+    pub fn fg3(s: &str) -> String {
+        render("33", s)
+    }
+    pub fn fg1(s: &str) -> String {
+        render("31", s)
+    }
+    pub fn fg9(s: &str) -> String {
+        render("91", s)
+    }
+    pub fn help(s: &str) -> String {
+        render("38;5;248", s)
+    }
+    pub fn desc(s: &str) -> String {
+        render("38;5;141", s)
+    }
+    pub fn anchor(s: &str) -> String {
+        render("38;5;177", s)
+    }
+    pub fn accent(s: &str) -> String {
+        render("38;5;39", s)
+    }
+    pub fn sel(s: &str) -> String {
+        render("1;48;5;236", s)
+    }
+    pub fn val_str(s: &str) -> String {
+        render("38;5;114", s)
+    }
+    pub fn val_num(s: &str) -> String {
+        render("38;5;51", s)
+    }
+    pub fn val_bool(s: &str) -> String {
+        render("38;5;212", s)
+    }
+    pub fn val_enum(s: &str) -> String {
+        render("38;5;215", s)
+    }
+    pub fn val_default(s: &str) -> String {
+        render("38;5;253", s)
+    }
+    pub fn diff(s: &str) -> String {
+        render("1;38;5;204", s)
+    }
+}
+
+pub const MENU_HELP: &str =
+    "↑/↓ move · enter edit/open · esc back · ctrl+s/w save · / search · ? help";
+pub const OVERLAY_HELP: &str = "enter select · esc cancel";
+
+/// maxMacroKeys caps a single recorded macro; reaching it stops recording
+/// and keeps the keys captured so far.
+pub const MAX_MACRO_KEYS: usize = 500;
+
+/// helpColWidth is the keyboard-help overlay's fixed description column.
+pub const HELP_COL_WIDTH: usize = 24;
+/// The menu's title column adapts to the widest key, within these bounds.
+pub const TITLE_COL_MIN: usize = 16;
+pub const TITLE_COL_MAX: usize = 42;
+
+/// helpEntry is one row of the "?" key reference.
+pub struct HelpEntry {
+    pub keys: &'static str,
+    pub desc: &'static str,
+}
+
+/// helpEntries is the full key reference shown by the "?" overlay.
+pub const HELP_ENTRIES: &[HelpEntry] = &[
+    HelpEntry {
+        keys: "up / down / j / k",
+        desc: "move (wraps at both ends; ctrl+j/k in search and issues)",
+    },
+    HelpEntry {
+        keys: "n / N / ctrl+j / ctrl+k",
+        desc: "next / previous key with a non-null value",
+    },
+    HelpEntry {
+        keys: "y / Y",
+        desc: "copy the \"key\": value pair / the value (JSON or YAML per document); array pages: both copy the item's value",
+    },
+    HelpEntry {
+        keys: "x / X",
+        desc: "cut the \"key\": value pair / the value — y/Y plus delete, batch on marked rows; array pages: both cut the item",
+    },
+    HelpEntry {
+        keys: "m",
+        desc: "mark key-value rows: y copies, d deletes the marked ones (m toggles)",
+    },
+    HelpEntry {
+        keys: "v",
+        desc: "visual select: j/k (or arrows) and gg/G mark rows between start and cursor; v/esc stops",
+    },
+    HelpEntry {
+        keys: "f / F",
+        desc: "quick move: type a character to jump to the next/previous key starting with it",
+    },
+    HelpEntry {
+        keys: "p / P",
+        desc: "smart paste clipboard JSON (YAML docs: YAML too) — p: this menu, P: the row's own container (a single value replaces its value); keys/items land below (p) / above (P) the cursor row",
+    },
+    HelpEntry {
+        keys: "z",
+        desc: "show/hide fields with no value (null/unset)",
+    },
+    HelpEntry {
+        keys: "[N] gg / G",
+        desc: "jump to first / last row; N gg in array menus: item N (Home/End too); visual select: lands on the first/last key, marking the range",
+    },
+    HelpEntry {
+        keys: "ctrl+o / ctrl+i (tab)",
+        desc: "back / forward in the navigation history (submenus, jumps; esc pops count too)",
+    },
+    HelpEntry {
+        keys: "s",
+        desc: "switch file: open the file picker when several files are open",
+    },
+    HelpEntry {
+        keys: "ga / gr",
+        desc: "jump to the row's anchor / its other uses — references and << merges (esc returns)",
+    },
+    HelpEntry {
+        keys: "enter / right / l",
+        desc: "edit field · open submenu",
+    },
+    HelpEntry {
+        keys: "tab / shift+tab",
+        desc: "complete next / previous candidate (ctrl+n / ctrl+p)",
+    },
+    HelpEntry {
+        keys: "left / h",
+        desc: "back one level",
+    },
+    HelpEntry {
+        keys: "esc / q",
+        desc: "cancel / back — q aliases esc outside inputs; a pending g combo clears first",
+    },
+    HelpEntry {
+        keys: "",
+        desc: "at the root: quit, asking to save when the doc changed",
+    },
+    HelpEntry {
+        keys: "space",
+        desc: "toggle boolean / enum member",
+    },
+    HelpEntry {
+        keys: "d / delete",
+        desc: "delete the selected pair (required merge keys refused)",
+    },
+    HelpEntry {
+        keys: "a / A",
+        desc: "add a schema-less key before / after the cursor",
+    },
+    HelpEntry {
+        keys: "e",
+        desc: "edit the row's value in $EDITOR (multiline strings always open here)",
+    },
+    HelpEntry {
+        keys: "E",
+        desc: "expand: materialize the referenced value (cursor row or menu) into a copy",
+    },
+    HelpEntry {
+        keys: "&",
+        desc: "anchor: set/rename the field's YAML anchor (empty removes; unreferenced only)",
+    },
+    HelpEntry {
+        keys: "*",
+        desc: "reference: point the field at an anchor (tab completes; empty removes)",
+    },
+    HelpEntry {
+        keys: "J / K",
+        desc: "move the item under the cursor down / up",
+    },
+    HelpEntry {
+        keys: "ctrl+t",
+        desc: "switch the variant type of a oneOf value",
+    },
+    HelpEntry {
+        keys: "u / ctrl+r",
+        desc: "undo / redo",
+    },
+    HelpEntry {
+        keys: "ctrl+s / w",
+        desc: "save (the bottom bar shows the write target)",
+    },
+    HelpEntry {
+        keys: "W",
+        desc: "write a copy to another path: the menu grows a \"Write to\" row prefilled with this file's path — edit and enter (esc cancels); tab completes directory entries",
+    },
+    HelpEntry {
+        keys: "/",
+        desc: "search below the current path",
+    },
+    HelpEntry {
+        keys: "r",
+        desc: "search & replace string values",
+    },
+    HelpEntry {
+        keys: "alt+x",
+        desc: "regex toggle (default on): match the query as a regular expression ($1 groups in replace)",
+    },
+    HelpEntry {
+        keys: "@ / .",
+        desc: "record / play a macro",
+    },
+    HelpEntry {
+        keys: "?",
+        desc: "open/close this help",
+    },
+    HelpEntry {
+        keys: "ctrl+c",
+        desc: "quit without saving (exit 130)",
+    },
+    HelpEntry {
+        keys: "<",
+        desc: "merge keys: merge anchors (space/comma separated; tab completes; empty clears)",
+    },
+];
+
+// --- key messages ------------------------------------------------------------
+
+/// Msg is the TUI key event (Go tea.KeyMsg), reduced to the shapes the menu
+/// handles. `key_str` reproduces bubbletea's `msg.String()` values.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Msg {
+    /// rune keys; the flag marks alt-modified runes ("alt+x")
+    Char(char, bool),
+    Esc,
+    Enter,
+    Tab,
+    BackTab,
+    Backspace,
+    Delete,
+    Up,
+    Down,
+    Left,
+    Right,
+    Home,
+    End,
+    Ctrl(char),
+    /// bracketed paste text
+    Paste(String),
+}
+
+impl Msg {
+    /// String() reproduces the Go bubbletea key names the dispatchers match
+    /// on: "up", "ctrl+j", "alt+x", "tab", "shift+tab", runes as the string.
+    pub fn key_str(&self) -> String {
+        match self {
+            Msg::Char(' ', false) => " ".to_string(),
+            Msg::Char(c, false) => c.to_string(),
+            Msg::Char(c, true) => format!("alt+{}", c),
+            Msg::Esc => "esc".to_string(),
+            Msg::Enter => "enter".to_string(),
+            Msg::Tab => "tab".to_string(),
+            Msg::BackTab => "shift+tab".to_string(),
+            Msg::Backspace => "backspace".to_string(),
+            Msg::Delete => "delete".to_string(),
+            Msg::Up => "up".to_string(),
+            Msg::Down => "down".to_string(),
+            Msg::Left => "left".to_string(),
+            Msg::Right => "right".to_string(),
+            Msg::Home => "home".to_string(),
+            Msg::End => "end".to_string(),
+            Msg::Ctrl(c) => format!("ctrl+{}", c),
+            Msg::Paste(_) => String::new(),
+        }
+    }
+
+    /// The runes a Char message carries (Go msg.Runes).
+    #[allow(dead_code)] // kept as the Go-equivalent accessor surface
+    pub fn runes(&self) -> Option<String> {
+        match self {
+            Msg::Char(c, _) => Some(c.to_string()),
+            _ => None,
+        }
+    }
+
+    #[allow(dead_code)] // kept as the Go-equivalent accessor surface
+    pub fn is_esc(&self) -> bool {
+        matches!(self, Msg::Esc)
+    }
+}
+
+// --- overlay states ----------------------------------------------------------
+
+/// editState is an in-place scalar input on one field row.
+pub struct EditState {
+    pub fn_: Option<FormNodeId>,
+    /// schema-less scalar edits carry a synthetic node (Go built one on the
+    /// fly) matching the value's own JSON type
+    pub synth: Option<FormNode>,
+    pub path: Vec<PathSeg>,
+    pub ti: TextInput,
+    pub err: String,
+    /// editing a not-yet-appended array item; esc writes nothing
+    pub is_new: bool,
+    /// existing same-key values in the document (fixed at open)
+    pub cands: Vec<String>,
+    /// cands filtered by the current input prefix
+    pub sugs: Vec<String>,
+    /// tab cycle position (-1 = none)
+    pub sug_idx: i64,
+    /// set for scalar variant edits: ctrl+t type switch
+    pub one_of: Option<FormNodeId>,
+}
+
+impl EditState {
+    /// The schema node the input validates against.
+    #[allow(dead_code)] // inline editors resolve through the schema directly
+    pub fn node(&self) -> Option<FormNode> {
+        match (self.fn_, &self.synth) {
+            (Some(_id), _) => None, // resolved against the schema by callers
+            (None, Some(n)) => Some(n.clone()),
+            (None, None) => None,
+        }
+    }
+}
+
+/// addState is the key-name input overlay for a: add a schema-less
+/// key-value member under the current object menu.
+pub struct AddState {
+    /// object the new member goes into
+    pub path: Vec<PathSeg>,
+    /// the menu's node; its Children are the known keys
+    pub node: FormNodeId,
+    /// member insert position captured from the cursor (a/A)
+    pub idx: usize,
+    pub ti: TextInput,
+    pub err: String,
+}
+
+/// writeState is the write-to-path input for W.
+pub struct WriteState {
+    pub ti: TextInput,
+    pub err: String,
+    pub sugs: Vec<String>,
+    pub sug_idx: i64,
+}
+
+/// selState is the full-screen enum option picker.
+pub struct SelState {
+    pub fn_: FormNodeId,
+    pub path: Vec<PathSeg>,
+    pub opts: Vec<EnumOpt>,
+    pub cursor: usize,
+    /// set for enum variant editors: ctrl+t type switch
+    pub one_of: Option<FormNodeId>,
+}
+
+/// textState is the built-in raw textarea overlay; its syntax follows
+/// Options.Raw (JSON or YAML). `path` is None for the whole-document editor.
+pub struct TextState {
+    pub path: Option<Vec<PathSeg>>,
+    pub fn_: Option<FormNodeId>,
+    pub ta: TextArea,
+    pub err: String,
+    /// The buffer holds a string VALUE, not a document: it was prefilled with
+    /// the plain text (no YAML/JSON encoding) and applies verbatim.
+    pub verbatim_str: bool,
+}
+
+/// issuesState is the load-time validation issues overlay.
+#[derive(Default, Clone)]
+pub struct IssuesState {
+    pub items: Vec<Issue>,
+    pub cursor: usize,
+}
+
+/// refPickState is the gr picker.
+pub struct RefPickState {
+    pub name: String,
+    pub paths: Vec<Vec<PathSeg>>,
+    pub cursor: usize,
+}
+
+/// errsState is the save-time validation error overlay.
+pub struct ErrsState {
+    pub lines: Vec<String>,
+    pub paths: Vec<Option<Vec<PathSeg>>>,
+    pub cursor: usize,
+    /// end the session after the --force save (vs plain ctrl+s)
+    pub exit: bool,
+    /// write-to path for a W save ("" = the session's own file)
+    pub target: String,
+}
+
+/// confirmState is a y/n question overlay. on_no is optional.
+pub struct ConfirmState {
+    pub title: String,
+    /// optional footer override
+    pub hint: String,
+    pub on_yes: Option<Box<dyn FnOnce(&mut App)>>,
+    pub on_no: Option<Box<dyn FnOnce(&mut App)>>,
+}
+
+/// searchState is the "/" filter mode, scoped to the subtree below the
+/// current breadcrumb path.
+pub struct SearchState {
+    /// replace mode: show the replace input, results are previews
+    pub replace: bool,
+    /// true = match case-insensitively (default)
+    pub fold_case: bool,
+    pub ti: TextInput,
+    pub rti: TextInput,
+    /// which input has focus (Go bubbles Focus/Blur); the query input starts
+    /// focused
+    pub replace_focused: bool,
+    pub all: Vec<Row>,
+    pub results: Vec<Row>,
+    pub cursor: usize,
+    /// true = the query is a regular expression (alt+x toggles)
+    pub regex: bool,
+    pub re: Option<Regex>,
+    /// regex compile error message; "" when ok
+    pub re_err: String,
+    /// A search jump parks the overlay instead of closing it: esc at the
+    /// landing depth (return_depth) reopens it, and closing it always
+    /// returns to the menu the search was opened from (origin).
+    pub parked: bool,
+    pub return_depth: usize,
+    pub origin: Option<Vec<MenuState>>,
+}
+
+/// anchor input modes: & defines/renames the anchor on a value, * points the
+/// value at an existing anchor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnchorMode {
+    AnchorSet,
+    RefSet,
+}
+
+/// anchorState is the name input behind & and *.
+pub struct AnchorState {
+    pub path: Vec<PathSeg>,
+    pub mode: AnchorMode,
+    /// the row's schema node, for the required check
+    pub fn_: Option<FormNodeId>,
+    pub ti: TextInput,
+    /// reference mode: anchor names in document order
+    pub cands: Vec<String>,
+    /// completion cursor, -1 when nothing selected
+    pub sug: i64,
+    pub err: String,
+}
+
+/// mergeState is the input behind `<`: anchor names, space-separated; tab
+/// completes the token being typed over the document's mapping anchors.
+pub struct MergeState {
+    pub path: Vec<PathSeg>,
+    pub ti: TextInput,
+    /// mapping anchor names in document order (fixed at open)
+    pub cands: Vec<String>,
+    pub sug: i64,
+    pub err: String,
+}
+
+/// findState is f/F quick move: waiting for the character.
+#[derive(Clone)]
+pub struct FindState {
+    /// F: search upward
+    pub backward: bool,
+}
+
+/// filePickState is the s-key file switcher overlay.
+pub struct FilePickState {
+    pub cursor: usize,
+}
+
+/// externalEdit is the target of a pending $EDITOR run. A non-negative
+/// insert_idx splices a new member instead of Set.
+#[derive(Clone)]
+pub struct ExternalEdit {
+    pub target: Vec<PathSeg>,
+    pub insert_idx: i64,
+    /// temp file the editor is working on
+    pub path: String,
+    /// whole-document editor (the root raw row) vs one value
+    pub whole_doc: bool,
+}
+
+/// Overlay is the single open surface (Go's 16 nullable fields + routeKey
+/// priority chain). Only one can be open at a time; the key router matches
+/// on it.
+pub enum Overlay {
+    Confirm(ConfirmState),
+    Issues(IssuesState),
+    Errs(ErrsState),
+    RefPick(RefPickState),
+    Text(TextState),
+    Sel(SelState),
+    Search(SearchState),
+    Edit(EditState),
+    Add(AddState),
+    Write(WriteState),
+    Anc(AnchorState),
+    Mrg(MergeState),
+}
+
+// --- the app ------------------------------------------------------------------
+
+/// App is the menu TUI model (Go listModel) over one or more files.
+pub struct App {
+    pub files: Vec<FileState>,
+    pub cur: usize,
+    pub width: usize,
+    pub height: usize,
+    pub overlay: Option<Overlay>,
+    /// f/F quick move: waiting for the character
+    pub find: Option<FindState>,
+    /// "?" keyboard-help overlay
+    pub help: bool,
+    /// z filter: hide object keys with no document value
+    pub hide_empty: bool,
+    /// transient list-mode message, cleared on the next key
+    pub notice: String,
+    /// pending multi-key command (vi-style: shown bottom-right, never
+    /// cleared by a timer)
+    pub cmd_buf: Vec<String>,
+    /// macro capture armed
+    pub recording: bool,
+    pub rec_buf: Vec<Msg>,
+    /// last completed macro
+    pub macro_buf: Vec<Msg>,
+    /// navigation trail (ctrl+o / ctrl+i)
+    pub nav: Nav,
+    /// open s-key file switcher overlay
+    pub file_pick: Option<FilePickState>,
+    /// the session ended via ctrl+c/EOF abort
+    pub aborted: bool,
+    /// the session ended cleanly (root quit or Save and exit)
+    pub exiting: bool,
+    /// run $EDITOR for real (false in tests: the pending edit is stashed
+    /// instead so `finish_external_value` can deliver the content)
+    pub exec_editor: bool,
+    /// pending $EDITOR target stashed for the event loop (or tests)
+    pub pending_edit: Option<ExternalEdit>,
+}
+
+impl App {
+    /// bare builds the shell other constructors fill in (files already
+    /// converted to FileState).
+    pub fn bare(files: Vec<FileState>) -> App {
+        App {
+            files,
+            cur: 0,
+            width: 80,
+            height: 24,
+            overlay: None,
+            find: None,
+            help: false,
+            hide_empty: false,
+            notice: String::new(),
+            cmd_buf: Vec::new(),
+            recording: false,
+            rec_buf: Vec::new(),
+            macro_buf: Vec::new(),
+            nav: Nav::default(),
+            file_pick: None,
+            aborted: false,
+            exiting: false,
+            exec_editor: false,
+            pending_edit: None,
+        }
+    }
+
+    /// newListModel/newMultiFileModel entry (Go newMultiFileModel).
+    pub fn new(files: Vec<FileSession>) -> App {
+        new_app(files)
+    }
+
+    // --- state accessors ----------------------------------------------------
+
+    /// top returns the current navigation state.
+    pub fn top(&self) -> Option<&MenuState> {
+        self.fs().stack.last()
+    }
+
+    pub fn top_mut(&mut self) -> Option<&mut MenuState> {
+        self.fs_mut().stack.last_mut()
+    }
+
+    pub fn doc(&self) -> &Doc {
+        &self.fs().doc
+    }
+
+    pub fn opts(&self) -> &Options {
+        &self.fs().opts
+    }
+
+    /// typing reports whether a text input has focus.
+    pub fn typing(&self) -> bool {
+        typing(&self.inputs())
+    }
+
+    /// listMode reports whether the plain menu key table owns the keyboard.
+    pub fn list_mode(&self) -> bool {
+        list_mode(&self.inputs())
+    }
+
+    fn inputs(&self) -> Inputs {
+        let mut i = Inputs::default();
+        match &self.overlay {
+            Some(Overlay::Edit(_)) => i.edit = true,
+            Some(Overlay::Text(_)) => i.text = true,
+            Some(Overlay::Search(_)) => i.search_active = true,
+            Some(Overlay::Add(_)) => i.add = true,
+            Some(Overlay::Write(_)) => i.write = true,
+            Some(Overlay::Anc(_)) => i.anc = true,
+            Some(Overlay::Mrg(_)) => i.mrg = true,
+            Some(Overlay::Confirm(_)) => i.confirm = true,
+            Some(Overlay::Issues(_)) => i.issues = true,
+            Some(Overlay::Errs(_)) => i.errs = true,
+            Some(Overlay::Sel(_)) => i.sel = true,
+            Some(Overlay::RefPick(_)) => {}
+            _ => {}
+        }
+        i.help = self.help;
+        i.file_pick = self.file_pick.is_some();
+        i
+    }
+
+    // --- rows ---------------------------------------------------------------
+
+    /// menuRows builds the row list for the current (top) menu state.
+    pub fn menu_rows(&mut self) -> Vec<Row> {
+        let st = self.top().cloned();
+        match st {
+            Some(st) => self.menu_rows_state(&st),
+            None => Vec::new(),
+        }
+    }
+
+    /// menuRowsFor builds the row list for one menu state: the top one in
+    /// menu_rows, any state for cursor bookkeeping during variant flips.
+    pub fn menu_rows_state(&mut self, st: &MenuState) -> Vec<Row> {
+        let hide_empty = self.hide_empty;
+        let cur = self.cur;
+        let f = &mut self.files[cur];
+        let is_root = f.stack.first().map_or(false, |top| same_state(top, st));
+        let FileState {
+            schema,
+            doc,
+            opts,
+            menu_cache,
+            issues_now,
+            ..
+        } = f;
+        let lookup = MergeLookup { doc };
+        let mut cache = std::mem::take(menu_cache);
+        let mut env = RowsEnv {
+            is_root,
+            issues_now,
+            merge: &lookup,
+            synth: cache,
+        };
+        let rows = menu_rows_for(schema, doc, opts, hide_empty, st, &mut env);
+        cache = env.synth;
+        *menu_cache = cache;
+        rows
+    }
+
+    /// A MenuCtx for the pure search/summary helpers.
+    pub fn ctx(&self) -> MenuCtx<'_> {
+        static EMPTY: LazyLock<HashMap<FormNodeId, FormNodeId>> = LazyLock::new(HashMap::new);
+        let f = self.fs();
+        MenuCtx {
+            schema: &f.schema,
+            doc: &f.doc,
+            opts: &f.opts,
+            menu_cache: &EMPTY,
+            hide_empty: self.hide_empty,
+        }
+    }
+
+    /// clampStateCursor on the top state.
+    pub fn clamp_cursor(&mut self, rows: &[Row]) {
+        let max = rows.len().saturating_sub(1);
+        if let Some(st) = self.top_mut() {
+            st.cursor = st.cursor.min(max);
+        }
+    }
+
+    pub fn repair_stack(&mut self) {
+        loop {
+            let top = match self.top() {
+                Some(t) => t,
+                None => return,
+            };
+            if self.fs().stack.len() <= 1 {
+                break;
+            }
+            let p = top.path.clone();
+            if p.is_empty() || self.doc().get(&p).is_some() {
+                break;
+            }
+            self.fs_mut().stack.pop();
+        }
+        let rows = self.menu_rows();
+        self.clamp_cursor(&rows);
+    }
+
+    // --- variant menus ------------------------------------------------------
+
+    /// cachedMenu pins the merged union menu for a oneOf node.
+    fn cached_menu_merged(&mut self, node: FormNodeId) -> FormNodeId {
+        if let Some(&id) = self.fs().menu_cache.get(&SynthKey::Merged(node)) {
+            return id;
+        }
+        let variants = dynamic_variants(&self.fs().schema, node).unwrap_or_default();
+        let id = crate::ui::rows::merged_one_of_menu(&mut self.fs_mut().schema, node, &variants);
+        self.fs_mut().menu_cache.insert(SynthKey::Merged(node), id);
+        id
+    }
+
+    /// cachedMenu pins one variant's menu with unionized discriminators.
+    fn cached_menu_pinned(&mut self, node: FormNodeId, variant: FormNodeId) -> FormNodeId {
+        if let Some(&id) = self.fs().menu_cache.get(&SynthKey::Pinned(node, variant)) {
+            return id;
+        }
+        let variants = dynamic_variants(&self.fs().schema, node)
+            .unwrap_or_else(|| self.fs().schema.nodes[node as usize].variants.clone());
+        let id = pinned_one_of_menu(&mut self.fs_mut().schema, &variants, variant);
+        self.fs_mut()
+            .menu_cache
+            .insert(SynthKey::Pinned(node, variant), id);
+        id
+    }
+
+    /// dynamicMenu builds the item menu of an all-object oneOf: the merged
+    /// union menu while the value is unset or ambiguous, the matched
+    /// variant's menu once exactly one candidate remains.
+    pub fn dynamic_menu(&mut self, node: FormNodeId, path: Vec<PathSeg>) -> MenuState {
+        let mut st = MenuState {
+            kind: MenuKind::Object,
+            node,
+            path,
+            cursor: 0,
+            offset: 0,
+            variant_of: Some(node),
+            one_of: None,
+            sel: std::collections::HashSet::new(),
+            visual: false,
+            vanchor: 0,
+        };
+        let val = self.doc().get(&st.path);
+        let cands = {
+            let schema = &self.fs().schema;
+            let variants = dynamic_variants(schema, node).unwrap_or_default();
+            match_variant_list(schema, &variants, &self.doc(), val)
+        };
+        st.node = if cands.len() == 1 {
+            let v = cands[0];
+            self.cached_menu_pinned(node, v)
+        } else {
+            self.cached_menu_merged(node)
+        };
+        st
+    }
+
+    /// refreshVariantMenu re-runs variant inference on every dynamic item
+    /// menu in the stack after each key press: the node flips between merged
+    /// and pinned as the value disambiguates. The cursor follows the field
+    /// it was on (matched by schema key), so flipping via the discriminator
+    /// keeps it selected.
+    pub fn refresh_variant_menu(&mut self) {
+        for i in 0..self.fs().stack.len() {
+            let (variant_of, path, node) = {
+                let st = &self.fs().stack[i];
+                match st.variant_of {
+                    Some(v) => (v, st.path.clone(), st.node),
+                    None => continue,
+                }
+            };
+            let want = self.dynamic_menu(variant_of, path).node;
+            if want == node {
+                continue;
+            }
+            let key = self.cursor_key(i);
+            self.fs_mut().stack[i].node = want;
+            if !key.is_empty() {
+                if let Some(pos) = self.row_index_by_key(i, &key) {
+                    self.fs_mut().stack[i].cursor = pos;
+                }
+            }
+        }
+    }
+
+    /// cursorKey returns the schema key of the row under the state's cursor.
+    fn cursor_key(&mut self, i: usize) -> String {
+        let st = self.fs().stack[i].clone();
+        let rows = self.menu_rows_state(&st);
+        let st = &self.fs().stack[i];
+        if st.cursor >= rows.len() {
+            return String::new();
+        }
+        rows[st.cursor]
+            .fn_
+            .map(|f| self.fs().schema.nodes[f as usize].key.clone())
+            .unwrap_or_default()
+    }
+
+    /// rowIndexByKey finds the first row of the state backed by the given key.
+    fn row_index_by_key(&mut self, i: usize, key: &str) -> Option<usize> {
+        let st = self.fs().stack[i].clone();
+        let rows = self.menu_rows_state(&st);
+        rows.iter().position(|r| {
+            r.fn_
+                .map_or(false, |f| self.fs().schema.nodes[f as usize].key == key)
+        })
+    }
+
+    // --- change tracking ----------------------------------------------------
+
+    /// changed reports whether the value at path differs from the
+    /// loaded/last-saved baseline; without a baseline nothing is marked.
+    pub fn changed(&self, path: &[PathSeg]) -> bool {
+        let f = self.fs();
+        match &f.baseline {
+            Some(base) => {
+                let cur = f.doc.get(path);
+                let basev = base.get(path);
+                !nodes_equal_opt(&f.doc, cur, base, basev)
+            }
+            None => false,
+        }
+    }
+
+    /// dirty reports whether anything in the document differs from the
+    /// baseline.
+    pub fn dirty(&self) -> bool {
+        let f = self.fs();
+        match &f.baseline {
+            Some(base) => !nodes_equal(&f.doc, Some(f.doc.root), base, Some(base.root)),
+            None => false,
+        }
+    }
+
+    // --- issues -------------------------------------------------------------
+
+    /// setIssues replaces the live validation problem list and its row marks.
+    pub fn set_issues(&mut self, items: Vec<Issue>) {
+        let mut err_paths = Vec::new();
+        let mut warn_paths = Vec::new();
+        for it in &items {
+            let mut marks: Vec<Vec<PathSeg>> = it.marks.clone();
+            if marks.is_empty() {
+                if let Some(p) = &it.path {
+                    marks = vec![p.clone()];
+                }
+            }
+            for p in marks {
+                if p.is_empty() && it.path.is_none() {
+                    // document root: the status row carries the count
+                    continue;
+                }
+                if p.is_empty() {
+                    continue;
+                }
+                if it.warn {
+                    warn_paths.push(p);
+                } else {
+                    err_paths.push(p);
+                }
+            }
+        }
+        let f = self.fs_mut();
+        f.issues_now = items;
+        f.err_paths = err_paths;
+        f.warn_paths = warn_paths;
+    }
+
+    /// refreshIssues re-validates the document after a write so fixed
+    /// problems leave the list, the counts and the row marks — and new
+    /// problems appear immediately. Callers invoke it only when the document
+    /// changed. Without a validator the load-time list stays as loaded.
+    pub fn refresh_issues(&mut self) {
+        let validate = match &self.opts().validate {
+            Some(v) => v.clone(),
+            None => return,
+        };
+        // The root menu gains or loses its issue status row with the problem
+        // count; keep the cursor on the row it was on while the list shifts.
+        let root = self.fs().stack.first().cloned();
+        let before = root
+            .clone()
+            .map(|r| self.menu_rows_state(&r))
+            .unwrap_or_default();
+        let msgs = validate(&self.doc());
+        let items = self.live_issues(msgs);
+        self.set_issues(items);
+        let Some(root) = root else { return };
+        let after = self.menu_rows_state(&root);
+        if after.len() != before.len() {
+            remap_state_cursor(&mut self.files[self.cur].stack[0], &before, &after);
+        }
+    }
+
+    /// liveIssues combines validator messages with the editor's unknown-key
+    /// warnings for the live issue list. A key the validator already flags
+    /// (e.g. additionalProperties) is not warned about twice.
+    pub fn live_issues(&mut self, msgs: Vec<String>) -> Vec<Issue> {
+        let mut items = issues_from(&msgs);
+        let warnings = {
+            let f = self.fs();
+            unknown_key_issues(&f.schema, &f.doc)
+        };
+
+        // An additionalProperties message names keys in map iteration order,
+        // and a failed oneOf branch also names fields that are valid in the
+        // matched variant. Mark only the names that really are schema-unknown
+        // keys in the edited value; when none are, mark the object itself.
+        for it in items.iter_mut() {
+            if it.warn || !it.msg.contains("additional properties ") {
+                continue;
+            }
+            let Some((loc, _)) = crate::ui::rows::split_issue(&it.msg) else {
+                continue;
+            };
+            let listed: std::collections::HashSet<String> =
+                it.flagged.iter().map(|p| path_string(p)).collect();
+            let mut actual: Vec<Vec<PathSeg>> = Vec::new();
+            for w in &warnings {
+                if let Some(wp) = &w.path {
+                    if listed.contains(&path_string(wp)) {
+                        actual.push(wp.clone());
+                    }
+                }
+            }
+            if actual.is_empty() {
+                it.path = Some(loc.clone());
+                it.flagged = vec![loc.clone()];
+                it.marks = vec![loc];
+            } else {
+                it.path = Some(actual[0].clone());
+                it.flagged = actual.clone();
+                it.marks = actual;
+            }
+        }
+
+        let mut flagged: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for it in &items {
+            for p in &it.flagged {
+                flagged.insert(path_string(p));
+            }
+            if let Some(p) = &it.path {
+                flagged.insert(path_string(p));
+            }
+        }
+        for w in warnings {
+            if let Some(wp) = &w.path {
+                if !flagged.contains(&path_string(wp)) {
+                    items.push(w);
+                }
+            }
+        }
+        items
+    }
+
+    // --- navigation trail ---------------------------------------------------
+
+    pub fn nav_snapshot(&self) -> crate::ui::nav::NavMark {
+        crate::ui::nav::nav_snapshot(&self.fs().stack, self.cur)
+    }
+
+    /// navForward records the location left behind by a forward relocation.
+    pub fn nav_forward(&mut self) {
+        let leaving = self.nav_snapshot();
+        self.nav.forward(leaving);
+    }
+
+    /// navBackStep records the location a back motion leaves behind.
+    pub fn nav_back_step(&mut self, leaving: crate::ui::nav::NavMark) {
+        let landing = self.nav_snapshot();
+        self.nav.back_step(leaving, &landing);
+    }
+
+    /// navGo moves one step along the navigation trail.
+    pub fn nav_go(&mut self, back: bool) {
+        let current = self.nav_snapshot();
+        match self.nav.go(back, &current) {
+            NavGo::Stay(notice) => self.notice = notice.to_string(),
+            NavGo::Jump(mk) => self.nav_restore(mk),
+        }
+    }
+
+    /// navRestore swaps in a frozen stack (nav.rs contract: switch file,
+    /// drop parked returns, repair).
+    pub fn nav_restore(&mut self, mk: crate::ui::nav::NavMark) {
+        if self.files.len() > 1 && mk.file != self.cur {
+            self.switch_file_state(mk.file); // plain swap: navGo already moved the trails
+        }
+        self.fs_mut().stack = mk.stack;
+        let f = self.fs_mut();
+        f.jump_origin = None;
+        f.jump_return = 0;
+        f.search_parked = None;
+        f.issues_parked = None;
+        self.repair_stack();
+    }
+
+    // --- the key pipeline ---------------------------------------------------
+
+    /// Update handles one key message: ctrl+c aborts, q aliases esc outside
+    /// inputs, macros intercept, then dispatchKey.
+    pub fn update(&mut self, msg: Msg) {
+        if msg == Msg::Ctrl('c') {
+            self.aborted = true;
+            return;
+        }
+        // q is an esc alias in every non-typing context; inside a focused
+        // text input it is an ordinary character.
+        let msg = if let Msg::Char('q', false) = &msg {
+            if !self.typing() { Msg::Esc } else { msg }
+        } else {
+            msg
+        };
+        self.notice.clear();
+        // session info notices live until the first key press
+        self.fs_mut().startup.clear();
+        if self.macro_control(&msg) {
+            return;
+        }
+        if self.recording {
+            self.rec_buf.push(msg.clone());
+            if self.rec_buf.len() >= MAX_MACRO_KEYS {
+                self.macro_buf = std::mem::take(&mut self.rec_buf);
+                self.recording = false;
+                self.notice = format!(
+                    "macro limit reached ({} keys) — recording stopped",
+                    MAX_MACRO_KEYS
+                );
+            }
+        }
+        self.dispatch_key(msg);
+    }
+
+    /// dispatchKey routes one key to the active handler and runs the
+    /// post-key refreshes (variant inference, live validation issues). Keys
+    /// that change the document push the pre-key snapshot onto the undo
+    /// stack, so one undo step reverts exactly one key's worth of changes.
+    /// u/ctrl+r act only in list mode and bypass the snapshot wrap.
+    pub fn dispatch_key(&mut self, msg: Msg) {
+        if self.list_mode() && self.apply_history_key(&msg) {
+            self.cmd_buf.clear(); // a history key breaks any pending g combo
+            self.refresh_variant_menu();
+            self.refresh_issues();
+            return;
+        }
+        let pre = self.doc().clone();
+        let pre_file = self.cur;
+        self.route_key(msg);
+        // A file switch swaps the active document. That is navigation, not an
+        // edit: pushing the leaving clone would pollute the restored file's
+        // undo history.
+        let edited = self.cur == pre_file
+            && !nodes_equal(
+                &pre,
+                Some(pre.root),
+                &self.fs().doc,
+                Some(self.fs().doc.root),
+            );
+        if edited {
+            self.files[pre_file].history.push_undo(pre);
+        }
+        self.refresh_variant_menu();
+        if edited {
+            self.refresh_issues();
+        }
+    }
+
+    /// routeKey is the overlay dispatch: the innermost open surface consumes
+    /// the key.
+    fn route_key(&mut self, msg: Msg) {
+        if self.help {
+            self.key_help(&msg);
+            return;
+        }
+        if self.file_pick.is_some() {
+            self.key_file_pick(&msg);
+            return;
+        }
+        let Some(ov) = self.overlay.take() else {
+            self.key_list(msg);
+            return;
+        };
+        self.overlay = match ov {
+            Overlay::Confirm(c) => self.key_confirm(msg, c),
+            Overlay::Issues(s) => self.key_issues(msg, s),
+            Overlay::Errs(s) => self.key_errs(msg, s),
+            Overlay::RefPick(s) => self.key_ref_pick(msg, s),
+            Overlay::Text(s) => self.key_text(msg, s),
+            Overlay::Sel(s) => self.key_sel(msg, s),
+            Overlay::Search(s) => self.key_search(msg, s),
+            Overlay::Edit(s) => self.key_edit(msg, s),
+            Overlay::Add(s) => self.key_add(msg, s),
+            Overlay::Write(s) => self.key_write(msg, s),
+            Overlay::Anc(s) => self.key_anchor(msg, s),
+            Overlay::Mrg(s) => self.key_merge(msg, s),
+        };
+    }
+
+    /// applyHistoryKey handles u/ctrl+r; consumed reports whether the key
+    /// was a history key.
+    pub fn apply_history_key(&mut self, msg: &Msg) -> bool {
+        let key = msg.key_str();
+        let f = self.fs_mut();
+        let res = match key.as_str() {
+            "u" => Some(f.history.undo(&mut f.doc)),
+            "ctrl+r" => Some(f.history.redo(&mut f.doc)),
+            _ => None,
+        };
+        match res {
+            Some(res) => {
+                self.notice = res.notice.to_string();
+                if res.changed {
+                    self.repair_stack();
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    // --- save flow ----------------------------------------------------------
+
+    /// save handles ctrl+s: write the document and stay in the session.
+    pub fn save(&mut self) {
+        self.persist(false);
+    }
+
+    /// saveAndExit handles the root "Save and exit" row.
+    pub fn save_and_exit(&mut self) {
+        self.save_dirty_files_and_exit();
+    }
+
+    /// openWriteTo arms the w/W input.
+    pub fn open_write_to(&mut self) {
+        let mut ti = TextInput::new();
+        ti.set_value(self.opts().path.clone());
+        ti.cursor_end();
+        self.overlay = Some(Overlay::Write(WriteState {
+            ti,
+            err: String::new(),
+            sugs: Vec::new(),
+            sug_idx: -1,
+        }));
+        self.refresh_write_suggestions();
+    }
+
+    /// persist validates first; validation errors open the overlay (with
+    /// the --force y/n path remembering whether the session should end
+    /// afterwards).
+    pub fn persist(&mut self, exit: bool) {
+        self.validate_and_write(exit, "");
+    }
+
+    /// validateAndWrite validates the document like ctrl+s and then writes
+    /// it to target: "" is the session's own file (opts.Save), any other
+    /// path goes through opts.WriteTo (menu W).
+    pub fn validate_and_write(&mut self, exit: bool, target: &str) {
+        let validate = self.opts().validate.clone();
+        if let Some(validate) = validate {
+            let errs = validate(&self.doc());
+            if !errs.is_empty() {
+                self.open_errs_overlay(errs, exit, target);
+                return;
+            }
+        }
+        self.write_to(exit, false, target);
+    }
+
+    /// openErrsOverlay shows validation errors (at most 15 lines, each
+    /// jumpable when it parses to a path); exit arms the --force y path to
+    /// end the session after the write.
+    pub fn open_errs_overlay(&mut self, errs: Vec<String>, exit: bool, target: &str) {
+        const MAX_SHOWN: usize = 15;
+        let mut lines = Vec::new();
+        let mut paths = Vec::new();
+        for (i, e) in errs.iter().enumerate() {
+            if i == MAX_SHOWN {
+                lines.push(format!("… and {} more", errs.len() - MAX_SHOWN));
+                paths.push(None);
+                break;
+            }
+            lines.push(e.clone());
+            paths.push(parse_issue(e));
+        }
+        self.overlay = Some(Overlay::Errs(ErrsState {
+            lines,
+            paths,
+            cursor: 0,
+            exit,
+            target: target.to_string(),
+        }));
+    }
+
+    /// writeTo persists through opts.Save (target "") or opts.WriteTo (a W
+    /// path). A failed write surfaces as a notice and the session continues;
+    /// a successful session-file write refreshes the change-mark baseline.
+    pub fn write_to(&mut self, exit: bool, forced: bool, target: &str) {
+        if target.is_empty() {
+            let save = match &self.opts().save {
+                Some(s) => s.clone(),
+                None => {
+                    self.notice = "save failed: no save target".to_string();
+                    return;
+                }
+            };
+            if let Err(e) = save(&self.doc()) {
+                self.notice = format!("save failed: {}", e);
+                return;
+            }
+            let f = self.fs_mut();
+            f.saved = true;
+            f.with_errors = forced;
+            f.baseline = Some(f.doc.clone()); // markers clear once saved
+            if exit {
+                self.exiting = true;
+                return;
+            }
+            if !self.opts().path.is_empty() {
+                self.notice = format!("Write to {}", self.opts().path);
+                return;
+            }
+            self.notice = "Saved".to_string();
+            return;
+        }
+        let write_to = match &self.opts().write_to {
+            Some(w) => w.clone(),
+            None => {
+                self.notice = "write failed: no write-to target".to_string();
+                return;
+            }
+        };
+        if let Err(e) = write_to(target, &self.doc()) {
+            self.notice = format!("write failed: {}", e);
+            return;
+        }
+        self.notice = format!("Wrote to {}", target);
+    }
+
+    /// The outcome of a finished session (Go: saveReport + flags).
+    pub fn outcome(&self) -> Outcome {
+        let (saved, forced, paths) = self.save_report();
+        Outcome {
+            saved,
+            with_errors: forced,
+            aborted: self.aborted,
+            unchanged: self.exiting && !saved,
+            saved_files: paths,
+            err: None,
+        }
+    }
+}
+
+/// same_state compares two menu states the way Go compared stack pointers:
+/// position identity, not value equality of frozen snapshots.
+pub fn same_state(a: &MenuState, b: &MenuState) -> bool {
+    a.node == b.node
+        && a.kind == b.kind
+        && a.variant_of == b.variant_of
+        && a.one_of == b.one_of
+        && a.path == b.path
+}
+
+/// nodesEqual over one arena with optional roots (Go nil *Node handling).
+pub fn nodes_equal(a: &Doc, ai: Option<NodeId>, b: &Doc, bi: Option<NodeId>) -> bool {
+    nodes_equal_opt(a, ai, b, bi)
+}
+
+/// Cross-document comparison (pre-snapshot vs live doc live in different
+/// arenas).
+pub fn nodes_equal_opt(a: &Doc, ai: Option<NodeId>, b: &Doc, bi: Option<NodeId>) -> bool {
+    match (ai, bi) {
+        (None, None) => true,
+        (Some(x), Some(y)) => nodes_equal_id(a, x, b, y),
+        _ => false,
+    }
+}
+
+/// Whole-document comparison (Go nodesEqual(m.doc, m.baseline)).
+pub fn nodes_equal_doc(a: &Doc, b: &Doc) -> bool {
+    nodes_equal_opt(a, Some(a.root), b, Some(b.root))
+}
+
+fn nodes_equal_id(a: &Doc, x: NodeId, b: &Doc, y: NodeId) -> bool {
+    let (da, db) = (a.node(x), b.node(y));
+    if da.anchor != db.anchor {
+        return false;
+    }
+    if !da.merge.is_empty() || !db.merge.is_empty() {
+        if da.merge.len() != db.merge.len() {
+            return false;
+        }
+        for i in 0..da.merge.len() {
+            if !nodes_equal_id(a, da.merge[i], b, db.merge[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+    match (&da.value, &db.value) {
+        (Value::Null, Value::Null) => true,
+        (Value::Null, _) | (_, Value::Null) => false,
+        (Value::Str(s1), Value::Str(s2)) => s1 == s2,
+        (Value::Str(_), _) | (_, Value::Str(_)) => false,
+        (Value::Num(n1), Value::Num(n2)) => n1 == n2,
+        (Value::Num(_), _) | (_, Value::Num(_)) => false,
+        (Value::Bool(v1), Value::Bool(v2)) => v1 == v2,
+        (Value::Bool(_), _) | (_, Value::Bool(_)) => false,
+        (Value::Object(m1), Value::Object(m2)) => {
+            if m1.len() != m2.len() {
+                return false;
+            }
+            // Go built a map here too: a linear find per member made wide
+            // objects quadratic (8 ms for a 2000-key object per keypress)
+            let by: std::collections::HashMap<&str, NodeId> =
+                m2.iter().map(|m| (m.key.as_str(), m.val)).collect();
+            for mem in m1 {
+                let Some(&bv) = by.get(mem.key.as_str()) else {
+                    return false;
+                };
+                if !nodes_equal_id(a, mem.val, b, bv) {
+                    return false;
+                }
+            }
+            true
+        }
+        (Value::Object(_), _) | (_, Value::Object(_)) => false,
+        (Value::Array(a1), Value::Array(a2)) => {
+            a1.len() == a2.len()
+                && a1
+                    .iter()
+                    .zip(a2.iter())
+                    .all(|(&x1, &x2)| nodes_equal_id(a, x1, b, x2))
+        }
+    }
+}
+
+/// issuesFrom parses validator messages into jumpable issues.
+pub fn issues_from(msgs: &[String]) -> Vec<Issue> {
+    msgs.iter()
+        .map(|s| Issue {
+            msg: s.clone(),
+            path: parse_issue(s),
+            flagged: crate::ui::rows::issue_flag_paths(s),
+            marks: Vec::new(),
+            warn: false,
+        })
+        .collect()
+}
+
+/// remapStateCursor moves st.cursor onto the same row after a row-set
+/// change. If that row was hidden, the next surviving row in the old order
+/// wins.
+pub fn remap_state_cursor(st: &mut MenuState, before: &[Row], after: &[Row]) {
+    if st.cursor < before.len() {
+        for i in st.cursor..before.len() {
+            if let Some(j) = index_same_row(after, &before[i]) {
+                st.cursor = j;
+                return;
+            }
+        }
+    }
+    let max = after.len().saturating_sub(1);
+    st.cursor = st.cursor.min(max);
+}
+
+/// indexSameRow finds the line same_menu_row identifies, None when gone.
+fn index_same_row(rows: &[Row], want: &Row) -> Option<usize> {
+    rows.iter().position(|r| same_menu_row(want, r))
+}
+
+/// sameMenuRow reports whether a and b are the same selectable line: kind,
+/// document position, schema node and label.
+pub fn same_menu_row(a: &Row, b: &Row) -> bool {
+    a.kind == b.kind
+        && a.idx == b.idx
+        && a.path == b.path
+        && a.fn_ == b.fn_
+        && a.variant == b.variant
+        && a.label == b.label
+}
+
+/// cursorPrefix marks the focused row, two cells wide.
+pub fn cursor_prefix(on: bool) -> &'static str {
+    if on { "> " } else { "  " }
+}
+
+/// isPathPrefix reports whether prefix is a prefix of path.
+pub fn is_path_prefix(prefix: &[PathSeg], path: &[PathSeg]) -> bool {
+    prefix.len() <= path.len() && prefix.iter().zip(path.iter()).all(|(a, b)| a == b)
+}
+
+/// cursorByPath finds the row for path: an exact match first, else the
+/// deepest row whose path is a prefix of it.
+pub fn cursor_by_path(rows: &[Row], path: &[PathSeg]) -> usize {
+    for (i, r) in rows.iter().enumerate() {
+        if !r.path.is_empty() && r.path == path {
+            return i;
+        }
+    }
+    let (mut best, mut bi) = (0usize, 0usize);
+    for (i, r) in rows.iter().enumerate() {
+        if !r.path.is_empty() && is_path_prefix(&r.path, path) && r.path.len() > best {
+            best = r.path.len();
+            bi = i;
+        }
+    }
+    bi
+}
+
+/// cursorForRow finds the row matching a search hit (same schema node at the
+/// same path, or the same variant); None when the target is a container
+/// whose menu we entered.
+pub fn cursor_for_row(rows: &[Row], res: &Row) -> Option<usize> {
+    for (i, r) in rows.iter().enumerate() {
+        if r.kind != RowKind::Variant
+            && res.kind != RowKind::Variant
+            && r.fn_ == res.fn_
+            && r.path == res.path
+        {
+            return Some(i);
+        }
+        if r.variant.is_some() && r.variant == res.variant {
+            return Some(i);
+        }
+    }
+    None
+}
+
+// --- merge/alias lookups feeding rows.rs (Go menu_merge.go / menu_alias.go) -----
+
+/// MergeLookup implements [`MergeView`] over the document's anchor state —
+/// Go hung these on the listModel; they are pure document walks here.
+pub struct MergeLookup<'a> {
+    pub doc: &'a Doc,
+}
+
+impl MergeView for MergeLookup<'_> {
+    fn alias_at(&self, path: &[PathSeg]) -> Option<String> {
+        // Go's listModel.aliasAt returns ok only for reference occurrences
+        // (menu_alias.go:64-67): the menu offers < Expand > on a reference,
+        // not on the anchor carrier itself.
+        alias_at(self.doc, path)
+            .filter(|(_, is_ref)| *is_ref)
+            .map(|(name, _)| name)
+    }
+
+    fn merged_keys(&self, st: &MenuState) -> Vec<MergedKey> {
+        merged_keys(self.doc, st)
+    }
+}
+
+/// anchorRole classifies the node at path: the anchor carrier ("&name") or a
+/// reference to one ("*name"). None when nothing there carries anchor
+/// identity. Returns (name, is_reference).
+pub fn anchor_role(doc: &Doc, path: &[PathSeg]) -> Option<(String, bool)> {
+    if path.is_empty() {
+        return None;
+    }
+    let n = doc.get(path)?;
+    let data = doc.node(n);
+    if data.anchor.is_empty() {
+        return None;
+    }
+    let holder = anchor_holder_path(doc, n);
+    let is_ref = holder.as_deref() != Some(path);
+    Some((data.anchor.clone(), is_ref))
+}
+
+/// aliasAt reports the anchor name when the node at path is a reference.
+pub fn alias_at(doc: &Doc, path: &[PathSeg]) -> Option<(String, bool)> {
+    let (name, is_ref) = anchor_role(doc, path)?;
+    Some((name, is_ref))
+}
+
+/// anchorHolderPath returns the first path in document order whose node is n
+/// (NodeId identity) — the location Write tags with the anchor.
+pub fn anchor_holder_path(doc: &Doc, n: NodeId) -> Option<Vec<PathSeg>> {
+    fn walk(doc: &Doc, cur: NodeId, path: &[PathSeg], n: NodeId) -> Option<Vec<PathSeg>> {
+        if cur == n {
+            return Some(path.to_vec());
+        }
+        match &doc.value(cur) {
+            Value::Object(mems) => {
+                for mem in mems {
+                    let mut p = path.to_vec();
+                    p.push(PathSeg::key(mem.key.clone()));
+                    if let Some(found) = walk(doc, mem.val, &p, n) {
+                        return Some(found);
+                    }
+                }
+                None
+            }
+            Value::Array(items) => {
+                for (i, &it) in items.iter().enumerate() {
+                    let mut p = path.to_vec();
+                    p.push(PathSeg::Idx(i));
+                    if let Some(found) = walk(doc, it, &p, n) {
+                        return Some(found);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+    walk(doc, doc.root, &[], n)
+}
+
+/// anchorDef is one anchor in document order: its name and carrier node.
+pub struct AnchorDef {
+    pub name: String,
+    pub node: NodeId,
+}
+
+/// anchorDefs lists the document's anchors: every distinct anchor name with
+/// the first node carrying it, in document order.
+pub fn anchor_defs(doc: &Doc) -> Vec<AnchorDef> {
+    let mut defs: Vec<AnchorDef> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    fn walk(
+        doc: &Doc,
+        cur: NodeId,
+        defs: &mut Vec<AnchorDef>,
+        seen: &mut std::collections::HashSet<String>,
+    ) {
+        let data = doc.node(cur);
+        if !data.anchor.is_empty() && seen.insert(data.anchor.clone()) {
+            defs.push(AnchorDef {
+                name: data.anchor.clone(),
+                node: cur,
+            });
+        }
+        match &data.value {
+            Value::Object(mems) => {
+                for mem in mems {
+                    walk(doc, mem.val, defs, seen);
+                }
+            }
+            Value::Array(items) => {
+                for &it in items {
+                    walk(doc, it, defs, seen);
+                }
+            }
+            _ => {}
+        }
+    }
+    walk(doc, doc.root, &mut defs, &mut seen);
+    defs
+}
+
+/// anchorHolder returns the first node carrying the anchor name, if any.
+pub fn anchor_holder<'a>(doc: &'a Doc, name: &str) -> Option<NodeId> {
+    anchor_defs(doc)
+        .into_iter()
+        .find(|d| d.name == name)
+        .map(|d| d.node)
+}
+
+/// countAnchorUses counts how many document locations hold the node: the
+/// carrier plus every reference to it.
+pub fn count_anchor_uses(doc: &Doc, n: NodeId) -> usize {
+    fn walk(doc: &Doc, cur: NodeId, n: NodeId, count: &mut usize) {
+        if cur == n {
+            // shared node: its subtree is visited once per reference
+            *count += 1;
+            return;
+        }
+        match &doc.value(cur) {
+            Value::Object(mems) => {
+                for mem in mems {
+                    walk(doc, mem.val, n, count);
+                }
+            }
+            Value::Array(items) => {
+                for &it in items {
+                    walk(doc, it, n, count);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut count = 0;
+    walk(doc, doc.root, n, &mut count);
+    count
+}
+
+/// refWouldCycle reports whether pointing path at target would nest the
+/// anchor inside itself: the target must not be one of the value's
+/// ancestors (the value being replaced itself may become the target — that
+/// is fine).
+pub fn ref_would_cycle(doc: &Doc, path: &[PathSeg], target: NodeId) -> bool {
+    for k in 0..=path.len() {
+        if let Some(n) = doc.get(&path[..k]) {
+            if n == target {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// mergeRefUses counts the merge-key members anywhere in the document
+/// (anchor subtrees included) whose merge list references n.
+pub fn merge_ref_uses(doc: &Doc, n: NodeId) -> usize {
+    fn walk(
+        doc: &Doc,
+        cur: NodeId,
+        n: NodeId,
+        on_path: &mut std::collections::HashSet<NodeId>,
+        count: &mut usize,
+    ) {
+        if !on_path.insert(cur) {
+            return;
+        }
+        for &r in &doc.node(cur).merge {
+            if r == n {
+                *count += 1;
+            }
+        }
+        match &doc.value(cur) {
+            Value::Object(mems) => {
+                for mem in mems {
+                    walk(doc, mem.val, n, on_path, count);
+                }
+            }
+            Value::Array(items) => {
+                for &it in items {
+                    walk(doc, it, n, on_path, count);
+                }
+            }
+            _ => {}
+        }
+        on_path.remove(&cur);
+    }
+    let mut count = 0;
+    let mut on_path = std::collections::HashSet::new();
+    walk(doc, doc.root, n, &mut on_path, &mut count);
+    count
+}
+
+/// mergeSourceFor resolves one merge reference into (name, holder path,
+/// node). Unreachable references (their anchor was deleted) drop out.
+fn merge_source_for(doc: &Doc, r: NodeId) -> Option<(String, Vec<PathSeg>, NodeId)> {
+    let data = doc.node(r);
+    if data.anchor.is_empty() || !matches!(doc.value(r), Value::Object(_)) {
+        return None;
+    }
+    let holder = anchor_holder_path(doc, r)?;
+    Some((data.anchor.clone(), holder, r))
+}
+
+/// mergedKeys lists the merged keys of the mapping at st.path in merge order
+/// with YAML precedence applied: keys the mapping defines itself, and keys
+/// an earlier anchor already provided, shadow the later ones.
+pub fn merged_keys(doc: &Doc, st: &MenuState) -> Vec<MergedKey> {
+    let Some(n) = doc.get(&st.path) else {
+        return Vec::new();
+    };
+    let Some(Value::Object(mems)) = doc.value_opt(n) else {
+        return Vec::new();
+    };
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for mem in mems {
+        if doc.node(mem.val).merge.is_empty() {
+            seen.insert(mem.key.clone());
+        }
+    }
+    let mut out: Vec<MergedKey> = Vec::new();
+    for r in doc.merge_refs(n) {
+        let Some((_, holder, node)) = merge_source_for(doc, r) else {
+            continue;
+        };
+        // the anchor's resolved members: its own keys plus whatever its own
+        // "<<" chain provides, with the anchor's own keys winning
+        for mem in doc.resolved_members(node) {
+            if seen.contains(&mem.key) {
+                continue;
+            }
+            seen.insert(mem.key.clone());
+            // inherited keys live in the mapping that actually defines them:
+            // the badge, the breadcrumb and edits follow that source
+            let mut busy = std::collections::HashSet::new();
+            let (def_holder, def_node) =
+                merge_defining_source(doc, (holder.clone(), node), &mem.key, &mut busy)
+                    .unwrap_or((holder.clone(), node));
+            let mut path = def_holder;
+            path.push(PathSeg::key(mem.key.clone()));
+            // Go's mergedKey src is the defining source, so the badge names
+            // the anchor that actually holds the value (menu_merge.go:89).
+            out.push(MergedKey {
+                key: mem.key,
+                path,
+                src_name: doc.node(def_node).anchor.clone(),
+            });
+        }
+    }
+    out
+}
+
+type MergeSource = (Vec<PathSeg>, NodeId);
+
+/// mergeDefiningSource finds the mapping that defines key for the merge
+/// source src: the mapping itself when it defines it, else the first mapping
+/// its own merge keys pull the key from (YAML precedence: own keys win,
+/// earlier anchors before later ones).
+fn merge_defining_source(
+    doc: &Doc,
+    src: MergeSource,
+    key: &str,
+    busy: &mut std::collections::HashSet<NodeId>,
+) -> Option<MergeSource> {
+    let (path, node) = src;
+    if !busy.insert(node) {
+        return None;
+    }
+    let result = (|| {
+        if let Some(Value::Object(mems)) = doc.value_opt(node) {
+            for mem in mems {
+                if doc.node(mem.val).merge.is_empty() && mem.key == key {
+                    return Some((path, node));
+                }
+            }
+        }
+        for r in doc.merge_refs(node) {
+            if let Some(sub) = merge_source_for(doc, r) {
+                if let Some(got) = merge_defining_source(doc, (sub.1, r), key, busy) {
+                    return Some(got);
+                }
+            }
+        }
+        None
+    })();
+    busy.remove(&node);
+    result
+}
+
+/// anchorMergeUsePaths lists every document location that uses the anchor
+/// node n, in document order: the paths holding it directly (the carrier
+/// and each alias occurrence) plus the paths of the mappings whose merge
+/// keys reference it.
+pub fn anchor_merge_use_paths(doc: &Doc, n: NodeId) -> Vec<Vec<PathSeg>> {
+    let mut paths: Vec<Vec<PathSeg>> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut on_path: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+    fn add(
+        paths: &mut Vec<Vec<PathSeg>>,
+        seen: &mut std::collections::HashSet<String>,
+        p: &[PathSeg],
+    ) {
+        if seen.insert(path_string(p)) {
+            paths.push(p.to_vec());
+        }
+    }
+    fn walk(
+        doc: &Doc,
+        cur: NodeId,
+        path: &[PathSeg],
+        n: NodeId,
+        on_path: &mut std::collections::HashSet<NodeId>,
+        paths: &mut Vec<Vec<PathSeg>>,
+        seen: &mut std::collections::HashSet<String>,
+    ) {
+        if !on_path.insert(cur) {
+            return;
+        }
+        if cur == n {
+            // the shared node itself: its subtree belongs to the anchor's
+            // own definition, not to this occurrence
+            add(paths, seen, path);
+            on_path.remove(&cur);
+            return;
+        }
+        if doc.merge_refs(cur).iter().any(|&r| r == n) {
+            add(paths, seen, path);
+        }
+        match &doc.value(cur) {
+            Value::Object(mems) => {
+                for mem in mems {
+                    let mut p = path.to_vec();
+                    p.push(PathSeg::key(mem.key.clone()));
+                    walk(doc, mem.val, &p, n, on_path, paths, seen);
+                }
+            }
+            Value::Array(items) => {
+                for (i, &it) in items.iter().enumerate() {
+                    let mut p = path.to_vec();
+                    p.push(PathSeg::Idx(i));
+                    walk(doc, it, &p, n, on_path, paths, seen);
+                }
+            }
+            _ => {}
+        }
+        on_path.remove(&cur);
+    }
+    walk(doc, doc.root, &[], n, &mut on_path, &mut paths, &mut seen);
+    paths
+}
+
+/// Deep-copies a node from `src` into `doc` (Go handed schema-document
+/// nodes and parsed paste documents to doc.Set directly; the arena model
+/// copies across arenas). Anchors and merge refs ride along.
+pub fn copy_from_doc(doc: &mut Doc, src: &Doc, id: NodeId) -> NodeId {
+    let data = src.node(id);
+    let value = match &data.value {
+        Value::Object(mems) => Value::Object(
+            mems.iter()
+                .map(|m| crate::doc::Member {
+                    key: m.key.clone(),
+                    val: copy_from_doc(doc, src, m.val),
+                })
+                .collect(),
+        ),
+        Value::Array(items) => {
+            Value::Array(items.iter().map(|&i| copy_from_doc(doc, src, i)).collect())
+        }
+        v => v.clone(),
+    };
+    let merge = data
+        .merge
+        .iter()
+        .map(|&m| copy_from_doc(doc, src, m))
+        .collect();
+    doc.push(crate::doc::NodeData {
+        value,
+        anchor: data.anchor.clone(),
+        merge,
+    })
+}
+
+/// cloneDetached across arenas: Go's jsondoc.Node.CloneDetached (used by
+/// paste: internal/ui/menu_paste.go:400,411,421 and the single-value path
+/// at :72). Merge members are resolved into plain members and anchor
+/// identity is dropped, so pasted content never shares nodes or anchors
+/// with the source.
+pub fn copy_detached_from_doc(doc: &mut Doc, src: &Doc, id: NodeId) -> NodeId {
+    let value = match &src.node(id).value {
+        Value::Object(_) => Value::Object(
+            src.resolved_members(id)
+                .into_iter()
+                .map(|m| crate::doc::Member {
+                    key: m.key,
+                    val: copy_detached_from_doc(doc, src, m.val),
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|&i| copy_detached_from_doc(doc, src, i))
+                .collect(),
+        ),
+        v => v.clone(),
+    };
+    doc.push(crate::doc::NodeData {
+        value,
+        anchor: String::new(),
+        merge: Vec::new(),
+    })
+}
+
+// --- terminal plumbing -------------------------------------------------------
+
+fn key_event_to_msg(key: KeyEvent) -> Option<Msg> {
+    if key.kind != KeyEventKind::Press {
+        return None;
+    }
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    match key.code {
+        KeyCode::Char(c) => {
+            if ctrl {
+                Some(Msg::Ctrl(c.to_ascii_lowercase()))
+            } else {
+                Some(Msg::Char(c, alt))
+            }
+        }
+        KeyCode::Esc => Some(Msg::Esc),
+        KeyCode::Enter => Some(Msg::Enter),
+        KeyCode::Tab => Some(Msg::Tab),
+        KeyCode::BackTab => Some(Msg::BackTab),
+        KeyCode::Backspace => Some(Msg::Backspace),
+        KeyCode::Delete => Some(Msg::Delete),
+        KeyCode::Up => Some(Msg::Up),
+        KeyCode::Down => Some(Msg::Down),
+        KeyCode::Left => Some(Msg::Left),
+        KeyCode::Right => Some(Msg::Right),
+        KeyCode::Home => Some(Msg::Home),
+        KeyCode::End => Some(Msg::End),
+        _ => None,
+    }
+}
+
+/// run_menu drives the whole interactive TUI session: crossterm raw mode +
+/// alternate screen, the render/poll loop, and the exit outcome.
+pub fn run_menu(files: Vec<FileSession>) -> Outcome {
+    let mut app = App::new(files);
+    app.exec_editor = true;
+    let mut stdout = std::io::stdout();
+    let _ = crossterm::terminal::enable_raw_mode();
+    // bubbletea delivers an initial WindowSizeMsg; crossterm does not, so the
+    // first frame must query the pty size explicitly (otherwise it renders at
+    // the 80x24 default).
+    if let Ok((w, h)) = crossterm::terminal::size() {
+        app.width = w as usize;
+        app.height = h as usize;
+    }
+    let _ = execute!(
+        stdout,
+        crossterm::terminal::EnterAlternateScreen,
+        crossterm::event::EnableBracketedPaste,
+        crossterm::cursor::Hide
+    );
+    // render on events only: the old loop repainted every poll timeout, so
+    // an idle session burned CPU building every menu row 4x a second
+    render(&mut stdout, &mut app);
+    loop {
+        let mut redraw = false;
+        if crossterm::event::poll(std::time::Duration::from_millis(250)).unwrap_or(false) {
+            match crossterm::event::read() {
+                Ok(Event::Key(k)) => {
+                    if let Some(msg) = key_event_to_msg(k) {
+                        app.update(msg);
+                        app.run_pending_editor();
+                        redraw = true;
+                    }
+                }
+                Ok(Event::Resize(w, h)) => {
+                    app.width = w as usize;
+                    app.height = h as usize;
+                    redraw = true;
+                }
+                Ok(Event::Paste(s)) => {
+                    app.update(Msg::Paste(s));
+                    redraw = true;
+                }
+                _ => {}
+            }
+        }
+        if redraw {
+            render(&mut stdout, &mut app);
+        }
+        if app.aborted || app.exiting {
+            break;
+        }
+    }
+    let _ = execute!(
+        stdout,
+        crossterm::cursor::Show,
+        crossterm::event::DisableBracketedPaste,
+        crossterm::terminal::LeaveAlternateScreen
+    );
+    let _ = crossterm::terminal::disable_raw_mode();
+    app.outcome()
+}
+
+/// render paints one frame: MoveTo(0,0), every view line + clear-to-EOL,
+/// then clear the remaining lines.
+fn render(w: &mut impl std::io::Write, app: &mut App) {
+    let view = app.view();
+    write_frame(w, &view, app.height);
+}
+
+/// write_frame paints at most `height` lines: a view that outgrows the
+/// terminal (raw editor on a large file) must not flood it line by line.
+fn write_frame(w: &mut impl std::io::Write, view: &str, height: usize) {
+    use crossterm::cursor::MoveTo;
+    use crossterm::style::Print;
+    use crossterm::terminal::{Clear, ClearType};
+    let _ = execute!(w, MoveTo(0, 0));
+    let mut lines = 0;
+    for line in view.split('\n') {
+        if lines >= height {
+            break;
+        }
+        let _ = execute!(w, Print(line), Clear(ClearType::UntilNewLine));
+        if lines + 1 < height {
+            let _ = execute!(w, Print("\r\n"));
+        }
+        lines += 1;
+    }
+    let _ = execute!(w, Clear(ClearType::FromCursorDown));
+}
+
+// --- clipboard shell-outs (Go atotto/clipboard fallback) ---------------------
+
+/// Which platform-specific clipboard helpers exist.
+fn tool_in_path(tool: &str) -> bool {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(tool))
+        .any(|p| p.is_file())
+}
+
+fn feed_tool(tool: &str, args: &[&str], text: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(tool)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|e| e.to_string())?;
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{} exited with {}", tool, status))
+    }
+}
+
+fn read_tool(tool: &str, args: &[&str]) -> Result<String, String> {
+    use std::process::Command;
+    let out = Command::new(tool)
+        .args(args)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!("{} exited with {}", tool, out.status));
+    }
+    String::from_utf8(out.stdout).map_err(|e| e.to_string())
+}
+
+/// write_clipboard is the Go `clipboard.WriteAll` fallback used when
+/// opts.Copy is unset: shell out to the first present helper (Linux
+/// wl-copy → xclip → xsel; macOS pbcopy; Windows clip).
+pub fn write_clipboard(text: &str) -> Result<(), String> {
+    if cfg!(target_os = "macos") {
+        if tool_in_path("pbcopy") {
+            return feed_tool("pbcopy", &[], text);
+        }
+    } else if cfg!(target_os = "windows") {
+        if tool_in_path("clip") {
+            return feed_tool("clip", &[], text);
+        }
+    } else {
+        if tool_in_path("wl-copy") {
+            return feed_tool("wl-copy", &[], text);
+        }
+        if tool_in_path("xclip") {
+            return feed_tool("xclip", &["-selection", "clipboard"], text);
+        }
+        if tool_in_path("xsel") {
+            return feed_tool("xsel", &["--clipboard", "--input"], text);
+        }
+    }
+    Err("clipboard: no clipboard tool found".to_string())
+}
+
+/// read_clipboard is the Go `clipboard.ReadAll` fallback (opts.Paste
+/// unset). Windows has no paste helper in the atotto set.
+pub fn read_clipboard() -> Result<String, String> {
+    if cfg!(target_os = "macos") {
+        if tool_in_path("pbpaste") {
+            return read_tool("pbpaste", &[]);
+        }
+    } else if cfg!(target_os = "windows") {
+        return Err("clipboard: cannot read without paste support".to_string());
+    } else {
+        if tool_in_path("wl-paste") {
+            return read_tool("wl-paste", &["--no-newline"]);
+        }
+        if tool_in_path("xclip") {
+            return read_tool("xclip", &["-selection", "clipboard", "-o"]);
+        }
+        if tool_in_path("xsel") {
+            return read_tool("xsel", &["--clipboard", "--output"]);
+        }
+    }
+    Err("clipboard: no clipboard tool found".to_string())
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::write_frame;
+
+    #[test]
+    fn write_frame_stops_at_the_terminal_height() {
+        let view = (0..50).map(|i| format!("l{i}\r\n")).collect::<String>();
+        let mut out: Vec<u8> = Vec::new();
+        write_frame(&mut out, &view, 4);
+        let text = String::from_utf8_lossy(&out);
+        for i in 0..4 {
+            assert!(text.contains(&format!("l{i}")), "line {i} missing");
+        }
+        assert!(
+            !text.contains("l4"),
+            "lines past the height must not be painted"
+        );
+    }
+}

@@ -1,0 +1,68 @@
+{
+  "$schema": "http://json.schemastore.org/catalog.json",
+  "version": 1.0,
+  "schemas": [
+    {
+      "name": "Package",
+      "description": "package.json schema",
+      "url": "https://example.org/package.json",
+      "fileMatch": ["package.json"]
+    },
+    {
+      "name": "NoMatchEntry",
+      "description": "no fileMatch at all",
+      "url": "https://example.org/nomatch.json"
+    },
+    {
+      "name": "Tsconfig",
+      "description": "TypeScript compiler configuration",
+      "url": "https://example.org/tsconfig.json",
+      "fileMatch": ["tsconfig*.json"]
+    },
+    {
+      "name": "Srv",
+      "description": "service descriptor",
+      "url": "https://example.org/srv.json",
+      "fileMatch": ["*.srv.json"]
+    },
+    {
+      "name": "CDF",
+      "description": "cdf config",
+      "url": "https://example.org/cdf.json",
+      "fileMatch": ["**/.cdf/config.yaml"]
+    },
+    {
+      "name": "Platform",
+      "description": "platform application descriptor",
+      "url": "https://example.org/platform.json",
+      "fileMatch": [".platform/applications.yml"]
+    },
+    {
+      "name": "AliasA",
+      "description": "alias listing one",
+      "url": "https://example.org/shared.json",
+      "fileMatch": ["one.json"]
+    },
+    {
+      "name": "AliasB",
+      "description": "alias listing two, same URL",
+      "url": "https://example.org/shared.json",
+      "fileMatch": ["two.json", "one.json"]
+    },
+    {
+      "name": "Versioned",
+      "description": "has per-version URLs",
+      "url": "https://example.org/versioned.json",
+      "fileMatch": ["versioned.json"],
+      "versions": [
+        { "version": "1.0", "url": "https://example.org/versioned-1.0.json" },
+        { "version": "2.0", "url": "https://example.org/versioned-2.0.json" }
+      ]
+    },
+    {
+      "name": "NoURL",
+      "description": "missing url must be skipped",
+      "fileMatch": ["nourl.json"]
+    }
+  ]
+}

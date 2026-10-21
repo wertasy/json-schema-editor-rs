@@ -1,0 +1,127 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
+name: release
+on:
+  push:
+    tags:
+      - v*
+permissions:
+  contents: write
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            pkg_os: linux
+            pkg_arch: amd64
+            bin: jse
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            pkg_os: linux
+            pkg_arch: arm64
+            bin: jse
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            pkg_os: darwin
+            pkg_arch: amd64
+            bin: jse
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            pkg_os: darwin
+            pkg_arch: arm64
+            bin: jse
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            pkg_os: windows
+            pkg_arch: amd64
+            bin: jse.exe
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            pkg_os: windows
+            pkg_arch: arm64
+            bin: jse.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: musl toolchain (linux targets)
+        if: startsWith(matrix.target, 'x86_64-unknown-linux-musl') || startsWith(matrix.target, 'aarch64-unknown-linux-musl')
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
+            sudo apt-get install -y musl-tools
+          else
+            sudo apt-get install -y gcc-aarch64-linux-gnu musl-tools
+          fi
+      - name: Linker configuration (linux targets)
+        if: startsWith(matrix.target, 'x86_64-unknown-linux-musl') || startsWith(matrix.target, 'aarch64-unknown-linux-musl')
+        run: |
+          set -euo pipefail
+          mkdir -p .cargo
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
+            echo '[target.x86_64-unknown-linux-musl]' >> .cargo/config.toml
+            echo 'linker = "musl-gcc"' >> .cargo/config.toml
+            echo 'CC_x86_64_unknown_linux_musl = "musl-gcc"' >> .cargo/config.toml
+          else
+            echo '[target.aarch64-unknown-linux-musl]' >> .cargo/config.toml
+            echo 'linker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml
+            echo 'CC_aarch64_unknown_linux_musl = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml
+          fi
+      - name: Test
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: cargo test
+      - name: Version metadata
+        shell: bash
+        run: |
+          echo "JSE_VERSION_OVERRIDE=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          echo "JSE_COMMIT=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          echo "JSE_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          pkg="jse-${GITHUB_REF_NAME}-${{ matrix.pkg_os }}-${{ matrix.pkg_arch }}"
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" dist/
+          cp README.md LICENSE dist/
+          if [ "${{ matrix.pkg_os }}" = windows ]; then
+            (cd dist && zip -q "${pkg}.zip" "${{ matrix.bin }}" README.md LICENSE \
+              && rm "${{ matrix.bin }}" README.md LICENSE)
+          else
+            (cd dist && tar -czf "${pkg}.tar.gz" "${{ matrix.bin }}" README.md LICENSE \
+              && rm "${{ matrix.bin }}" README.md LICENSE)
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jse-${{ matrix.pkg_os }}-${{ matrix.pkg_arch }}
+          path: dist/*
+          if-no-files-found: error
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum jse-* > checksums.txt
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --generate-notes --title "${GITHUB_REF_NAME}"

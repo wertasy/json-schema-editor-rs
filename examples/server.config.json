@@ -1,0 +1,18 @@
+{
+  "$schema": "server.schema.json",
+  "name": "demo",
+  "mode": "quic",
+  "server": {
+    "port": 8080,
+    "host": "localhost",
+    "debug": true
+  },
+  "logging": {
+    "levels": ["info"],
+    "tags": ["legacy"]
+  },
+  "mounts": [
+    {"src": "/data", "dst": "/mnt/data"}
+  ],
+  "extra_unknown_key": 42
+}
