@@ -93,8 +93,8 @@ jobs:
           cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" dist/
           cp README.md LICENSE dist/
           if [ "${{ matrix.pkg_os }}" = windows ]; then
-            (cd dist && zip -q "${pkg}.zip" "${{ matrix.bin }}" README.md LICENSE \
-              && rm "${{ matrix.bin }}" README.md LICENSE)
+            powershell -NoProfile -Command "Compress-Archive -Path 'dist/${{ matrix.bin }}','dist/README.md','dist/LICENSE' -DestinationPath 'dist/${pkg}.zip' -Force"
+            rm "dist/${{ matrix.bin }}" dist/README.md dist/LICENSE
           else
             (cd dist && tar -czf "${pkg}.tar.gz" "${{ matrix.bin }}" README.md LICENSE \
               && rm "${{ matrix.bin }}" README.md LICENSE)
