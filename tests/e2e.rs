@@ -1569,6 +1569,59 @@ fn pty_search_array_variant_elements_jump() {
 }
 
 #[test]
+fn pty_search_jump_schema_less() {
+    // No schema: Enter on a deep hit must rebuild the runtime menus (object
+    // value, array items) and land on the actual row.
+    let dir = mktemp();
+    let cfg = dir.path().join("cfg.json");
+    write_file(
+        &cfg,
+        r#"{"server":{"port":8080,"host":"localhost"},"tags":["alpha","beta"],"arr":[{"name":"deep"}]}"#,
+    );
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(
+        &[&cfg_arg],
+        &[("JSE_CATALOG_URL", "http://127.0.0.1:1/catalog.json")],
+        &cache,
+    ) else {
+        return;
+    };
+
+    pty.wait_frame("root menu", 0, &["Save and exit", "no schema found"]);
+    pty.send(b"/");
+    let (_, mut off) = pty.wait_frame("search", 0, &["search: "]);
+    pty.send(b"port");
+    (_, off) = pty.wait_frame("port hit", off, &["$.server.port  8080"]);
+    pty.send(b"\r");
+    (_, off) = pty.wait_frame("server menu on port", off, &["$.server", "> port"]);
+
+    pty.send(b"\x1b"); // reopen the search list
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\x1b"); // close it, back to the root
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"/");
+    (_, off) = pty.wait_frame("second search", off, &["search: "]);
+    pty.send(b"beta");
+    (_, off) = pty.wait_frame("array item hit", off, &["$.tags[1]  beta"]);
+    pty.send(b"\r");
+    (_, off) = pty.wait_frame("items menu on tags[1]", off, &["$.tags", "> tags[1]"]);
+
+    pty.send(b"\x1b");
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\x1b");
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"/");
+    (_, off) = pty.wait_frame("third search", off, &["search: "]);
+    pty.send(b"deep");
+    (_, off) = pty.wait_frame("nested hit", off, &["$.arr[0].name  deep"]);
+    pty.send(b"\r");
+    pty.wait_frame("item field menu on name", off, &["$.arr[0]", "> name"]);
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+}
+
+#[test]
 fn pty_quit_save_prompt() {
     let dir = mktemp();
     let schema = dir.path().join("mini.schema.json");

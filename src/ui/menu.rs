@@ -1636,6 +1636,16 @@ pub fn cursor_for_row(rows: &[Row], res: &Row) -> Option<usize> {
                 return Some(i);
             }
         }
+        // Schema-less rows carry no schema node, while the menu row for an
+        // array item carries the runtime (any-type) node: the path alone
+        // identifies the value.
+        if res.kind == RowKind::Unknown {
+            for (i, r) in rows.iter().enumerate() {
+                if !r.path.is_empty() && r.path == res.path {
+                    return Some(i);
+                }
+            }
+        }
     }
     for (i, r) in rows.iter().enumerate() {
         if r.variant.is_some() && r.variant == res.variant {

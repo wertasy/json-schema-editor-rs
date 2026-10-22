@@ -1589,9 +1589,47 @@ pub fn rebuild_stack(schema: &mut Schema, doc: &Doc, path: &[PathSeg]) -> Vec<Me
         }
     }
     let root = schema.root;
+    let mut synth: HashMap<SynthKey, FormNodeId> = HashMap::new();
     let mut stack = vec![state(menu_kind_for(schema, root), root, Vec::new())];
     let mut cur = root;
     let mut cur_path: Vec<PathSeg> = Vec::new();
+
+    /// raw_runtime reports whether Enter on this raw row opens the runtime
+    /// editor (any-type menus) rather than the raw textarea.
+    fn raw_runtime(schema: &Schema, f: FormNodeId) -> bool {
+        let n = &schema.nodes[f as usize];
+        n.kind == Kind::Raw && !n.null_only && !n.raw_editor
+    }
+
+    /// runtime_descend pushes the schema-less Object/Array editor for the
+    /// document value at path — the menu Enter would open for an unknown
+    /// key, a raw leaf, or an array item without a schema type.
+    fn runtime_descend(
+        schema: &mut Schema,
+        synth: &mut HashMap<SynthKey, FormNodeId>,
+        doc: &Doc,
+        stack: &mut Vec<MenuState>,
+        path: &[PathSeg],
+    ) -> Option<FormNodeId> {
+        let want = match doc.get(path).map(|v| doc.value(v)) {
+            Some(Value::Object(_)) => Kind::Object,
+            Some(Value::Array(_)) => Kind::Array,
+            _ => return None,
+        };
+        let any = any_type_menu(schema, synth);
+        let node = schema.nodes[any as usize]
+            .variants
+            .iter()
+            .copied()
+            .find(|&v| {
+                let n = &schema.nodes[v as usize];
+                n.key.is_empty() && n.kind == want
+            })?;
+        let kind = menu_kind_for(schema, node);
+        stack.push(state(kind, node, path.to_vec()));
+        Some(node)
+    }
+
     for seg in path {
         match seg {
             PathSeg::Key(s) => {
@@ -1603,15 +1641,25 @@ pub fn rebuild_stack(schema: &mut Schema, doc: &Doc, path: &[PathSeg]) -> Vec<Me
                     }
                     let variant = schema.nodes[cur as usize].variants[idx as usize];
                     if menu_leaf(schema, variant) {
-                        return stack;
+                        // A raw variant still opens the runtime editor for a
+                        // container value; scalars edit in place.
+                        if !raw_runtime(schema, variant) {
+                            return stack;
+                        }
+                        match runtime_descend(schema, &mut synth, doc, &mut stack, &cur_path) {
+                            Some(node) => cur = node,
+                            None => return stack,
+                        }
+                    } else {
+                        let kind = menu_kind_for(schema, variant);
+                        let mut st = state(kind, variant, cur_path.clone());
+                        st.one_of = Some(cur);
+                        stack.push(st);
+                        cur = variant;
                     }
-                    let kind = menu_kind_for(schema, variant);
-                    let mut st = state(kind, variant, cur_path.clone());
-                    st.one_of = Some(cur);
-                    stack.push(st);
-                    cur = variant;
                 }
                 let node_kind = schema.nodes[cur as usize].kind;
+                let cpath = path_for(&cur_path, s);
                 let child = if node_kind == Kind::Object {
                     schema.nodes[cur as usize]
                         .children
@@ -1621,20 +1669,32 @@ pub fn rebuild_stack(schema: &mut Schema, doc: &Doc, path: &[PathSeg]) -> Vec<Me
                 } else if node_kind == Kind::Map {
                     // any doc key resolves against the map's value schema
                     let items = schema.nodes[cur as usize].items;
-                    match (items, doc.get(&path_for(&cur_path, s))) {
-                        (Some(items), Some(v)) => {
-                            let _ = v;
-                            Some(items)
-                        }
+                    match (items, doc.get(&cpath)) {
+                        (Some(items), Some(_)) => Some(items),
                         _ => None,
                     }
                 } else {
                     None
                 };
                 let Some(child) = child else {
+                    // A document key with no schema node (schema-less file or
+                    // a key the schema does not define): Enter on its row
+                    // opens the runtime editor, so the jump descends the same
+                    // way through objects and arrays.
+                    if node_kind == Kind::Object {
+                        if let Some(node) =
+                            runtime_descend(schema, &mut synth, doc, &mut stack, &cpath)
+                        {
+                            cur = node;
+                            cur_path = cpath;
+                            continue;
+                        }
+                        if doc.get(&cpath).is_some() {
+                            return stack; // scalar row lives in this menu
+                        }
+                    }
                     continue; // extra key without schema: skip the segment
                 };
-                let cpath = path_for(&cur_path, s);
                 if schema.nodes[child as usize].kind == Kind::OneOf {
                     // an existing value edits its variant directly; the
                     // picker stays one t away
@@ -1652,31 +1712,69 @@ pub fn rebuild_stack(schema: &mut Schema, doc: &Doc, path: &[PathSeg]) -> Vec<Me
                                     cur_path = cpath;
                                     continue;
                                 }
+                                // A raw leaf variant opens the runtime editor
+                                // for a container value; other leaf variants
+                                // keep their row in the current menu.
+                                if raw_runtime(schema, variant) {
+                                    if let Some(node) =
+                                        runtime_descend(schema, &mut synth, doc, &mut stack, &cpath)
+                                    {
+                                        cur = node;
+                                        cur_path = cpath;
+                                        continue;
+                                    }
+                                }
+                                return stack;
                             }
                         }
                     }
                 }
-                if !menu_leaf(schema, child) {
-                    let kind = menu_kind_for(schema, child);
-                    stack.push(state(kind, child, cpath.clone()));
-                } else {
+                if menu_leaf(schema, child) {
+                    if raw_runtime(schema, child) {
+                        if let Some(node) =
+                            runtime_descend(schema, &mut synth, doc, &mut stack, &cpath)
+                        {
+                            cur = node;
+                            cur_path = cpath;
+                            continue;
+                        }
+                    }
                     return stack; // leaf row lives in the current top menu
                 }
+                let kind = menu_kind_for(schema, child);
+                stack.push(state(kind, child, cpath.clone()));
                 cur = child;
                 cur_path = cpath;
             }
             PathSeg::Idx(s) => {
+                let ipath = path_idx(&cur_path, *s);
                 let items = match schema.nodes[cur as usize].kind {
                     Kind::Array => schema.nodes[cur as usize].items,
                     _ => None,
                 };
                 let Some(items) = items else {
+                    // No element schema: a container item's row opens the
+                    // runtime editor, so descend the same way.
+                    if let Some(node) = runtime_descend(schema, &mut synth, doc, &mut stack, &ipath)
+                    {
+                        cur = node;
+                        cur_path = ipath;
+                        continue;
+                    }
                     return stack;
                 };
                 if menu_leaf(schema, items) {
+                    if raw_runtime(schema, items) {
+                        if let Some(node) =
+                            runtime_descend(schema, &mut synth, doc, &mut stack, &ipath)
+                        {
+                            cur = node;
+                            cur_path = ipath;
+                            continue;
+                        }
+                    }
                     return stack; // scalar item rows live in the array menu
                 }
-                let ipath = path_idx(&cur_path, *s);
                 if schema.nodes[items as usize].kind == Kind::OneOf {
                     if let Some(variants) = dynamic_variants(schema, items) {
                         let ival = doc.get(&ipath);
@@ -1703,6 +1801,15 @@ pub fn rebuild_stack(schema: &mut Schema, doc: &Doc, path: &[PathSeg]) -> Vec<Me
                     if matches!(ival, Some(v) if !is_null(doc, v)) {
                         if let Some(variant) = matched_leaf_variant(schema, items, doc, ival) {
                             if menu_leaf(schema, variant) {
+                                if raw_runtime(schema, variant) {
+                                    if let Some(node) =
+                                        runtime_descend(schema, &mut synth, doc, &mut stack, &ipath)
+                                    {
+                                        cur = node;
+                                        cur_path = ipath;
+                                        continue;
+                                    }
+                                }
                                 return stack;
                             }
                             let kind = menu_kind_for(schema, variant);
@@ -5175,5 +5282,47 @@ mod tests {
             labels.contains(&"$.ids[0]  x") && labels.contains(&"$.ids[1]  y"),
             "multi-match array variant elements missing: {labels:?}"
         );
+    }
+
+    #[test]
+    fn test_rebuild_stack_schema_less() {
+        // The runtime menus Enter opens for unknown values are the ones a
+        // jump must rebuild, or a schema-less search hit lands only on the
+        // top-level key.
+        let doc = dbuild(|db| {
+            db.obj(vec![
+                ("server", db.obj(vec![("port", db.n("8080"))])),
+                ("tags", db.arr(vec![db.s("alpha"), db.s("beta")])),
+                ("arr", db.arr(vec![db.obj(vec![("name", db.s("deep"))])])),
+            ])
+        });
+        let mut schema = crate::smodel::untyped(&doc);
+
+        // object member: jump target is the member row in the value's menu
+        let stx = rebuild_stack(
+            &mut schema,
+            &doc,
+            &[PathSeg::key("server"), PathSeg::key("port")],
+        );
+        assert_eq!(stx.len(), 2);
+        assert_eq!(stx[1].kind, MenuKind::Object);
+        assert_eq!(stx[1].path, vec![PathSeg::key("server")]);
+        assert_eq!(schema.nodes[stx[1].node as usize].kind, Kind::Object);
+
+        // array item: the runtime items menu
+        let stx = rebuild_stack(&mut schema, &doc, &[PathSeg::key("tags"), PathSeg::Idx(1)]);
+        assert_eq!(stx.len(), 2);
+        assert_eq!(stx[1].kind, MenuKind::Items);
+        assert_eq!(stx[1].path, vec![PathSeg::key("tags")]);
+
+        // object nested in an array item: item menu, then its field menu
+        let stx = rebuild_stack(
+            &mut schema,
+            &doc,
+            &[PathSeg::key("arr"), PathSeg::Idx(0), PathSeg::key("name")],
+        );
+        assert_eq!(stx.len(), 3);
+        assert_eq!(stx[2].kind, MenuKind::Object);
+        assert_eq!(stx[2].path, vec![PathSeg::key("arr"), PathSeg::Idx(0)]);
     }
 }

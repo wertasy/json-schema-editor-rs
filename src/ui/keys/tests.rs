@@ -5873,6 +5873,82 @@ fn search_jump_to_array_variant_element() {
 }
 
 #[test]
+fn search_jump_schema_less_nested() {
+    // No schema: a hit below an unknown key must rebuild the runtime menus
+    // Enter would open, landing on the actual row instead of the top key.
+    let doc = dbuild(|db| {
+        db.obj(vec![
+            ("server", db.obj(vec![("port", db.n("8080"))])),
+            ("tags", db.arr(vec![db.s("alpha"), db.s("beta")])),
+            ("arr", db.arr(vec![db.obj(vec![("name", db.s("deep"))])])),
+        ])
+    });
+    let schema = crate::smodel::untyped(&doc);
+    let mut m = app_with(schema, doc, test_opts());
+
+    let jump = |m: &mut App, query: &[&str], want: &[PathSeg]| {
+        press(m, &["/"]);
+        for q in query {
+            press(m, &[*q]);
+        }
+        let idx = search_state(m)
+            .results
+            .iter()
+            .position(|r| r.path == want)
+            .unwrap_or_else(|| {
+                panic!(
+                    "search row {want:?} missing: {:?}",
+                    search_state(m)
+                        .results
+                        .iter()
+                        .map(|r| (r.kind, r.path.clone()))
+                        .collect::<Vec<_>>()
+                )
+            });
+        if let Some(Overlay::Search(s)) = &mut m.overlay {
+            s.cursor = idx;
+        }
+        press(m, &["enter"]);
+        assert!(m.overlay.is_none());
+    };
+    // leave the landing, reopen the search list, then close it to the root
+    let rewind = |m: &mut App| {
+        press(m, &["esc"]);
+        press(m, &["esc"]);
+    };
+
+    jump(&mut m, &["p", "o", "r", "t"], &[ks("server"), ks("port")]);
+    assert_eq!(m.top().unwrap().kind, MenuKind::Object);
+    assert_eq!(m.top().unwrap().path, vec![ks("server")]);
+    let row = row_at(&mut m);
+    assert_eq!(row.path, vec![ks("server"), ks("port")]);
+    assert_eq!(row.kind, RowKind::Unknown);
+
+    rewind(&mut m);
+    jump(
+        &mut m,
+        &["b", "e", "t", "a"],
+        &[ks("tags"), PathSeg::Idx(1)],
+    );
+    assert_eq!(m.top().unwrap().kind, MenuKind::Items);
+    assert_eq!(m.top().unwrap().path, vec![ks("tags")]);
+    assert_eq!(row_at(&mut m).path, vec![ks("tags"), PathSeg::Idx(1)]);
+    assert_eq!(row_at(&mut m).kind, RowKind::Drill);
+
+    rewind(&mut m);
+    jump(
+        &mut m,
+        &["d", "e", "e", "p"],
+        &[ks("arr"), PathSeg::Idx(0), ks("name")],
+    );
+    assert_eq!(m.top().unwrap().kind, MenuKind::Object);
+    assert_eq!(m.top().unwrap().path, vec![ks("arr"), PathSeg::Idx(0)]);
+    let row = row_at(&mut m);
+    assert_eq!(row.path, vec![ks("arr"), PathSeg::Idx(0), ks("name")]);
+    assert_eq!(row.kind, RowKind::Unknown);
+}
+
+#[test]
 fn search_jump_to_union_discriminator_field() {
     // sing-box Rule shape: nested oneOf groups flatten to object leaves.
     // "sniff" matches two leaves, so the item menu is the merged menu and

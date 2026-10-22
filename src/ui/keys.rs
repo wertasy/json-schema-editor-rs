@@ -5213,9 +5213,14 @@ impl App {
                 self.fs_mut().stack = stack;
                 let rows = self.menu_rows();
                 self.clamp_cursor(&rows);
-                let target = cursor_for_row(&rows, &res)
-                    .or_else(|| self.enum_array_cursor(&rows, &res))
-                    .or_else(|| cursor_ancestor(&rows, &res.path));
+                let mut target =
+                    cursor_for_row(&rows, &res).or_else(|| self.enum_array_cursor(&rows, &res));
+                // A variant picker is seeded on the value's variant; its rows
+                // all sit at the picker path, so the ancestor fallback would
+                // reset that cursor to row 0.
+                if target.is_none() && self.top().map(|st| st.kind) != Some(MenuKind::OneOf) {
+                    target = cursor_ancestor(&rows, &res.path);
+                }
                 if let Some(idx) = target {
                     if let Some(st) = self.top_mut() {
                         st.cursor = idx;
