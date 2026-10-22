@@ -23,7 +23,7 @@ $
 - **Schema 驱动**：`properties`/`required`、`enum`/`const`、`oneOf`/`anyOf`/`allOf`、`$ref`（含远端）、数组、映射、`patternProperties` 都会生成对应表单；未覆盖的关键字仍在保存时校验。
 - **格式保真**：JSONC 注释、YAML 注释、锚点、别名和 `<<` 合并键原样保留；键序与 `1.0` 这类数字字面量不变；写入为同目录临时文件 + rename 的原子写。
 - **高效编辑**：vim 风格移动与跳转、多选、复制/剪切/智能粘贴、当前子树搜索与正则替换、撤销/重做、宏录制、`$EDITOR` 外编、文本自动补全；schema 未定义或无 `type` 的键按运行时类型直接编辑，仅在无值时先选内建类型或 schema `$defs` 命名类型。
-- **Schema 自动发现**：`-s`、配置自带的 `$schema`、YAML 文件头指令，或 SchemaStore 目录匹配/检索；远端 schema 带 24 小时缓存与离线回退。
+- **Schema 自动发现**：`-s`、配置自带的 `$schema`、YAML 文件头指令，或 SchemaStore 目录匹配/检索；会话中按 `S` 可重新搜索并切换当前文件的 schema。远端 schema 带 24 小时缓存与离线回退。找不到 schema 时仍可打开文件直接编辑（对象/数组按结构导航，其他值按运行时类型；保存不校验）。
 - **错误可见**：加载即列出校验问题，字段行与问题列表实时刷新；未知键作为警告而非错误；`--force` 可强存。
 - **多文件会话**：`jse a.json b.json` 同开多个文件，`s` 切换，`ctrl+o`/`ctrl+i` 在导航历史中后退/前进；退出时一次保存全部改动。
 
@@ -52,7 +52,10 @@ jse server.json
 # 3. 让 jse 从 SchemaStore 按文件名自动匹配或检索 schema
 jse .github/workflows/ci.yml
 
-# 4. 行式模式（无全屏 TUI，适合脚本/管道）
+# 4. 没有 schema 来源时直接编辑（无校验，结构仍可导航）
+jse notes.json
+
+# 5. 行式模式（无全屏 TUI，适合脚本/管道）
 jse --accessible -s examples/server.schema.json server.json
 ```
 
@@ -62,7 +65,7 @@ jse --accessible -s examples/server.schema.json server.json
 jse -s server.schema.json a.json b.yaml
 ```
 
-`-s` 指定的 schema 会按文件格式写回配置（JSON/JSONC 顶层 `$schema`；YAML 文件头 `# yaml-language-server: $schema=...`），下次启动可省略 `-s`。
+`-s` 指定的 schema 会按文件格式写回配置（JSON/JSONC 顶层 `$schema`；YAML 默认写文件头 `# yaml-language-server: $schema=...`，若 schema 定义了顶层 `$schema` 属性则写入该字段），下次启动可省略 `-s`。
 
 ## 键位速查
 
@@ -80,6 +83,7 @@ jse -s server.schema.json a.json b.yaml
 | `ctrl+s` / `w` | 保存当前文件并留在编辑器 |
 | `W` | 另存副本到指定路径 |
 | `s` | 多文件时打开文件切换器 |
+| `S` | 打开 SchemaStore 搜索，切换当前文件的 schema |
 | `ctrl+o` / `ctrl+i` (`tab`) | 导航历史后退 / 前进 |
 | `?` | 完整键位帮助 |
 

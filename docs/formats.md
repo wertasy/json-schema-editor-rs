@@ -82,7 +82,7 @@ YAML 由内置 emitter 写回，风格与 yaml.v3 的 block 输出对齐：
 | 格式 | `-s` / SchemaStore 选择结果的记录方式 |
 |---|---|
 | JSON / JSONC | 顶层 `"$schema": "<位置>"`。已有非空值保留；已有空值/显式 null 时原位填入；缺失时插到首位。 |
-| YAML | 文件头 `# yaml-language-server: $schema=<位置>`。不会新增或填充 YAML 里的 `$schema` 键；文件里已有空值/显式 null 也保持原样。已有非空 `$schema` 键或同类注释时保留。 |
+| YAML | 默认写文件头 `# yaml-language-server: $schema=<位置>`。**若加载到的 schema 定义了顶层 `$schema` 属性**，改写文档的 `$schema` 字段（缺失时插入首位，空值/显式 null 时原位填入），并移除旧的同类注释；已有非空 `$schema` 值或注释时保留该值。 |
 
 两者都会被后续启动识别为 schema 来源。`--pick` 会先清除旧指向再写新值。
 

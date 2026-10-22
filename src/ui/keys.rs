@@ -8,6 +8,7 @@
 //! `self.overlay = match ov { … }` dispatch.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use regex::Regex;
 
@@ -747,6 +748,134 @@ impl App {
         self.visual_sync(&rows);
     }
 
+    // --- schema switching (S) ----------------------------------------------
+
+    /// openSchemaPicker searches the SchemaStore catalog for the active file
+    /// and switches the form model to the chosen schema. The document body is
+    /// untouched apart from the recorded schema location.
+    fn open_schema_picker(&mut self) {
+        if self.opts().accessible {
+            return; // no key events in the line protocol
+        }
+        if self.opts().replace_schema_location.is_none() {
+            self.notice = "schema switching unavailable".to_string();
+            return;
+        }
+        let loc = crate::catalog::loc();
+        let entries = match crate::catalog::load(&loc) {
+            Ok(entries) => entries,
+            Err(e) => {
+                self.notice = format!("schema catalog: {e}");
+                return;
+            }
+        };
+        let base = crate::file_base(&self.opts().path);
+        let chosen = crate::ui::schema_picker::pick(
+            &entries,
+            &crate::ui::schema_picker::PickOptions {
+                accessible: false,
+                filename: base.to_string(),
+                query: crate::search_stem(base),
+            },
+        );
+        // The picker owns raw mode + the alternate screen while it runs; the
+        // menu session must get them back or later keys sit in line-buffered
+        // input and the next frame has nowhere to draw.
+        let _ = crossterm::terminal::enable_raw_mode();
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::EnterAlternateScreen,
+            crossterm::event::EnableBracketedPaste,
+            crossterm::cursor::Hide
+        );
+        let Some(chosen) = chosen else {
+            self.notice = "schema unchanged".to_string();
+            return;
+        };
+        self.apply_schema(&chosen);
+    }
+
+    /// applySchema installs a chosen catalog schema: normalize it, rebuild
+    /// the validator, overwrite the recorded schema location, and reset the
+    /// menu stack. The live document becomes the input to the new form.
+    fn apply_schema(&mut self, chosen: &crate::catalog::Entry) {
+        let loc = chosen.url.clone();
+        let model = match crate::smodel::load(&loc) {
+            Ok(model) => model,
+            Err(e) => {
+                self.notice = format!("load schema: {e}");
+                return;
+            }
+        };
+        let mut compile_warning = String::new();
+        let validate: Option<Arc<dyn Fn(&Doc) -> Vec<String> + Send + Sync>> =
+            match crate::validate::new(&loc) {
+                Err(e) => {
+                    compile_warning = format!(
+                        "{} schema compile failed, save-time validation disabled: {}",
+                        crate::icons::WARN,
+                        e.replace('\n', " ")
+                    );
+                    None
+                }
+                Ok(v) => {
+                    let v = Arc::new(v);
+                    Some(Arc::new(move |doc: &Doc| v.check(doc)))
+                }
+            };
+        let schema_member = crate::smodel::root_has_property(&model, "$schema");
+        if let Some(replace) = self.opts().replace_schema_location.clone() {
+            replace(&mut self.fs_mut().doc, &loc, schema_member);
+        }
+
+        let root = model.root;
+        let kind = crate::ui::rows::menu_kind_for(&model, root);
+        let f = self.fs_mut();
+        f.schema = model;
+        f.root = root;
+        f.menu_cache.clear();
+        f.opts.validate = validate;
+        f.opts.status = compile_warning;
+        f.issues_parked = None;
+        f.issues_return = 0;
+        f.issues_origin = None;
+        f.search_parked = None;
+        f.jump_origin = None;
+        f.jump_return = 0;
+        let mut st = MenuState {
+            kind,
+            node: root,
+            path: Vec::new(),
+            cursor: 0,
+            offset: 0,
+            variant_of: None,
+            one_of: None,
+            sel: HashSet::new(),
+            visual: false,
+            vanchor: 0,
+            search_ti: Default::default(),
+            searching: false,
+            search_prefilled: false,
+            search_applied: false,
+        };
+        crate::ui::rows::seed_variant_cursor(&f.schema, &mut st, &f.doc);
+        f.stack = vec![st];
+
+        self.nav = Default::default();
+        self.hide_empty = false;
+        self.cmd_buf.clear();
+        self.fast_move = None;
+        self.notice = format!("schema from SchemaStore: {}", chosen.name);
+        if self.opts().validate.is_some() {
+            self.refresh_issues();
+        } else {
+            let items = self.live_issues(Vec::new());
+            self.set_issues(items);
+        }
+        let rows = self.menu_rows();
+        self.clamp_cursor(&rows);
+    }
+
     // --- list mode ---------------------------------------------------------
 
     /// keyList is the plain menu's key table (Go keyList).
@@ -943,6 +1072,7 @@ impl App {
                     self.notice = "only one file is open".to_string();
                 }
             }
+            "S" => self.open_schema_picker(),
             "ctrl+s" | "w" => self.save(),
             "W" => self.open_write_to(),
             _ => {}
@@ -4708,6 +4838,36 @@ impl App {
         self.pending_edit = Some(edit);
     }
 
+    /// rebuildSchemaLessRoot re-derives the runtime root after a whole-document
+    /// raw edit swapped the root type (object ↔ array ↔ scalar): the
+    /// schema-less model is a snapshot of the loaded shape, so a stale root
+    /// would offer the wrong menu. Synth nodes and the stack are rebuilt
+    /// against the new model.
+    fn rebuild_schema_less_root(&mut self) {
+        let f = self.fs_mut();
+        f.schema = crate::smodel::untyped(&f.doc);
+        let root = f.schema.root;
+        let kind = crate::ui::rows::menu_kind_for(&f.schema, root);
+        f.menu_cache.clear();
+        f.stack.truncate(1);
+        if let Some(st) = f.stack.first_mut() {
+            st.kind = kind;
+            st.node = root;
+            st.path.clear();
+            st.cursor = 0;
+            st.offset = 0;
+            st.variant_of = None;
+            st.one_of = None;
+            st.sel.clear();
+            st.visual = false;
+            st.vanchor = 0;
+            st.search_ti = Default::default();
+            st.searching = false;
+            st.search_prefilled = false;
+            st.search_applied = false;
+        }
+    }
+
     /// applyExternalEdit parses the editor's temp file and applies it (Go
     /// applyExternalEdit / applyExternalValue).
     fn apply_external(&mut self, edit: ExternalEdit, data: &[u8]) {
@@ -4725,6 +4885,9 @@ impl App {
                     } else {
                         self.fs_mut().doc = nd;
                         self.fs_mut().history.push_undo(pre);
+                        if self.fs().schema.schema_less {
+                            self.rebuild_schema_less_root();
+                        }
                         self.refresh_variant_menu();
                         self.refresh_issues();
                         let rows = self.menu_rows();
@@ -5794,7 +5957,7 @@ impl App {
             prefix = style::fg9("> "); // selected rows carry a red > marker
         }
         let mut line = format!("{prefix}{content}");
-        if r.kind == RowKind::Unknown {
+        if r.kind == RowKind::Unknown && !self.fs().schema.schema_less {
             line += &format!(" {}", style::faint("(not in schema)"));
         }
         if self.drill_marker(r) {
@@ -5803,7 +5966,9 @@ impl App {
         if matches!(r.kind, RowKind::Field | RowKind::Drill | RowKind::Unknown) {
             if self.has_err(&r.path) {
                 line += &format!(" {}", style::fg1(ERR));
-            } else if r.kind == RowKind::Unknown || self.has_warn(&r.path) {
+            } else if (r.kind == RowKind::Unknown && !self.fs().schema.schema_less)
+                || self.has_warn(&r.path)
+            {
                 line += &format!(" {}", style::fg3(WARN));
             }
             if self.changed(&r.path) {

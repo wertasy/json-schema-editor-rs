@@ -64,7 +64,8 @@ tests/
 - `Meta` carries comments keyed by document path, JSONC tail comments, and the YAML alias count. A save must render with the session's **current** meta. Whole-document raw edits must adopt the freshly parsed meta (`adopt_doc`), or comments/directives are lost.
 - Comments follow their member: editing keeps them, deleting drops them, adding creates none. Preserve that when adding operations.
 - A JSON/JSONC file with no comments must write byte-for-byte like plain JSON (`JsoncCodec::write` delegates). Do not “improve” output formatting.
-- Schema location conventions: JSON/JSONC use top-level `$schema`; YAML uses the `# yaml-language-server: $schema=...` header. `set_schema_location` keeps an existing non-empty value; `--pick` clears first.
+- Schema location conventions: JSON/JSONC use top-level `$schema`; YAML uses the `# yaml-language-server: $schema=...` header, except when the loaded schema declares a top-level `$schema` property — then the document member is used (and any directive is removed). `set_schema_location`/`set_schema_location_with` keep an existing non-empty value; `--pick` clears first.
+- A session with no schema uses `Schema::schema_less`: the root follows the document's runtime shape (object → key menu, array → item menu, other → runtime-typed field). Do not flag its keys as unknown, and rebuild the root after a whole-document raw edit changes the root type.
 - Local relative `$schema` paths resolve against the config file's directory, falling back to the current working directory only when the file does not exist there.
 
 ## UI invariants
@@ -75,6 +76,7 @@ tests/
 - Undo is snapshot-per-key: the dispatcher snapshots before a key and pushes only when the document changed. Any new mutating key must go through that path; do not mutate the document outside the dispatcher without ensuring history/issue refresh.
 - The change marker (`●`) compares against `baseline` (load/last save), not undo state. Saving refreshes the baseline.
 - `ctrl+s`/`w` saves the **active file only**. Root exit saves all dirty files. Keep stdout result lines and exit codes stable.
+- `S` switches the active file's schema through the SchemaStore picker: replace the model/validator, reset that file's stack and navigation, record the new location through `Options::replace_schema_location`, and do not push an undo snapshot. The nested picker disables raw mode/leaves the alternate screen, so the caller must restore both.
 - Issues are recomputed after each document mutation; row markers (`<err>`/`<warn>`), root counts, and parked-list returns must stay consistent.
 - Selection marks are per menu state; array item labels (`key[N]`) are selectable, action rows are not.
 - The root screen is special: `esc`/`q` clears a pending `g` buffer, then a live selection, then exits or prompts to save. `left`/`h` never exits the root.
@@ -87,7 +89,7 @@ Treat these as public API; tests and docs assert them:
 
 - CLI: getopt-style parsing (`-sv`, `--schema=v`, clustered flags, options after operands, `--`). Multiple config files open one session; each resolves its own schema. All files load before the UI starts.
 - Exit codes: `0` saved/unchanged, `1` runtime error, `2` usage error, `130` user abort. Exact stdout lines are in `docs/cli.md`.
-- Schema resolution order: `-s` → config pointer → SchemaStore (unique match auto, ambiguous/missing picker) → error. `--pick` overrides both.
+- Schema resolution order: `-s` → config pointer → SchemaStore (unique match auto, ambiguous/missing picker) → schema-less editing (`smodel::untyped`; no validation, unknown-key warnings suppressed). `--pick` overrides both and keeps its own failures fatal.
 - Remote cache: 24h fresh, conditional revalidation, 5xx/network fallback, 404 hard error, 429 cooldown. Same cache for the catalog and remote `$ref`s. One fetch per URL per process.
 - Save-time validation is authoritative; `--force` is the only bypass. A schema compile failure disables validation and shows a persistent warning.
 - Saves are atomic (same-directory temp + rename) and preserve the existing file mode, key order, numeric literals, unknown keys, and `$schema`.

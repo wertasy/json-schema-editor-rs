@@ -96,6 +96,20 @@ pub trait Codec: Sync {
     /// Records loc when no non-empty location exists yet; an existing value
     /// is kept.
     fn set_schema_location(&self, doc: &mut Doc, meta: &mut Meta, loc: &str);
+    /// set_schema_location_with records loc for a schema that declares a
+    /// top-level "$schema" property (`schema_member`). Formats whose idiomatic
+    /// location is a comment (YAML) write the member instead, so the field
+    /// the schema defines is the single source of truth.
+    fn set_schema_location_with(
+        &self,
+        doc: &mut Doc,
+        meta: &mut Meta,
+        loc: &str,
+        schema_member: bool,
+    ) {
+        let _ = schema_member;
+        self.set_schema_location(doc, meta, loc);
+    }
     /// Removes any recorded location; a fresh --pick must overwrite the old
     /// value.
     fn clear_schema_location(&self, doc: &mut Doc, meta: &mut Meta);
@@ -192,6 +206,29 @@ impl Codec for YamlCodec {
             return;
         }
         yamldoc::set_schema_directive(doc, meta, loc);
+    }
+
+    fn set_schema_location_with(
+        &self,
+        doc: &mut Doc,
+        meta: &mut Meta,
+        loc: &str,
+        schema_member: bool,
+    ) {
+        if !schema_member {
+            return self.set_schema_location(doc, meta, loc);
+        }
+        // The schema declares "$schema" as a real property: record the
+        // location there instead of adding the directive comment. An
+        // existing location (member or directive) keeps precedence, matching
+        // set_schema_location's keep-existing rule; a directive is migrated
+        // into the member and then removed so only one source remains.
+        let existing = self.schema_location(doc, meta);
+        match existing {
+            Some(existing) => crate::doc::set_schema_member(doc, &existing),
+            None => crate::doc::set_schema_member(doc, loc),
+        }
+        yamldoc::clear_schema_directive(doc, meta);
     }
 
     fn clear_schema_location(&self, doc: &mut Doc, meta: &mut Meta) {

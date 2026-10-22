@@ -487,6 +487,64 @@ fn yaml_explicit_schema_member() {
 }
 
 #[test]
+fn yaml_schema_member_used_when_schema_declares_it() {
+    let c = codec_for("a.yaml");
+    let mut p = c.parse("name: demo\n").unwrap();
+    c.set_schema_location_with(&mut p.doc, &mut p.meta, "sch.json", true);
+    assert_eq!(
+        c.schema_location(&p.doc, &p.meta).as_deref(),
+        Some("sch.json")
+    );
+    let out = c.write(&p.doc, &p.meta).unwrap();
+    assert_eq!(out, "$schema: sch.json\nname: demo\n");
+    assert!(!out.contains("yaml-language-server"), "{out}");
+}
+
+#[test]
+fn yaml_empty_member_filled_when_schema_declares_it() {
+    let c = codec_for("a.yaml");
+    let mut p = c.parse("$schema: \"\"\nname: demo\n").unwrap();
+    c.set_schema_location_with(&mut p.doc, &mut p.meta, "sch.json", true);
+    assert_eq!(
+        c.schema_location(&p.doc, &p.meta).as_deref(),
+        Some("sch.json")
+    );
+    let out = c.write(&p.doc, &p.meta).unwrap();
+    assert_eq!(out, "$schema: sch.json\nname: demo\n");
+    assert!(!out.contains("yaml-language-server"), "{out}");
+}
+
+#[test]
+fn yaml_directive_migrates_to_declared_member() {
+    let c = codec_for("a.yaml");
+    let src = "# config header\n# yaml-language-server: $schema=old.json\nname: demo\n";
+    let mut p = c.parse(src).unwrap();
+    c.set_schema_location_with(&mut p.doc, &mut p.meta, "new.json", true);
+    // An existing location keeps precedence, now recorded in the field.
+    assert_eq!(
+        c.schema_location(&p.doc, &p.meta).as_deref(),
+        Some("old.json")
+    );
+    let out = c.write(&p.doc, &p.meta).unwrap();
+    assert!(out.contains("$schema: old.json"), "{out}");
+    assert!(out.contains("# config header"), "{out}");
+    assert!(!out.contains("yaml-language-server"), "{out}");
+}
+
+#[test]
+fn yaml_directive_stays_when_schema_has_no_member() {
+    let c = codec_for("a.yaml");
+    let mut p = c.parse("name: demo\n").unwrap();
+    c.set_schema_location_with(&mut p.doc, &mut p.meta, "sch.json", false);
+    let out = c.write(&p.doc, &p.meta).unwrap();
+    assert!(
+        out.contains("# yaml-language-server: $schema=sch.json"),
+        "{out}"
+    );
+    assert!(!out.contains("$schema:"), "{out}");
+}
+
+#[test]
 fn yaml_empty_schema_member_not_filled() {
     let cases = [
         (

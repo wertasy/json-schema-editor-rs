@@ -32,6 +32,8 @@ use crate::ui::{FileSession, NodeRef, Options, Outcome, RawCodec};
 
 const ERR_NO_SCHEMA: &str =
     "no schema found: provide -s or record the schema location in the config";
+const NOTE_SCHEMA_LESS: &str =
+    "no schema found: editing without schema guidance; save-time validation disabled";
 
 const USAGE_TEXT: &str = "Usage: jse [-s <schema path|http(s)://URL>] [-p|--pick] [-f|--force]
            [-a|--accessible] [-v|--version] [-h|--help] <config.(json|jsonc|yaml|yml)>...
@@ -47,7 +49,9 @@ Schema source (checked in order):
   3. the SchemaStore catalog: a unique fileMatch hit for the file name is
      used directly; an ambiguous or missing match opens an interactive
      search over the catalog (--pick forces the search)
-  4. error if none of the above applies
+  4. nothing found: the file opens in schema-less mode (objects as key
+     lists, arrays as item lists, other values by runtime type) and saves
+     without validation; --pick failures remain errors
 
 Remote schemas are cached under $XDG_CACHE_HOME/jse (JSE_CACHE_DIR overrides
 the location): a copy from the last 24 hours is reused without a request, and
@@ -346,119 +350,148 @@ fn load_session(
     let mut status: Vec<String> = Vec::new(); // warnings, shown for this file's session
     let mut startup: Vec<String> = codec.notices(&parsed.doc, &parsed.meta); // info notices, hidden after the first key press
 
-    // A -s location is recorded in the file's own convention (a top-level
-    // "$schema" member, or a yaml-language-server comment for YAML) when the
-    // file has none, keeping the saved config self-describing.
-    if !schema_flag.is_empty() {
-        codec.set_schema_location(&mut parsed.doc, &mut parsed.meta, schema_flag);
-    }
+    // The location is recorded after the schema loads: YAML chooses between
+    // a top-level "$schema" member and the directive comment based on whether
+    // the schema itself declares that property.
+    let mut record_loc: Option<String> = if !pick && !schema_flag.is_empty() {
+        Some(schema_flag.to_string())
+    } else {
+        None
+    };
     // A catalog pick must overwrite an existing location, so drop it first.
     if pick {
         codec.clear_schema_location(&mut parsed.doc, &mut parsed.meta);
     }
 
-    let mut schema_loc = String::new();
-    // Go's resolveErr is either nil or exactly errNoSchema (resolveSchemaLoc
-    // returns nothing else), so a bool carries all reachable state.
-    let mut resolve_err = false;
+    let mut schema_loc: Option<String> = None;
     if !pick {
-        match resolve_schema_loc(schema_flag, config, codec, &parsed.doc, &parsed.meta) {
-            Ok(loc) => schema_loc = loc,
-            Err(NoSchema) => resolve_err = true,
+        if let Ok(loc) = resolve_schema_loc(schema_flag, config, codec, &parsed.doc, &parsed.meta) {
+            schema_loc = Some(loc);
         }
     }
 
-    if pick || resolve_err {
+    // With no schema source the file is still editable: the catalog is the
+    // last chance to find one, and any failure — or cancelling the automatic
+    // picker — just drops into schema-less editing. An explicit --pick stays
+    // authoritative (its failures are errors).
+    if pick || schema_loc.is_none() {
         let loc = catalog::loc();
-        let entries = match catalog::load(&loc) {
-            Ok(e) => e,
+        match catalog::load(&loc) {
+            Ok(entries) => {
+                let note = fetch::note(&loc);
+                if !note.is_empty() {
+                    status.push(note.replacen("cached schema", "cached catalog", 1));
+                }
+                let mut chosen: Option<catalog::Entry> = None;
+                if !pick {
+                    let abs = go_abs(config); // Match needs the absolute path
+                    let m = catalog::match_entries(&entries, &abs);
+                    if m.len() == 1 {
+                        chosen = m.into_iter().next();
+                    }
+                }
+                let chosen = match chosen {
+                    Some(c) => Some(c),
+                    None => {
+                        if !accessible && !std::io::stdin().is_terminal() {
+                            if pick {
+                                eprintln!(
+                                    "schema selection needs a terminal; rerun with --accessible or provide -s"
+                                );
+                                return Err(2);
+                            }
+                            None
+                        } else {
+                            let base = file_base(config);
+                            match ui::schema_picker::pick(
+                                &entries,
+                                &ui::schema_picker::PickOptions {
+                                    accessible,
+                                    filename: base.to_string(),
+                                    query: search_stem(base),
+                                },
+                            ) {
+                                Some(c) => Some(c),
+                                None => {
+                                    // Automatic lookup: cancelling the picker
+                                    // is a valid "no schema" answer, so the
+                                    // file still opens. --pick asked for a
+                                    // schema explicitly and stays fatal.
+                                    if pick {
+                                        eprintln!("{ERR_NO_SCHEMA}");
+                                        return Err(2);
+                                    }
+                                    None
+                                }
+                            }
+                        }
+                    }
+                };
+                if let Some(chosen) = chosen {
+                    let loc = chosen.url.clone();
+                    startup.push(format!("schema from SchemaStore: {}", chosen.name));
+                    record_loc = Some(loc.clone());
+                    schema_loc = Some(loc);
+                }
+            }
             Err(cerr) => {
                 if pick {
                     eprintln!("load schema catalog: {cerr}");
                     return Err(1);
                 }
-                eprintln!("{ERR_NO_SCHEMA}");
-                eprintln!("schema catalog unavailable: {cerr}");
-                return Err(2);
-            }
-        };
-        let note = fetch::note(&loc);
-        if !note.is_empty() {
-            status.push(note.replacen("cached schema", "cached catalog", 1));
-        }
-        let mut chosen: Option<catalog::Entry> = None;
-        if !pick {
-            let abs = go_abs(config); // Match needs the absolute path
-            let m = catalog::match_entries(&entries, &abs);
-            if m.len() == 1 {
-                chosen = m.into_iter().next();
+                status.push(format!("schema catalog unavailable: {cerr}"));
             }
         }
-        let chosen = match chosen {
-            Some(c) => c,
+    }
+
+    let (model, check, load_errors): (smodel::Schema, Option<Arc<validate::V>>, Vec<String>) =
+        match &schema_loc {
+            Some(loc) => {
+                let model = match smodel::load(loc) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("load schema {loc}: {e}");
+                        return Err(1);
+                    }
+                };
+                let mut check: Option<Arc<validate::V>> = None;
+                let mut load_errors: Vec<String> = Vec::new();
+                let note = fetch::note(loc);
+                if !note.is_empty() {
+                    status.push(note); // offline: cached schema in use
+                }
+                match validate::new(loc) {
+                    Err(verr) => {
+                        let msg = verr.replace('\n', " ");
+                        status.push(format!(
+                            "{} schema compile failed, save-time validation disabled: {msg}",
+                            icons::WARN
+                        ));
+                    }
+                    Ok(v) => {
+                        let v = Arc::new(v);
+                        if loaded {
+                            load_errors = v.check(&parsed.doc);
+                        }
+                        check = Some(v);
+                    }
+                }
+                (model, check, load_errors)
+            }
             None => {
-                if !accessible && !std::io::stdin().is_terminal() {
-                    if resolve_err {
-                        eprintln!("{ERR_NO_SCHEMA}");
-                    }
-                    eprintln!(
-                        "schema selection needs a terminal; rerun with --accessible or provide -s"
-                    );
-                    return Err(2);
-                }
-                let base = file_base(config);
-                match ui::schema_picker::pick(
-                    &entries,
-                    &ui::schema_picker::PickOptions {
-                        accessible,
-                        filename: base.to_string(),
-                        query: search_stem(base),
-                    },
-                ) {
-                    Some(c) => c,
-                    None => {
-                        eprintln!("{ERR_NO_SCHEMA}");
-                        return Err(2);
-                    }
-                }
+                status.push(format!("{} {NOTE_SCHEMA_LESS}", icons::WARN));
+                (smodel::untyped(&parsed.doc), None, Vec::new())
             }
         };
-        schema_loc = chosen.url.clone();
-        codec.set_schema_location(&mut parsed.doc, &mut parsed.meta, &schema_loc);
-        startup.push(format!("schema from SchemaStore: {}", chosen.name));
-    }
 
-    let model = match smodel::load(&schema_loc) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("load schema {schema_loc}: {e}");
-            return Err(1);
-        }
-    };
+    // Keep the saved config self-describing. YAML uses the document's
+    // "$schema" field when the schema declares one; otherwise it keeps the
+    // yaml-language-server comment convention.
+    if let Some(loc) = &record_loc {
+        let has_member = smodel::root_has_property(&model, "$schema");
+        codec.set_schema_location_with(&mut parsed.doc, &mut parsed.meta, loc, has_member);
+    }
     let root = model.root;
-
-    let mut check: Option<Arc<validate::V>> = None;
-    let mut load_errors: Vec<String> = Vec::new();
-    let note = fetch::note(&schema_loc);
-    if !note.is_empty() {
-        status.push(note); // offline: cached schema in use
-    }
-    match validate::new(&schema_loc) {
-        Err(verr) => {
-            let msg = verr.replace('\n', " ");
-            status.push(format!(
-                "{} schema compile failed, save-time validation disabled: {msg}",
-                icons::WARN
-            ));
-        }
-        Ok(v) => {
-            let v = Arc::new(v);
-            if loaded {
-                load_errors = v.check(&parsed.doc);
-            }
-            check = Some(v);
-        }
-    }
 
     // Raw editors use the file's own format (YAML for .yaml/.yml, JSON
     // otherwise). The menu owns the live Doc, while the format metadata
@@ -534,6 +567,16 @@ fn load_session(
         },
         copy: None,
         paste: None,
+        replace_schema_location: {
+            let shared_meta = Arc::clone(&shared_meta);
+            Some(Arc::new(
+                move |doc: &mut Doc, loc: &str, schema_member: bool| {
+                    let mut meta = lock(&shared_meta);
+                    codec.clear_schema_location(doc, &mut meta);
+                    codec.set_schema_location_with(doc, &mut meta, loc, schema_member);
+                },
+            ))
+        },
         status: status.join("\n"),
         startup_notice: startup.join("\n"),
         load_errors,

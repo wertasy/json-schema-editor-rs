@@ -127,6 +127,10 @@ pub struct Schema {
     /// The parsed schema JSON document (plus grafted remote $ref documents
     /// and synthetic merge nodes); enum/default values use NodeIds into it.
     pub doc: Doc,
+    /// True for the fallback model built when no schema source resolves.
+    /// The tree is derived from the document's runtime shape, so keys are
+    /// not "unknown to the schema" and must not be flagged as such.
+    pub schema_less: bool,
 }
 
 const MAX_DEPTH: usize = 32;
@@ -178,7 +182,83 @@ pub fn load(loc: &str) -> Result<Schema, SmodelError> {
         root,
         defs,
         doc: p.doc,
+        schema_less: false,
     })
+}
+
+/// untyped builds the schema-less model used when no schema source resolves:
+/// the root follows the loaded document's runtime shape — objects get the
+/// schema-less key menu, arrays an item manager, and every other value a
+/// runtime-typed field. Saving has no validation, and unknown-key warnings
+/// are suppressed (there is no schema to compare against).
+pub fn untyped(doc: &Doc) -> Schema {
+    let mut nodes: Vec<FormNode> = Vec::new();
+    let root = match doc.value(doc.root) {
+        Value::Object(_) => {
+            nodes.push(FormNode {
+                key: "$".into(),
+                title: "$".into(),
+                kind: Kind::Object,
+                ..FormNode::default()
+            });
+            0
+        }
+        Value::Array(_) => {
+            // Array items have no type information: edit each by its runtime
+            // value, opening the type picker for null/missing slots.
+            nodes.push(FormNode {
+                title: "Item".into(),
+                kind: Kind::Raw,
+                ..FormNode::default()
+            });
+            nodes.push(FormNode {
+                key: "$".into(),
+                title: "$".into(),
+                kind: Kind::Array,
+                items: Some(0),
+                ..FormNode::default()
+            });
+            1
+        }
+        _ => {
+            nodes.push(FormNode {
+                key: "$".into(),
+                title: "$".into(),
+                kind: Kind::Raw,
+                ..FormNode::default()
+            });
+            0
+        }
+    };
+    Schema {
+        nodes,
+        root,
+        defs: Vec::new(),
+        doc: Doc::new(),
+        schema_less: true,
+    }
+}
+
+/// root_has_property reports whether the normalized root object declares the
+/// given member key. A root oneOf is checked through its variants. The check
+/// looks at the schema's properties (form children), not at the schema
+/// document's own `$schema` keyword.
+pub fn root_has_property(schema: &Schema, key: &str) -> bool {
+    fn walk(schema: &Schema, id: FormNodeId, key: &str, seen: &mut HashSet<FormNodeId>) -> bool {
+        if !seen.insert(id) {
+            return false;
+        }
+        let n = &schema.nodes[id as usize];
+        match n.kind {
+            Kind::Object | Kind::Map => n
+                .children
+                .iter()
+                .any(|&c| schema.nodes[c as usize].key == key),
+            Kind::OneOf => n.variants.iter().any(|&v| walk(schema, v, key, seen)),
+            _ => false,
+        }
+    }
+    walk(schema, schema.root, key, &mut HashSet::new())
 }
 
 impl Parser {
@@ -1375,6 +1455,24 @@ mod tests {
         std::fs::write(&p, src).unwrap();
         let s = load(p.to_str().unwrap()).unwrap();
         s
+    }
+
+    #[test]
+    fn root_has_property_checks_declared_properties() {
+        let s = must_load(
+            r#"{"type":"object","properties":{"$schema":{"type":"string"},"name":{"type":"string"}}}"#,
+        );
+        assert!(root_has_property(&s, "$schema"));
+        assert!(root_has_property(&s, "name"));
+        assert!(!root_has_property(&s, "missing"));
+
+        let s = must_load(
+            r#"{"oneOf":[{"type":"object","properties":{"$schema":{"type":"string"}}}]}"#,
+        );
+        assert!(root_has_property(&s, "$schema"));
+
+        let s = must_load(r#"{"type":"string"}"#);
+        assert!(!root_has_property(&s, "$schema"));
     }
 
     fn child(s: &Schema, n: FormNodeId, key: &str) -> FormNodeId {

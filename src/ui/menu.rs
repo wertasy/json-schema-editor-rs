@@ -162,6 +162,10 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
         desc: "switch file: open the file picker when several files are open",
     },
     HelpEntry {
+        keys: "S",
+        desc: "switch schema: search SchemaStore and rebuild this file's form (the document body is kept)",
+    },
+    HelpEntry {
         keys: "ga / gr",
         desc: "jump to the row's anchor / its other uses — references and << merges (esc returns)",
     },
@@ -1119,6 +1123,12 @@ impl App {
             self.cmd_buf.clear(); // a history key breaks any pending g combo
             self.refresh_variant_menu();
             self.refresh_issues();
+            return;
+        }
+        // S switches the schema, not a document edit: it records the location
+        // and refreshes issues itself, so it must not pollute undo history.
+        if self.list_mode() && msg.key_str() == "S" {
+            self.route_key(msg);
             return;
         }
         if self.plain_motion(&msg) {

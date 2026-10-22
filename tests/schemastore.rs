@@ -149,15 +149,15 @@ fn schema_store_manual_search() {
 }
 
 #[test]
-fn schema_store_abort() {
+fn schema_store_pick_abort() {
     let ts = CatalogServer::start();
     let dir = tempfile::tempdir().unwrap();
     let cfg = dir.path().join("mystery.json");
     write_file(&cfg, r#"{"name":"z"}"#);
     let cfg_arg = cfg.to_string_lossy().into_owned();
-    // default query "mystery" matches nothing; empty lines keep it, then
-    // EOF aborts the picker
-    let r = run_with_catalog(&ts, "\n\n", &[cfg_arg.as_str(), "--accessible"]);
+    // --pick is explicit: the default query "mystery" matches nothing and
+    // EOF aborts, which stays an error instead of opening the file.
+    let r = run_with_catalog(&ts, "\n\n", &[cfg_arg.as_str(), "--pick", "--accessible"]);
     assert_eq!(r.code, 2, "exit; stderr:\n{}", r.stderr);
     assert!(
         r.stderr.contains("no schema found"),
@@ -167,6 +167,83 @@ fn schema_store_abort() {
     assert!(
         read_json(&cfg).get("$schema").is_none(),
         "aborted session still wrote $schema"
+    );
+}
+
+#[test]
+fn schema_store_abort_falls_back_to_schema_less() {
+    let ts = CatalogServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("mystery.json");
+    write_file(&cfg, r#"{"name":"z"}"#);
+    let cfg_arg = cfg.to_string_lossy().into_owned();
+    // Automatic lookup: search "serv", then blank aborts the picker. That is
+    // a valid no-schema answer, so the file opens schema-less and saves.
+    let r = run_with_catalog(&ts, "serv\n\n\n", &[cfg_arg.as_str(), "--accessible"]);
+    assert_eq!(
+        r.code, 0,
+        "exit; stdout:\n{}\nstderr:\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("no schema found"),
+        "stdout:\n{}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("Saved to"), "stdout:\n{}", r.stdout);
+    assert!(
+        read_json(&cfg).get("$schema").is_none(),
+        "schema-less session wrote $schema"
+    );
+}
+
+#[test]
+fn pty_s_key_switches_schema() {
+    let ts = CatalogServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("mystery.json");
+    write_file(&cfg, r#"{"name":"z"}"#);
+    let cfg_arg = cfg.to_string_lossy().into_owned();
+    let schema_url = ts.url.clone() + "/server.schema.json";
+    let cache = tempfile::tempdir().unwrap();
+    let cache_dir = cache.path().to_string_lossy().into_owned();
+    let catalog = ts.url.clone() + "/catalog.json";
+
+    let mut pty = match PtySession::spawn(
+        dir.path(),
+        &["-s", schema_url.as_str(), cfg_arg.as_str()],
+        &[
+            ("JSE_CATALOG_URL", catalog.as_str()),
+            ("JSE_CACHE_DIR", cache_dir.as_str()),
+        ],
+    ) {
+        PtySpawn::Ok(p) => p,
+        PtySpawn::Unavailable(e) => {
+            eprintln!("SKIP: no pty available: {e}");
+            return;
+        }
+    };
+
+    let (_, mut off) = pty.wait_frame("root menu", 0, &["Name", "Save and exit"]);
+    pty.send(b"S"); // open the SchemaStore search mid-session
+    (_, off) = pty.wait_frame("S opens the picker", off, &["Select a schema"]);
+    pty.send(b"decoy"); // replace the filename-stem preset
+    (_, off) = pty.wait_frame("decoy listed", off, &["Decoy"]);
+    pty.send(b"\r");
+    (_, off) = pty.wait_frame(
+        "schema switched",
+        off,
+        &["schema from SchemaStore: Decoy", "Save and exit"],
+    );
+    pty.send(b"\x13"); // ctrl+s
+    pty.wait_frame("saved", off, &["Write to "]);
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+
+    assert_eq!(
+        read_json(&cfg)["$schema"],
+        json!(ts.url.clone() + "/other.schema.json"),
+        "S did not record the chosen schema"
     );
 }
 

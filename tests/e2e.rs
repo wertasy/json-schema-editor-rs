@@ -410,17 +410,18 @@ fn schema_resolution_url() {
 }
 
 #[test]
-fn schema_resolution_none() {
+fn schema_resolution_none_falls_back_to_schema_less() {
     let dir = mktemp();
     let cfg = dir.path().join("cfg.json");
     write_file(&cfg, r#"{"name": "z"}"#);
     let cache = mktemp();
     let cache_dir = arg(cache.path());
     let cfg_arg = arg(&cfg);
-    // closed port: the catalog lookup fails instantly, no network
+    // closed port: the catalog lookup fails instantly, no network. The file
+    // still opens; raw JSON edits it with no save-time validation.
     let r = run_jse_env(
         repo_root(),
-        "",
+        "2\n{\"name\":\"w\"}\n\n",
         &[cfg_arg.as_str(), "--accessible"],
         &[
             ("JSE_CACHE_DIR", cache_dir.as_str()),
@@ -428,17 +429,176 @@ fn schema_resolution_none() {
         ],
         Duration::from_secs(10),
     );
-    assert_eq!(r.code, 2, "exit; stderr:\n{}", r.stderr);
-    assert!(
-        r.stderr.contains("no schema found"),
-        "stderr:\n{}",
-        r.stderr
+    assert_eq!(
+        r.code, 0,
+        "exit; stdout:\n{}\nstderr:\n{}",
+        r.stdout, r.stderr
     );
     assert!(
-        r.stderr.contains("schema catalog unavailable"),
-        "stderr:\n{}",
-        r.stderr
+        r.stdout.contains("no schema found"),
+        "stdout:\n{}",
+        r.stdout
     );
+    assert!(
+        r.stdout.contains("schema catalog unavailable"),
+        "stdout:\n{}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("Saved to"), "stdout:\n{}", r.stdout);
+    assert_eq!(read_json(&cfg)["name"], json!("w"));
+}
+
+#[test]
+fn pty_schema_less_structured_editing() {
+    let dir = mktemp();
+    let cfg = dir.path().join("plain.json");
+    write_file(&cfg, r#"{"name":"z","nested":{"port":8080}}"#);
+    let cache = mktemp();
+    let cfg_arg = arg(&cfg);
+    let Some(mut pty) = pty_or_skip(
+        &[cfg_arg.as_str()],
+        &[("JSE_CATALOG_URL", "http://127.0.0.1:1/catalog.json")],
+        &cache,
+    ) else {
+        return;
+    };
+
+    let (snap, mut off) = pty.wait_frame(
+        "schema-less root",
+        0,
+        &["no schema found", "name", "nested", "Save and exit"],
+    );
+    assert!(
+        !snap.contains("(not in schema)"),
+        "schema-less keys must not be decorated as unknown:\n{snap}"
+    );
+    // The first key is a known string value: enter edits it in place.
+    pty.send(b"\r");
+    (_, off) = pty.wait_frame("inline scalar editor", off, &["> name", "z"]);
+    pty.send(b"\x15"); // clear the prefilled value
+    pty.send(b"web\r");
+    (_, off) = pty.wait_frame("scalar edited in place", off, &["name", "web"]);
+    pty.send(b"\x13"); // ctrl+s
+    pty.wait_frame("saved", off, &["Write to "]);
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+
+    let got = read_json(&cfg);
+    assert_eq!(got["name"], json!("web"), "saved doc = {got}");
+}
+
+#[test]
+fn pty_schema_less_whole_doc_edit_rebuilds_root() {
+    let dir = mktemp();
+    let cfg = dir.path().join("shape.json");
+    let editor = dir.path().join("editor.sh");
+    write_file(&cfg, r#"{"name":"z"}"#);
+    write_file(
+        &editor,
+        "#!/bin/sh\nprintf '%s\\n' '[1, \"two\"]' > \"$1\"\n",
+    );
+    set_executable(&editor);
+    let cache = mktemp();
+    let cfg_arg = arg(&cfg);
+    let editor_arg = arg(&editor);
+    let Some(mut pty) = pty_or_skip(
+        &[cfg_arg.as_str()],
+        &[
+            ("EDITOR", editor_arg.as_str()),
+            ("JSE_CATALOG_URL", "http://127.0.0.1:1/catalog.json"),
+        ],
+        &cache,
+    ) else {
+        return;
+    };
+
+    pty.wait_frame("schema-less object root", 0, &["name", "Save and exit"]);
+    pty.send(b"G\r"); // the last row: < Edit raw JSON >
+    pty.wait_frame("raw edit applied", 0, &["Raw JSON edited"]);
+    // The document is now an array: the root menu follows the new shape.
+    let (_, off) = pty.wait_frame("array root", 0, &["< Add item >", "$[0]", "$[1]"]);
+    pty.send(b"\x13"); // ctrl+s
+    pty.wait_frame("saved", off, &["Write to "]);
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+
+    assert_eq!(read_json(&cfg), json!([1, "two"]));
+}
+
+#[test]
+fn pty_yaml_schema_less_editing_keeps_comments() {
+    let dir = mktemp();
+    let cfg = dir.path().join("plain.yaml");
+    write_file(&cfg, "# keep me\nname: z # inline\n");
+    let cache = mktemp();
+    let cfg_arg = arg(&cfg);
+    let Some(mut pty) = pty_or_skip(
+        &[cfg_arg.as_str()],
+        &[("JSE_CATALOG_URL", "http://127.0.0.1:1/catalog.json")],
+        &cache,
+    ) else {
+        return;
+    };
+
+    let (_, mut off) = pty.wait_frame(
+        "schema-less YAML root",
+        0,
+        &["no schema found", "name", "Edit raw YAML"],
+    );
+    pty.send(b"\r"); // the only key: edit the string in place
+    (_, off) = pty.wait_frame("inline YAML scalar editor", off, &["> name", "z"]);
+    pty.send(b"\x15");
+    pty.send(b"web\r");
+    (_, off) = pty.wait_frame("YAML scalar edited", off, &["name", "web"]);
+    pty.send(b"\x13");
+    pty.wait_frame("saved", off, &["Write to "]);
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+
+    let text = read_text(&cfg);
+    assert!(text.contains("# keep me"), "header comment lost:\n{text}");
+    assert!(
+        text.contains("name: web # inline"),
+        "value or inline comment lost:\n{text}"
+    );
+    assert!(
+        !text.contains("$schema:"),
+        "schema-less YAML gained a schema key:\n{text}"
+    );
+}
+
+#[test]
+fn yaml_schema_member_records_location_when_declared() {
+    let dir = mktemp();
+    let schema = dir.path().join("with-member.schema.json");
+    let cfg = dir.path().join("config.yaml");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{"$schema":{"type":"string","title":"Schema"},"name":{"type":"string","title":"Name"}}}"#,
+    );
+    write_file(&cfg, "name: demo\n");
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    // blank keeps the prefilled $schema; then edit Name; blank saves.
+    let r = run_jse(
+        "\nnewname\n\n",
+        &["-s", schema_arg.as_str(), cfg_arg.as_str(), "--accessible"],
+    );
+    assert_eq!(
+        r.code, 0,
+        "exit; stdout:\n{}\nstderr:\n{}",
+        r.stdout, r.stderr
+    );
+    let text = read_text(&cfg);
+    assert!(
+        text.contains(&format!("$schema: {schema_arg}")),
+        "schema location not written to the declared field:\n{text}"
+    );
+    assert!(
+        !text.contains("yaml-language-server"),
+        "directive comment written despite the declared field:\n{text}"
+    );
+    assert!(text.contains("name: newname"), "edit lost:\n{text}");
 }
 
 #[test]

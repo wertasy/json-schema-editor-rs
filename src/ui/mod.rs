@@ -98,6 +98,11 @@ pub struct Options {
     pub copy: Option<Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>>,
     /// Paste reads the system clipboard (menu p/P).
     pub paste: Option<Arc<dyn Fn() -> Result<String, String> + Send + Sync>>,
+    /// ReplaceSchemaLocation overwrites the document's recorded schema
+    /// location (and format metadata) after the S-key picker chose a new
+    /// schema; `true` means the schema declares a top-level "$schema"
+    /// property. None disables schema switching.
+    pub replace_schema_location: Option<Arc<dyn Fn(&mut Doc, &str, bool) + Send + Sync>>,
     /// Status is a warning line shown on the root screen (e.g. compile
     /// failure).
     pub status: String,

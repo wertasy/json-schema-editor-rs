@@ -1,6 +1,6 @@
 # Schema 来源与缓存
 
-jse 必须知道用哪份 JSON Schema 生成表单。解析按固定顺序进行，找到即用；全部失败才报错。
+jse 按固定顺序寻找 JSON Schema 来生成表单，找到即用。全部失败时不会拒绝打开文件，而是进入**无 schema 模式**直接编辑 JSON/YAML。
 
 ## 解析顺序
 
@@ -22,7 +22,7 @@ jse -s https://example.com/schemas/server.json config.json
 | 格式 | 指向写法 | 说明 |
 |---|---|---|
 | JSON / JSONC | 顶层 `"$schema": "<位置>"` | 必须是字符串；空字符串不算。 |
-| YAML | 文件头注释 `# yaml-language-server: $schema=<位置>` | 也可用顶层 `$schema` 键，显式键优先。jse 不会向 YAML 添加 `$schema` 键。 |
+| YAML | 文件头注释 `# yaml-language-server: $schema=<位置>` | 也可用顶层 `$schema` 键，显式键优先。 |
 
 - URL 直接使用。
 - 无 scheme 的相对路径先相对**配置文件所在目录**解析；该目录下不存在时，回退到**当前工作目录**。
@@ -31,7 +31,7 @@ jse -s https://example.com/schemas/server.json config.json
 
 ### 3. SchemaStore 目录
 
-前两步都没有结果时，下载 [SchemaStore](https://www.schemastore.org/) 公共目录（`https://www.schemastore.org/api/json/catalog.json`），按配置文件的绝对路径做 `fileMatch` 匹配：
+启动时前两步都没有结果，或会话中按 `S`，都会打开 [SchemaStore](https://www.schemastore.org/) 公共目录（`https://www.schemastore.org/api/json/catalog.json`）检索。启动解析按配置文件的绝对路径做 `fileMatch` 匹配：
 
 - 不带 `/` 的模式只匹配**文件名**（大小写不敏感）：`package.json`、`tsconfig*.json`、`*.srv.json`。
 - 带 `/` 的模式从路径尾部按目录段匹配，`**` 跨任意多级目录，`*`/`?`/`[...]` 只在单段内生效。例如 `**/.cdf/config.yaml`、`.platform/applications.yml`。
@@ -48,7 +48,7 @@ TUI 选择器：
 | `↑`/`↓`、`ctrl+k`/`ctrl+j` | 上下移动 |
 | `tab` / `shift+tab` | 下 / 上移动 |
 | `enter` | 选定（结果为空时不动作） |
-| `esc` / `ctrl+c` | 中止 |
+| `esc` / `ctrl+c` | 中止（自动检索时转入无 schema 模式；`--pick` 时退出） |
 
 初始查询词是文件名去掉扩展名；第一次输入文本会替换这个预置查询，而不是追加。
 
@@ -61,16 +61,24 @@ Select a schema for ci.yml
 ? Number (0 = new search, enter = abort): 1
 ```
 
-空行保留当前查询；`0` 重新搜索；直接回车中止；最多显示 15 条，超出提示继续细化。输入越界会提示 `! invalid number` 并重问。EOF 视为中止。
+空行保留当前查询；`0` 重新搜索；直接回车中止（自动检索时转入无 schema 模式，`--pick` 时退出）；最多显示 15 条，超出提示继续细化。输入越界会提示 `! invalid number` 并重问。EOF 视为中止。
 
-选中的 URL 会按配置格式写回 schema 指向（JSON/JSONC 顶层 `$schema`；YAML 文件头注释），下次启动走第 2 步。
+选中的 URL 会按配置格式写回 schema 指向（JSON/JSONC 顶层 `$schema`；YAML 默认写文件头注释，若该 schema 定义了顶层 `$schema` 属性则写入文档字段），下次启动走第 2 步。
 
-### 4. 全部失败
+会话中按 `S` 搜索并切换当前文件的 schema：选中的 URL 会覆盖旧指向，表单、校验器和根菜单重建，文档内容保留；取消则保持原 schema。该键只存在于全屏 TUI，`--accessible` 行式模式没有。
 
-- 没有 `-s`、配置没有指向、目录也不可用：`no schema found: provide -s or record the schema location in the config`，exit 2。
-- 目录下载失败且需要检索：附带 `schema catalog unavailable: ...`，exit 2。
-- `--pick` 下目录下载失败：exit 1。
-- 选择器被中止：同样报 `no schema found: ...`，exit 2。
+### 4. 全部失败：无 schema 模式
+
+没有 `-s`、配置没有指向、SchemaStore 也没有选中任何条目时，文件仍会打开：
+
+- 根屏状态行提示 `no schema found: editing without schema guidance; save-time validation disabled`。
+- 对象按 **schema-less 键菜单**编辑：所有文档键都直接列出，`enter` 按运行时类型编辑，`a`/`A` 新增键并从内建类型选择。
+- 数组进入条目管理；标量/其他根值按运行时类型编辑。
+- 根屏的 `< Edit raw JSON >` / `< Edit raw YAML >` 可整份外编。
+- 不会写入 `$schema` 指向；保存时不做 schema 校验。无 schema 时文档键不再标记 `(not in schema)`，也不会产生未知键警告。
+- 目录不可用时只附加提示 `schema catalog unavailable: ...`，不阻止编辑。
+- 自动检索中中止选择器（`esc`、回车/EOF）等于「不要 schema」，继续进入无 schema 模式。
+- `--pick` 是显式请求：目录下载失败 exit 1；选择器被中止仍报 `no schema found: ...`，exit 2。
 - 需要选择器但 stdin 不是终端：提示 `schema selection needs a terminal; rerun with --accessible or provide -s`，exit 2。
 
 ## schema 抓取失败

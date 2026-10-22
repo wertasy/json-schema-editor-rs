@@ -31,7 +31,8 @@ jse [-s <schema路径|http(s)://URL>] [-p|--pick] [-f|--force]
 - **配置必须是本地路径**：把 `http(s)://...` 放在位置参数会报 `config must be a local file path`，exit 2。
 - **没有位置参数**：报错并打印用法，exit 2。
 - **TUI 需要终端**：非 `--accessible` 模式下 stdin 不是终端会拒绝启动（exit 1），避免在半管道环境里画出错乱的界面。
-- **先全部加载再进界面**：多文件模式下，任一文件读取、解析或 schema 解析失败都会在界面出现前终止整个运行；每个文件各自解析 schema。
+- **先全部加载再进界面**：多文件模式下，任一文件读取或解析失败都会在界面出现前终止整个运行；每个文件各自解析 schema。
+- **没有 schema 也能编辑**：`-s`、配置指向和 SchemaStore 都找不到时进入无 schema 模式（对象为键菜单、数组为条目菜单、其他值按运行时类型；保存不校验），不会因缺少 schema 退出。详见[Schema 来源](schema-sources.md#4-全部失败无-schema-模式)。
 - **格式按扩展名**：`.json`/`.jsonc` 用 JSONC，`.yaml`/`.yml` 用 YAML；其它扩展名按 JSONC。详见[配置文件格式](formats.md)。
 
 ## 多文件会话
@@ -55,7 +56,7 @@ jse -s server.schema.json a.json b.yaml c.json
 |---|---|---|
 | 0 | 已保存；或无未保存改动时正常退出 | `Saved to <path>`（多文件每行一个）/ `No changes, nothing written` / `Saved with validation errors (--force): <paths>` |
 | 1 | 运行错误：读取/解析配置失败、schema 抓取或编译前置失败、TUI 错误、stdin 不是终端 | 错误信息写到 stderr |
-| 2 | 用法错误：未知参数、没有配置文件、没有 schema 来源、SchemaStore 选择中止 | 错误信息与用法写到 stderr |
+| 2 | 用法错误：未知参数、没有配置文件、`--pick` 中止、`--pick` 选择器缺少终端 | 错误信息与用法写到 stderr |
 | 130 | 用户中止：根屏选 `n` 放弃、`ctrl+c` | `Aborted, no changes written`；若此前保存过：`Saved to <path>; aborted (changes after the last save are lost)` |
 
 注意：

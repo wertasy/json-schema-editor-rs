@@ -165,10 +165,12 @@ Select a schema for ci.yml
 ? Number (0 = new search, enter = abort): 1
 ```
 
-- 空行保留当前查询；`0` 重新搜索；直接回车中止。
+- 空行保留当前查询；`0` 重新搜索；直接回车中止（自动检索时进入无 schema 模式，`--pick` 时退出）。
 - 最多列 15 条，更多时提示细化查询；无结果显示 `no matches` 并回到搜索提示。
 - 非数字或越界打印 `! invalid number` 并重问。
 - EOF 中止。
+
+没有 schema 时，行式模式仍可编辑：对象根屏只剩 `Save and exit` 与 `Edit raw JSON/YAML`（raw 整份编辑，单行输入）；数组根仍可逐项增删和 raw 编辑条目；标量根直接编辑 raw 值。保存不做校验。
 
 ## 限制
 

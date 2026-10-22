@@ -2002,6 +2002,11 @@ pub fn raw_value_summary(schema: &Schema, doc: &Doc, path: &[PathSeg]) -> String
 /// the same keys the menus flag "(not in schema)" — as editor-level
 /// warnings for the issues list.
 pub fn unknown_key_issues(schema: &Schema, doc: &Doc) -> Vec<Issue> {
+    // Without a schema every key is "unknown"; that is the editing model,
+    // not a problem worth flagging.
+    if schema.schema_less {
+        return Vec::new();
+    }
     let mut out: Vec<Issue> = Vec::new();
     let model = schema.root;
     walk(schema, doc, &mut out, model, &[], doc.root);
@@ -2952,6 +2957,7 @@ mod tests {
                 root: self.root,
                 defs: Vec::new(),
                 doc: self.doc,
+                schema_less: false,
             }
         }
     }
@@ -3205,6 +3211,7 @@ mod tests {
             write_to: None,
             copy: None,
             paste: None,
+            replace_schema_location: None,
             status: String::new(),
             startup_notice: String::new(),
             load_errors: vec![],

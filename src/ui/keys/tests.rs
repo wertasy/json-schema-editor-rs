@@ -51,6 +51,7 @@ impl TB {
             root: self.root,
             defs: Vec::new(),
             doc: self.doc,
+            schema_less: false,
         }
     }
 }
@@ -305,6 +306,7 @@ fn test_opts() -> Options {
         write_to: None,
         copy: None,
         paste: None,
+        replace_schema_location: None,
         status: String::new(),
         startup_notice: String::new(),
         load_errors: vec![],

@@ -2,9 +2,9 @@
 
 ## 启动与 schema
 
-### `no schema found: provide -s or record the schema location in the config`
+### `no schema found: editing without schema guidance; save-time validation disabled`
 
-没有找到 schema。按[解析顺序](schema-sources.md#解析顺序)检查：
+这不是错误，表示进入了**无 schema 模式**：文件仍可编辑，保存不校验。想恢复表单和校验，按[解析顺序](schema-sources.md#解析顺序)检查：
 
 1. 是否传了 `-s`；
 2. 配置顶层是否有非空 `$schema` 字符串（YAML 也可是文件头 `# yaml-language-server: $schema=...`）；
@@ -13,9 +13,9 @@
 
 临时解决：`jse -s ./schema.json config.json`。
 
-### `no schema found` + `schema catalog unavailable: ...`
+### `schema catalog unavailable: ...`
 
-需要 SchemaStore 但目录下载失败（网络、代理、镜像）。可以：
+需要 SchemaStore 但目录下载失败（网络、代理、镜像）。无 schema 模式仍可继续编辑；想使用 SchemaStore 可以：
 
 - 提供 `-s`；
 - 配置里写入 schema 路径；
