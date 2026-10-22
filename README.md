@@ -36,6 +36,7 @@ $
 ```sh
 cargo build --release
 cargo install --path .        # 安装到 ~/.cargo/bin
+cargo install json-schema-editor  # 从 crates.io 安装 jse
 ```
 
 `jse --version` 输出版本、提交与构建时间。Linux 静态发布目标为 `x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl`。

@@ -39,6 +39,12 @@ cargo build --release
 cargo install --path .
 ```
 
+也可以从 crates.io 安装（crate 名 `json-schema-editor`，二进制仍为 `jse`）：
+
+```sh
+cargo install json-schema-editor
+```
+
 安装位置通常是 `~/.cargo/bin/jse`；确保该目录在 `PATH` 中。
 
 ### 静态发布构建
