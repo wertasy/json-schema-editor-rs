@@ -11,9 +11,10 @@ use crate::ui::{NodeRef, RawCodec};
 
 // --- raw editors (Go raw.go) ----------------------------------------------------
 
-/// Raw-editor text syntax helpers: JSON by default, YAML for YAML documents.
-/// The YAML codec supplies its own marshal/unmarshal callbacks because only
-/// it knows the live format session (comments included).
+/// Raw-editor text syntax helpers: JSON by default, the file's own syntax for
+/// YAML and TOML documents. Those codecs supply their own marshal/unmarshal
+/// callbacks because only they know the live format session (comments
+/// included).
 pub trait RawExt {
     /// rawLabel: the syntax name shown in prompts ("JSON" by default).
     fn raw_label(&self) -> String;
@@ -194,6 +195,7 @@ fn copy_into(doc: &mut Doc, src: &Doc, id: NodeId) -> NodeId {
         value,
         anchor: data.anchor.clone(),
         merge,
+        raw: data.raw.clone(),
     })
 }
 

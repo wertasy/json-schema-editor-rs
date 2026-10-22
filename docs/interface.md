@@ -70,7 +70,7 @@ variant: <变体类型名> <变体签名>  ← oneOf 选择器与变体编辑器
 | `ctrl+o` | 导航历史后退。 |
 | `ctrl+i` / `tab` | 导航历史前进（终端把 ctrl+i 报告为 tab）。 |
 | `s` | 多文件时打开文件切换器；单文件时提示 `only one file is open`。 |
-| `S` | 打开 SchemaStore 搜索并切换**当前文件**的 schema：文档内容保留，表单、校验器和根菜单按新 schema 重建；选中结果按格式写回 schema 指向（YAML 若新 schema 定义 `$schema` 字段则写字段），`esc` 取消。 |
+| `S` | 打开 SchemaStore 搜索并切换**当前文件**的 schema：文档内容保留，表单、校验器和根菜单按新 schema 重建；选中结果按格式写回 schema 指向（YAML/TOML 若新 schema 定义 `$schema` 字段则写字段），`esc` 取消。 |
 
 `esc`/`q` 在有待消费的 `g` 缓冲时只清空缓冲；根屏的活的选中标记也会先被清空（提示 `selection cleared`），然后才进入退出流程。
 

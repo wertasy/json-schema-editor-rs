@@ -299,6 +299,7 @@ fn write_merge_key_after_edit() {
         value: Value::Null,
         anchor: String::new(),
         merge: vec![base, b2],
+        raw: String::new(),
     });
     let own = doc.new_str("x");
     if let Value::Object(m) = &mut doc.nodes[child as usize].value {

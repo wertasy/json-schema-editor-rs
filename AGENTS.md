@@ -32,6 +32,7 @@ src/doc/
   jsondoc.rs         arena document tree; order-preserving; exact numeric literals
   jsoncdoc.rs        JSONC parse + comment capture/write
   yamldoc/           YAML parse (comments, anchors, merge keys) + block emitter
+  tomldoc/           TOML parse (tables, dotted keys, table arrays, comments) + emitter
   mod.rs             Codec trait, format registry (FORMATS), Meta, schema pointer helpers
 src/fetch.rs         local/http(s)/file loading, 24h cache, conditional requests, offline fallback
 src/catalog.rs       SchemaStore catalog load + fileMatch glob matching
@@ -59,12 +60,13 @@ tests/
 ## Data-model invariants
 
 - `Doc` is an arena: nodes are addressed by `NodeId`, objects keep member order, numbers keep their exact literal text. Never round-trip a number through `f64` or rebuild a document just to move it.
+- `NodeData::raw` is the exact TOML source spelling for values whose Doc form is canonicalized (non-decimal/underlined integers, date/time literals). It is empty for other formats. Writing through a value replaces the node (dropping the old spelling); copying a subtree preserves it.
 - `Doc::clone()` preserves alias sharing: YAML aliases and merge refs are the same `NodeId` in multiple places. Undo snapshots rely on this. Use `detach`/`copy` only when the user explicitly materializes a copy.
 - A YAML `<<` member is represented as a null-valued node carrying `merge` refs. It is not an ordinary null value; keep merge handling in edges/rows.
 - `Meta` carries comments keyed by document path, JSONC tail comments, and the YAML alias count. A save must render with the session's **current** meta. Whole-document raw edits must adopt the freshly parsed meta (`adopt_doc`), or comments/directives are lost.
 - Comments follow their member: editing keeps them, deleting drops them, adding creates none. Preserve that when adding operations.
 - A JSON/JSONC file with no comments must write byte-for-byte like plain JSON (`JsoncCodec::write` delegates). Do not “improve” output formatting.
-- Schema location conventions: JSON/JSONC use top-level `$schema`; YAML uses the `# yaml-language-server: $schema=...` header, except when the loaded schema declares a top-level `$schema` property — then the document member is used (and any directive is removed). `set_schema_location`/`set_schema_location_with` keep an existing non-empty value; `--pick` clears first.
+- Schema location conventions: JSON/JSONC use top-level `$schema`; YAML uses the `# yaml-language-server: $schema=...` header; TOML uses `#:schema <location>`; for YAML/TOML, when the loaded schema declares a top-level `$schema` property the document member is used instead (and any directive is removed). `set_schema_location`/`set_schema_location_with` keep an existing non-empty value; `--pick` clears first.
 - A session with no schema uses `Schema::schema_less`: the root follows the document's runtime shape (object → key menu, array → item menu, other → runtime-typed field). Do not flag its keys as unknown, and rebuild the root after a whole-document raw edit changes the root type.
 - Local relative `$schema` paths resolve against the config file's directory, falling back to the current working directory only when the file does not exist there.
 

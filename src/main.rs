@@ -1,4 +1,4 @@
-//! jse — schema-driven terminal editor for JSON/JSONC/YAML config files.
+//! jse — schema-driven terminal editor for JSON/JSONC/YAML/TOML config files.
 //! Rust port of the Go implementation (behavior spec: internal/**, cmd/jse).
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
@@ -36,14 +36,15 @@ const NOTE_SCHEMA_LESS: &str =
     "no schema found: editing without schema guidance; save-time validation disabled";
 
 const USAGE_TEXT: &str = "Usage: jse [-s <schema path|http(s)://URL>] [-p|--pick] [-f|--force]
-           [-a|--accessible] [-v|--version] [-h|--help] <config.(json|jsonc|yaml|yml)>...
+           [-a|--accessible] [-v|--version] [-h|--help] <config.(json|jsonc|yaml|yml|toml)>...
 
-Edit a JSON, JSONC, or YAML configuration file guided by a JSON Schema.
+Edit a JSON, JSONC, YAML, or TOML configuration file guided by a JSON Schema.
 
 Schema source (checked in order):
   1. -s, --schema <local path or http(s)://URL>
-  2. the config's own schema pointer: a top-level \"$schema\" key, or a
-     \"# yaml-language-server: $schema=...\" comment for YAML files;
+  2. the config's own schema pointer: a top-level \"$schema\" key, a
+     \"# yaml-language-server: $schema=...\" comment for YAML files, or a
+     \"#:schema <location>\" comment for TOML files;
      relative paths resolve against the config file's directory, falling
      back to the current working directory when no file exists there
   3. the SchemaStore catalog: a unique fileMatch hit for the file name is
@@ -61,7 +62,7 @@ endpoint.
 
 Arguments:
   config file   the configuration file to edit (local path); the format
-                follows the extension (.json/.jsonc, .yaml/.yml) and a
+                follows the extension (.json/.jsonc, .yaml/.yml, .toml) and a
                 missing file starts empty and is created on save.
                 Several files open in one session: the first is shown, s
                 opens the file switcher, and ctrl+o/ctrl+i step
@@ -83,7 +84,7 @@ Keys: ↑/↓ move · space toggle · enter select · tab next · esc back · ct
 Supported form keywords: type, enum/const, numeric and string constraints,
 properties/required, items/minItems/maxItems, local and remote $ref,
 oneOf/anyOf/allOf. Everything else is still validated on save; unsupported
-constructs fall back to a raw editor in the file's format (JSON or YAML).";
+constructs fall back to a raw editor in the file's format (JSON, YAML, or TOML).";
 
 type ValidateFn = Arc<dyn Fn(&Doc) -> Vec<String> + Send + Sync>;
 type SaveFn = Arc<dyn Fn(&Doc) -> Result<(), String> + Send + Sync>;
@@ -113,7 +114,9 @@ fn run() -> i32 {
     };
 
     if flags.files.is_empty() {
-        eprintln!("no config file: pass <config.(json|jsonc|yaml|yml)> as a positional argument");
+        eprintln!(
+            "no config file: pass <config.(json|jsonc|yaml|yml|toml)> as a positional argument"
+        );
         print_usage();
         return 2;
     }
@@ -493,15 +496,17 @@ fn load_session(
     }
     let root = model.root;
 
-    // Raw editors use the file's own format (YAML for .yaml/.yml, JSON
-    // otherwise). The menu owns the live Doc, while the format metadata
-    // (JSONC comments, YAML anchors/directives) lives in this shared slot:
-    // marshal_doc writes the caller's document with the CURRENT meta, and
-    // adopt_doc installs a freshly parsed meta so writes after a raw-doc
-    // round trip use the adopted comment state (Go closes over the session
-    // and replaces it in AdoptDoc; the Arc<Mutex<Meta>> is that session).
+    // Raw editors use the file's own format (YAML for .yaml/.yml, TOML for
+    // .toml, JSON otherwise). The menu owns the live Doc, while the format
+    // metadata (JSONC comments, YAML anchors/directives, TOML comments) lives
+    // in this shared slot: marshal_doc writes the caller's document with the
+    // CURRENT meta, and adopt_doc installs a freshly parsed meta so writes
+    // after a raw-doc round trip use the adopted comment state (Go closes
+    // over the session and replaces it in AdoptDoc; the Arc<Mutex<Meta>> is
+    // that session).
     let shared_meta: Arc<Mutex<Meta>> = Arc::new(Mutex::new(parsed.meta));
-    let raw = if matches!(file_ext(config).to_lowercase().as_str(), ".yaml" | ".yml") {
+    let ext = file_ext(config).to_lowercase();
+    let raw = if matches!(ext.as_str(), ".yaml" | ".yml") {
         RawCodec {
             label: "YAML",
             ext: ".yaml",
@@ -528,6 +533,39 @@ fn load_session(
             marshal_value: Arc::new(|r: NodeRef<'_>| yaml_value_text(r.doc, r.id)),
             unmarshal_value: Arc::new(|data: &str| {
                 doc::yamldoc::parse(data)
+                    .map(|(d, _)| d)
+                    .map_err(|e| e.to_string())
+            }),
+        }
+    } else if ext == ".toml" {
+        RawCodec {
+            label: "TOML",
+            ext: ".toml",
+            marshal_doc: {
+                let shared_meta = Arc::clone(&shared_meta);
+                Arc::new(move |doc: &Doc| {
+                    let meta = lock(&shared_meta);
+                    codec.write(doc, &meta).map_err(|e| e.to_string())
+                })
+            },
+            unmarshal_doc: Arc::new(|data: &str| {
+                doc::tomldoc::parse(data)
+                    .map(|(d, _)| d)
+                    .map_err(|e| e.to_string())
+            }),
+            adopt_doc: Some({
+                let shared_meta = Arc::clone(&shared_meta);
+                Arc::new(move |data: &str| {
+                    let Parsed { doc, meta } = codec.parse(data).map_err(|e| e.to_string())?;
+                    *lock(&shared_meta) = meta.clone();
+                    Ok((doc, meta))
+                })
+            }),
+            marshal_value: Arc::new(|r: NodeRef<'_>| {
+                doc::tomldoc::write_value(r.doc, r.id).map_err(|e| e.to_string())
+            }),
+            unmarshal_value: Arc::new(|data: &str| {
+                doc::tomldoc::parse_value(data)
                     .map(|(d, _)| d)
                     .map_err(|e| e.to_string())
             }),
@@ -907,6 +945,7 @@ fn copy_value(src: &Doc, id: crate::doc::NodeId, dst: &mut Doc) -> crate::doc::N
         value,
         anchor: String::new(),
         merge,
+        raw: src.node(id).raw.clone(),
     })
 }
 

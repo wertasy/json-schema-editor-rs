@@ -191,6 +191,7 @@ fn copy_into(doc: &mut Doc, src: &Doc, id: NodeId) -> NodeId {
         value,
         anchor: data.anchor.clone(),
         merge,
+        raw: data.raw.clone(),
     })
 }
 

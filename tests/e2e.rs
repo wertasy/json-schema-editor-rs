@@ -676,6 +676,125 @@ fn yaml_editing_accessible() {
 }
 
 #[test]
+fn toml_editing_accessible() {
+    let dir = mktemp();
+    let schema = dir.path().join("mini.schema.json");
+    let cfg = dir.path().join("config.toml");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{"name":{"type":"string","title":"Name"}},"required":["name"]}"#,
+    );
+    write_file(
+        &cfg,
+        "# config header\nname = \"demo\" # keep me\nhex = 0x1F\nwhen = 1979-05-27T07:32:00Z\n[server]\nport = 8080\n[[mounts]]\nsrc = \"/a\" # first\n[[mounts]]\nsrc = \"/b\"\n",
+    );
+
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let r = run_jse(
+        "newname\n\n",
+        &["-s", schema_arg.as_str(), cfg_arg.as_str(), "--accessible"],
+    );
+    assert_eq!(
+        r.code, 0,
+        "exit; stdout:\n{}\nstderr:\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(r.stdout.contains("Saved to"), "stdout:\n{}", r.stdout);
+
+    let text = read_text(&cfg);
+    let want_directive = format!("#:schema {schema_arg}");
+    assert!(
+        text.contains(&want_directive),
+        "toml schema directive missing:\n{text}"
+    );
+    assert!(
+        !text.contains("#:schema="),
+        "unexpected directive form:\n{text}"
+    );
+    assert!(
+        text.contains("# config header"),
+        "header comment lost:\n{text}"
+    );
+    assert!(
+        text.contains("name = \"newname\" # keep me"),
+        "value or line comment lost:\n{text}"
+    );
+    assert!(
+        !text.contains("name = \"demo\""),
+        "old value survived:\n{text}"
+    );
+    assert!(
+        text.contains("hex = 0x1F\n"),
+        "numeric literal lost:\n{text}"
+    );
+    assert!(
+        text.contains("when = 1979-05-27T07:32:00Z\n"),
+        "datetime literal lost:\n{text}"
+    );
+    assert!(
+        text.contains("[server]\nport = 8080\n"),
+        "table content lost:\n{text}"
+    );
+    assert!(
+        text.contains("[[mounts]]\nsrc = \"/a\" # first\n[[mounts]]\nsrc = \"/b\"\n"),
+        "table array lost:\n{text}"
+    );
+
+    // The directive alone supplies the schema on the next run (no -s).
+    let r = run_jse("newname\n\n", &[cfg_arg.as_str(), "--accessible"]);
+    assert_eq!(
+        r.code, 0,
+        "directive run exit; stdout:\n{}\nstderr:\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("Saved to"),
+        "directive run:\n{}",
+        r.stdout
+    );
+    let text = read_text(&cfg);
+    assert!(
+        text.contains(&want_directive) && text.contains("name = \"newname\" # keep me"),
+        "comment/directive lost on second save:\n{text}"
+    );
+}
+
+#[test]
+fn toml_schema_member_records_location_when_declared() {
+    let dir = mktemp();
+    let schema = dir.path().join("with-member.schema.json");
+    let cfg = dir.path().join("config.toml");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{"$schema":{"type":"string","title":"Schema"},"name":{"type":"string","title":"Name"}}}"#,
+    );
+    write_file(&cfg, "name = \"demo\"\n");
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    // blank keeps the prefilled $schema; then edit Name; blank saves.
+    let r = run_jse(
+        "\nnewname\n\n",
+        &["-s", schema_arg.as_str(), cfg_arg.as_str(), "--accessible"],
+    );
+    assert_eq!(
+        r.code, 0,
+        "exit; stdout:\n{}\nstderr:\n{}",
+        r.stdout, r.stderr
+    );
+    let text = read_text(&cfg);
+    assert!(
+        text.contains(&format!("\"$schema\" = \"{schema_arg}\"")),
+        "schema location not written to the declared field:\n{text}"
+    );
+    assert!(
+        !text.contains("#:schema"),
+        "directive comment written despite the declared field:\n{text}"
+    );
+    assert!(text.contains("name = \"newname\""), "edit lost:\n{text}");
+}
+
+#[test]
 fn jsonc_editing_accessible() {
     for name in ["config.jsonc", "config.json"] {
         let dir = mktemp();

@@ -123,7 +123,7 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
     },
     HelpEntry {
         keys: "y / Y",
-        desc: "copy the \"key\": value pair / the value (JSON or YAML per document); array pages: both copy the item's value",
+        desc: "copy the \"key\": value pair / the value (JSON, YAML, or TOML per document); array pages: both copy the item's value",
     },
     HelpEntry {
         keys: "x / X",
@@ -143,7 +143,7 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
     },
     HelpEntry {
         keys: "p / P",
-        desc: "smart paste clipboard JSON (YAML docs: YAML too) — p: this menu, P: the row's own container (a single value replaces its value); keys/items land below (p) / above (P) the cursor row",
+        desc: "smart paste clipboard JSON (YAML/TOML docs: that syntax too) — p: this menu, P: the row's own container (a single value replaces its value); keys/items land below (p) / above (P) the cursor row",
     },
     HelpEntry {
         keys: "z",
@@ -412,7 +412,8 @@ pub struct SelState {
 }
 
 /// textState is the built-in raw textarea overlay; its syntax follows
-/// Options.Raw (JSON or YAML). `path` is None for the whole-document editor.
+/// Options.Raw (JSON, YAML, or TOML). `path` is None for the whole-document
+/// editor.
 pub struct TextState {
     pub path: Option<Vec<PathSeg>>,
     pub fn_: Option<FormNodeId>,
@@ -1925,6 +1926,7 @@ pub fn copy_from_doc(doc: &mut Doc, src: &Doc, id: NodeId) -> NodeId {
         value,
         anchor: data.anchor.clone(),
         merge,
+        raw: data.raw.clone(),
     })
 }
 
@@ -1956,6 +1958,7 @@ pub fn copy_detached_from_doc(doc: &mut Doc, src: &Doc, id: NodeId) -> NodeId {
         value,
         anchor: String::new(),
         merge: Vec::new(),
+        raw: String::new(),
     })
 }
 

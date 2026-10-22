@@ -49,6 +49,11 @@ pub struct NodeData {
     /// in sequence order. Only the value of a "<<" member ever holds refs;
     /// such a node carries `Value::Null`.
     pub merge: Vec<NodeId>,
+    /// TOML: the exact source literal when the Doc form is canonicalized
+    /// (non-decimal integers, date/time values). Empty for every other
+    /// format and for values the editor created. A value-neutral write keeps
+    /// it (see `carry_raw`); a changed value replaces the node and drops it.
+    pub raw: String,
 }
 
 /// One document: the arena plus its root. `Clone` preserves alias sharing
@@ -315,6 +320,19 @@ impl Doc {
         }
     }
 
+    /// A value-neutral write keeps the node's exact TOML source spelling.
+    /// Editing a 0x1F field and submitting the displayed 31 must not
+    /// canonicalize the file just because the value was re-applied.
+    fn carry_raw(&mut self, old: NodeId, v: NodeId) {
+        if v != old
+            && self.nodes[v as usize].raw.is_empty()
+            && !self.nodes[old as usize].raw.is_empty()
+            && self.nodes[v as usize].value == self.nodes[old as usize].value
+        {
+            self.nodes[v as usize].raw = self.nodes[old as usize].raw.clone();
+        }
+    }
+
     /// Set's member write at the last path segment. A current value carrying
     /// a YAML anchor is written through in place with its anchor kept: the
     /// node may be shared with alias occurrences, and swapping the id would
@@ -336,6 +354,7 @@ impl Doc {
             }
         };
         let Some((idx, old)) = found else { return };
+        self.carry_raw(old, v);
         if self.nodes[old as usize].anchor.is_empty() {
             if let Value::Object(members) = &mut self.nodes[n as usize].value {
                 members[idx].val = v;
@@ -355,6 +374,7 @@ impl Doc {
             Value::Array(items) => items[idx],
             _ => return,
         };
+        self.carry_raw(old, v);
         if self.nodes[old as usize].anchor.is_empty() {
             if let Value::Array(items) = &mut self.nodes[n as usize].value {
                 items[idx] = v;
@@ -764,6 +784,7 @@ impl Doc {
             value,
             anchor: String::new(),
             merge: Vec::new(),
+            raw: self.nodes[id as usize].raw.clone(),
         })
     }
 
@@ -1827,6 +1848,7 @@ mod tests {
             value: Value::Null,
             anchor: String::new(),
             merge: vec![base, b2],
+            raw: String::new(),
         });
         let own = d.new_str("yes");
         let child = d.new_object();

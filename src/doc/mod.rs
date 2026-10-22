@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 pub mod jsoncdoc;
 pub mod jsondoc;
+pub mod tomldoc;
 pub mod yamldoc;
 
 pub use jsondoc::{Doc, DocError, Member, NodeData, NodeId, PathSeg, Value};
@@ -29,11 +30,13 @@ pub struct CommentSet {
 
 /// Meta carries the format state a session needs to write the document back
 /// faithfully: the comment table (keyed by document path), comments after
-/// the root JSONC value, and the YAML alias count.
+/// the root JSONC value or at the end of a TOML document, and the YAML alias
+/// count.
 #[derive(Clone, Debug, Default)]
 pub struct Meta {
     pub comments: HashMap<Vec<PathSeg>, CommentSet>,
     /// JSONC: comments after the root value, outside a root container.
+    /// TOML: comments after the last member.
     pub tail: String,
     /// YAML: number of alias references found while parsing.
     pub aliases: usize,
@@ -248,8 +251,80 @@ impl Codec for YamlCodec {
     }
 }
 
+/// TOML codec: .toml. Scalars JSON cannot spell exactly (non-decimal
+/// integers, date/time values) keep their source literal on the node for
+/// faithful saves; edits write canonical TOML.
+pub struct TomlCodec;
+
+impl Codec for TomlCodec {
+    fn extensions(&self) -> &'static [&'static str] {
+        &[".toml"]
+    }
+
+    fn parse(&self, text: &str) -> Result<Parsed, DocError> {
+        tomldoc::parse(text).map(|(doc, meta)| Parsed { doc, meta })
+    }
+
+    fn write(&self, doc: &Doc, meta: &Meta) -> Result<String, DocError> {
+        tomldoc::write(doc, meta)
+    }
+
+    fn empty(&self) -> Parsed {
+        let mut doc = Doc::new();
+        let obj = doc.new_object();
+        doc.set(&[], obj).expect("root set");
+        Parsed {
+            doc,
+            meta: Meta::default(),
+        }
+    }
+
+    fn schema_location(&self, doc: &Doc, meta: &Meta) -> Option<String> {
+        // an explicit "$schema" member wins over the header directive
+        schema_from_doc(doc).or_else(|| tomldoc::schema_directive(doc, meta))
+    }
+
+    fn set_schema_location(&self, doc: &mut Doc, meta: &mut Meta, loc: &str) {
+        // keeps TOML idiomatic: `#:schema <loc>` in the header, never a
+        // "$schema" member unless the schema itself declares one
+        if schema_from_doc(doc).is_some() {
+            return;
+        }
+        tomldoc::set_schema_directive(doc, meta, loc);
+    }
+
+    fn set_schema_location_with(
+        &self,
+        doc: &mut Doc,
+        meta: &mut Meta,
+        loc: &str,
+        schema_member: bool,
+    ) {
+        if !schema_member {
+            return self.set_schema_location(doc, meta, loc);
+        }
+        // The schema declares "$schema" as a property: record the location
+        // there and drop any header directive so only one source remains.
+        let existing = self.schema_location(doc, meta);
+        match existing {
+            Some(existing) => crate::doc::set_schema_member(doc, &existing),
+            None => crate::doc::set_schema_member(doc, loc),
+        }
+        tomldoc::clear_schema_directive(doc, meta);
+    }
+
+    fn clear_schema_location(&self, doc: &mut Doc, meta: &mut Meta) {
+        clear_schema_member(doc);
+        tomldoc::clear_schema_directive(doc, meta);
+    }
+
+    fn notices(&self, _doc: &Doc, _meta: &Meta) -> Vec<String> {
+        Vec::new()
+    }
+}
+
 /// The registered formats, in dispatch order.
-static FORMATS: [&dyn Codec; 2] = [&JsoncCodec, &YamlCodec];
+static FORMATS: [&dyn Codec; 3] = [&JsoncCodec, &YamlCodec, &TomlCodec];
 
 /// go_ext mirrors filepath.Ext: the suffix beginning at the final dot of the
 /// final element (".cshrc" → ".cshrc", "a.b.json" → ".json", "a" → "").
@@ -356,6 +431,8 @@ mod tests {
             ("a.yaml", ".yaml"),
             ("a.YML", ".yaml"),
             ("x/a.yml", ".yaml"),
+            ("a.toml", ".toml"),
+            ("x/A.TOML", ".toml"),
             ("a.json", ".json"),
             ("a.jsonc", ".json"),
             ("a.conf", ".json"),
@@ -367,6 +444,7 @@ mod tests {
             assert_eq!(f.extensions()[0], want_ext, "{path}");
         }
         assert_eq!(codec_for("a.yaml").extensions(), &[".yaml", ".yml"]);
+        assert_eq!(codec_for("a.toml").extensions(), &[".toml"]);
         assert_eq!(codec_for("a.unknown").extensions(), &[".json", ".jsonc"]);
     }
 

@@ -502,10 +502,33 @@ fn classify_paste_yaml(
     Ok(classify_parsed(doc))
 }
 
+/// classifyPasteTOML decodes clipboard text as TOML for TOML documents.
+/// A full document supplies members/items; otherwise a single value (scalar,
+/// array, inline table) replaces the target value.
+fn classify_paste_toml(
+    s: &str,
+) -> Result<(Option<Vec<PasteMember>>, Option<Vec<NodeId>>, Option<Doc>), String> {
+    if let Ok((doc, _meta)) = crate::doc::tomldoc::parse(s) {
+        return Ok(classify_parsed(doc));
+    }
+    if let Ok((doc, _meta)) = crate::doc::tomldoc::parse_value(s) {
+        return Ok(classify_parsed(doc));
+    }
+    // Copying a string value writes its text without quotes (the same rule
+    // every format uses), so a single unadorned line is that string.
+    if !s.contains('\n') && !s.contains('=') && !s.starts_with(['[', '{', '"', '\'']) {
+        let mut doc = Doc::new();
+        let n = doc.new_str(s);
+        doc.root = n;
+        return Ok((None, None, Some(doc)));
+    }
+    Err("clipboard is not JSON keys or items".to_string())
+}
+
 /// parsePaste classifies the clipboard (Go menu_paste.go parsePaste).
 fn parse_paste(
     text: &str,
-    yaml_mode: bool,
+    mode: &str,
 ) -> Result<(Option<Vec<PasteMember>>, Option<Vec<NodeId>>, Option<Doc>), String> {
     let mut s = text.trim().to_string();
     if s.is_empty() {
@@ -521,8 +544,10 @@ fn parse_paste(
                         return Ok(classify_parsed(doc));
                     }
                 }
-                if yaml_mode {
-                    return classify_paste_yaml(&s);
+                match mode {
+                    "YAML" => return classify_paste_yaml(&s),
+                    "TOML" => return classify_paste_toml(&s),
+                    _ => {}
                 }
                 return Err("clipboard is not JSON keys or items".to_string());
             }
@@ -555,10 +580,11 @@ fn parse_paste(
             return Ok((None, Some(items.clone()), Some(doc)));
         }
     }
-    if yaml_mode {
-        return classify_paste_yaml(&s);
+    match mode {
+        "YAML" => classify_paste_yaml(&s),
+        "TOML" => classify_paste_toml(&s),
+        _ => Err("clipboard is not JSON keys or items".to_string()),
     }
-    Err("clipboard is not JSON keys or items".to_string())
 }
 
 /// pasteValueRowOK reports whether the cursor row is a value slot a pasted
@@ -2241,6 +2267,7 @@ impl App {
             value: Value::Array(items_v),
             anchor: String::new(),
             merge: Vec::new(),
+            raw: String::new(),
         });
         let _ = f.doc.set(&r.path, arr);
     }
@@ -2868,8 +2895,8 @@ impl App {
                 return;
             }
         };
-        let yaml_mode = self.opts().raw.raw_label() == "YAML";
-        let (members, items, doc) = match parse_paste(&text, yaml_mode) {
+        let mode = self.opts().raw.raw_label();
+        let (members, items, doc) = match parse_paste(&text, &mode) {
             Ok(x) => x,
             Err(e) => {
                 self.notice = e;
@@ -3975,6 +4002,7 @@ impl App {
             value: Value::Null,
             anchor: String::new(),
             merge: refs,
+            raw: String::new(),
         });
         let _ = self.fs_mut().doc.insert_member(path, "<<", idx, n);
     }
@@ -4247,7 +4275,14 @@ impl App {
             return;
         }
         let label = self.opts().raw.raw_label();
-        match self.opts().raw.decode_raw_value(&trimmed) {
+        let decoded = match &s.path {
+            // The whole-document editor must use the document codec: it
+            // adopts format metadata (comments/directives) and accepts the
+            // file's full grammar (a TOML document is not a TOML value).
+            None => self.opts().raw.decode_raw_doc(&trimmed),
+            Some(_) => self.opts().raw.decode_raw_value(&trimmed),
+        };
+        match decoded {
             Err(e) => {
                 if let Some(Overlay::Text(t)) = &mut self.overlay {
                     t.err = format!("invalid {}: {}", label, e);

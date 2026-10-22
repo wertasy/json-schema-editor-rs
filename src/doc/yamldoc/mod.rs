@@ -485,6 +485,7 @@ impl Ctx {
                     value: Value::Null,
                     anchor: String::new(),
                     merge: refs,
+                    raw: String::new(),
                 });
                 let mut mpath = base_path.clone();
                 mpath.push(PathSeg::Key("<<".to_string()));

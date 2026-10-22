@@ -19,7 +19,7 @@ Name webapp
 - 提示是 `标题 `（末尾一个空格），读取一行。
 - 行内校验失败会打印错误并重新提示；空行取绑定默认值。
 - required 字段且没有默认值时，**不能靠空行通过**，必须给出内容。
-- raw 字段（整份文档或不可表单化子树）也是一行文本，内容按文件格式（JSON/YAML）；空行表示删除该值/不修改。
+- raw 字段（整份文档或不可表单化子树）也是一行文本，内容按文件格式（JSON/YAML/TOML）；空行表示删除该值/不修改。
 
 ### 单选
 
@@ -90,7 +90,7 @@ Enter a number between 1 and 4:
 ```
 
 - 非根对象：第一项是 `Done (back)`，默认选中。
-- 根对象：导航项在前，然后是 `Save and exit` 与 `Edit raw JSON`（YAML 文件显示 `Edit raw YAML`）；默认选中 `Save and exit`。
+- 根对象：导航项在前，然后是 `Save and exit` 与 `Edit raw JSON`（YAML/TOML 文件分别显示 `Edit raw YAML` / `Edit raw TOML`）；默认选中 `Save and exit`。
 - 数组/对象/oneOf 子节点显示为 `Edit ... ▸`；枚举数组直接作为多选字段，不进入子菜单。
 - 没有可编辑字段时打印 `Nothing to edit here`。
 
@@ -170,11 +170,11 @@ Select a schema for ci.yml
 - 非数字或越界打印 `! invalid number` 并重问。
 - EOF 中止。
 
-没有 schema 时，行式模式仍可编辑：对象根屏只剩 `Save and exit` 与 `Edit raw JSON/YAML`（raw 整份编辑，单行输入）；数组根仍可逐项增删和 raw 编辑条目；标量根直接编辑 raw 值。保存不做校验。
+没有 schema 时，行式模式仍可编辑：对象根屏只剩 `Save and exit` 与 `Edit raw JSON/YAML/TOML`（raw 整份编辑，单行输入）；数组根仍可逐项增删和 raw 编辑条目；标量根直接编辑 raw 值。保存不做校验。
 
 ## 限制
 
 - 没有实时问题列表、字段行标记、面包屑、多选/宏/撤销/搜索替换/文件切换器。
-- 文本输入都是单行；多行 YAML/JSON 内容需要写成一行（JSON 用 `\n` 转义，YAML 用流式或引号形式）。
+- 文本输入都是单行；多行 YAML/JSON/TOML 内容需要写成一行（JSON/TOML 用 `\n` 转义，YAML 用流式或引号形式）。
 - 校验只在保存时进行；加载时的既有错误不会在行式流程里单独列出。
 - 多个文件顺序处理，不能在一个文件内跳到另一个文件。

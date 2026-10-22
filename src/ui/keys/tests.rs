@@ -2008,6 +2008,38 @@ fn yaml_paste_app(doc: Doc, text: &str) -> App {
     app_with(test_schema(), doc, opts)
 }
 
+fn toml_codec() -> RawCodec {
+    RawCodec {
+        label: "TOML",
+        ext: ".toml",
+        marshal_doc: Arc::new(|d: &Doc| {
+            crate::doc::tomldoc::write(d, &crate::doc::Meta::default()).map_err(|e| e.to_string())
+        }),
+        unmarshal_doc: Arc::new(|s: &str| {
+            crate::doc::tomldoc::parse(s)
+                .map(|(d, _)| d)
+                .map_err(|e| e.to_string())
+        }),
+        adopt_doc: None,
+        marshal_value: Arc::new(|r| {
+            crate::doc::tomldoc::write_value(r.doc, r.id).map_err(|e| e.to_string())
+        }),
+        unmarshal_value: Arc::new(|s: &str| {
+            crate::doc::tomldoc::parse_value(s)
+                .map(|(d, _)| d)
+                .map_err(|e| e.to_string())
+        }),
+    }
+}
+
+fn toml_paste_app(doc: Doc, text: &str) -> App {
+    let mut opts = test_opts();
+    opts.raw = toml_codec();
+    let t = text.to_string();
+    opts.paste = Some(Arc::new(move || Ok(t.clone())));
+    app_with(test_schema(), doc, opts)
+}
+
 fn two_mount_doc() -> Doc {
     let mut doc = test_doc();
     let arr = doc.new_array();
@@ -2340,6 +2372,58 @@ fn paste_yaml_keeps_json_working() {
         obj_keys(&m.fs().doc, &[]).join(" "),
         "name a b server mounts"
     );
+}
+
+#[test]
+fn paste_toml_block_pairs() {
+    let mut m = toml_paste_app(test_doc(), "x = 1\ny = \"2\"");
+    press(&mut m, &["p"]);
+    assert_eq!(m.notice, "pasted 2 keys into $");
+    assert_eq!(
+        obj_keys(&m.fs().doc, &[]).join(" "),
+        "name x y server mounts"
+    );
+    assert_eq!(num_at(&m.fs().doc, &["x"]), "1");
+    assert_eq!(str_at(&m.fs().doc, &["y"]), "2");
+}
+
+#[test]
+fn paste_toml_value_array() {
+    let mut m = toml_paste_app(two_mount_doc(), r#"[{ src = "/c" }, { src = "/d" }]"#);
+    press(&mut m, &["down", "down", "down", "down", "enter"]);
+    press(&mut m, &["down", "down"]);
+    press(&mut m, &["p"]);
+    assert_eq!(m.notice, "pasted 2 items into $.mounts");
+    assert_eq!(arr_len(&m.fs().doc, &sp(&["mounts"])), 4);
+    assert_eq!(
+        sget(
+            &m.fs().doc,
+            &[ks("mounts"), PathSeg::Idx(2), PathSeg::Key("src".into())]
+        ),
+        "/c"
+    );
+}
+
+#[test]
+fn paste_toml_scalar_value() {
+    let mut m = toml_paste_app(test_doc(), "1979-05-27T07:32:00Z");
+    press(&mut m, &["p"]);
+    // A bare value needs P on a value row; p only explains the rule.
+    assert!(m.notice.contains("single value"), "notice = {}", m.notice);
+
+    let mut m = toml_paste_app(test_doc(), "1979-05-27T07:32:00Z");
+    press(&mut m, &["P"]);
+    assert_eq!(m.notice, "pasted value into $.name");
+    assert_eq!(str_at(&m.fs().doc, &["name"]), "1979-05-27T07:32:00Z");
+}
+
+#[test]
+fn paste_toml_plain_string_value() {
+    // y/Y copies a string without quotes; P must accept that text back.
+    let mut m = toml_paste_app(test_doc(), "hello world");
+    press(&mut m, &["P"]);
+    assert_eq!(m.notice, "pasted value into $.name");
+    assert_eq!(str_at(&m.fs().doc, &["name"]), "hello world");
 }
 
 #[test]
@@ -8236,6 +8320,7 @@ fn copy_subtree(src: &Doc, id: NodeId, dst: &mut Doc) -> NodeId {
         value,
         anchor: String::new(),
         merge,
+        raw: String::new(),
     })
 }
 

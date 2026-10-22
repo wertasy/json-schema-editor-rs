@@ -1,6 +1,6 @@
 # Schema 来源与缓存
 
-jse 按固定顺序寻找 JSON Schema 来生成表单，找到即用。全部失败时不会拒绝打开文件，而是进入**无 schema 模式**直接编辑 JSON/YAML。
+jse 按固定顺序寻找 JSON Schema 来生成表单，找到即用。全部失败时不会拒绝打开文件，而是进入**无 schema 模式**直接编辑 JSON/YAML/TOML。
 
 ## 解析顺序
 
@@ -23,6 +23,7 @@ jse -s https://example.com/schemas/server.json config.json
 |---|---|---|
 | JSON / JSONC | 顶层 `"$schema": "<位置>"` | 必须是字符串；空字符串不算。 |
 | YAML | 文件头注释 `# yaml-language-server: $schema=<位置>` | 也可用顶层 `$schema` 键，显式键优先。 |
+| TOML | 文件头注释 `#:schema <位置>` | 也可用顶层 `"$schema"` 键，显式键优先。 |
 
 - URL 直接使用。
 - 无 scheme 的相对路径先相对**配置文件所在目录**解析；该目录下不存在时，回退到**当前工作目录**。
@@ -65,7 +66,7 @@ Select a schema for ci.yml
 
 空行保留当前查询；`0` 重新搜索；直接回车中止（自动检索时转入无 schema 模式，`--pick` 时退出）；最多显示 15 条，超出提示继续细化。输入越界会提示 `! invalid number` 并重问。EOF 视为中止。
 
-选中的 URL 会按配置格式写回 schema 指向（JSON/JSONC 顶层 `$schema`；YAML 默认写文件头注释，若该 schema 定义了顶层 `$schema` 属性则写入文档字段），下次启动走第 2 步。
+选中的 URL 会按配置格式写回 schema 指向（JSON/JSONC 顶层 `$schema`；YAML 默认写文件头注释；TOML 默认写 `#:schema` 注释；后两者在 schema 定义了顶层 `$schema` 属性时写入文档字段），下次启动走第 2 步。
 
 会话中按 `S` 搜索并切换当前文件的 schema：选中的 URL 会覆盖旧指向，表单、校验器和根菜单重建，文档内容保留；取消则保持原 schema。该键只存在于全屏 TUI，`--accessible` 行式模式没有。
 
@@ -76,7 +77,7 @@ Select a schema for ci.yml
 - 根屏状态行提示 `no schema found: editing without schema guidance; save-time validation disabled`。
 - 对象按 **schema-less 键菜单**编辑：所有文档键都直接列出，`enter` 按运行时类型编辑，`a`/`A` 新增键并从内建类型选择。
 - 数组进入条目管理；标量/其他根值按运行时类型编辑。
-- 根屏的 `< Edit raw JSON >` / `< Edit raw YAML >` 可整份外编。
+- 根屏的 `< Edit raw JSON >` / `< Edit raw YAML >` / `< Edit raw TOML >` 可整份外编。
 - 不会写入 `$schema` 指向；保存时不做 schema 校验。无 schema 时文档键不再标记 `(not in schema)`，也不会产生未知键警告。
 - 目录不可用时只附加提示 `schema catalog unavailable: ...`，不阻止编辑。
 - 自动检索中中止选择器（`esc`、回车/EOF）等于「不要 schema」，继续进入无 schema 模式。

@@ -2,10 +2,10 @@
 
 ```text
 jse [-s <schema路径|http(s)://URL>] [-p|--pick] [-f|--force]
-    [-a|--accessible] [-v|--version] [-h|--help] <config.(json|jsonc|yaml|yml)>...
+    [-a|--accessible] [-v|--version] [-h|--help] <config.(json|jsonc|yaml|yml|toml)>...
 ```
 
-一切以 `/config.(json|jsonc|yaml|yml)>...` 位置参数都是要编辑的本地配置文件；一个进程可以同时打开多个。
+一切以 `/config.(json|jsonc|yaml|yml|toml)>...` 位置参数都是要编辑的本地配置文件；一个进程可以同时打开多个。
 
 ## 参数
 
@@ -33,7 +33,7 @@ jse [-s <schema路径|http(s)://URL>] [-p|--pick] [-f|--force]
 - **TUI 需要终端**：非 `--accessible` 模式下 stdin 不是终端会拒绝启动（exit 1），避免在半管道环境里画出错乱的界面。
 - **先全部加载再进界面**：多文件模式下，任一文件读取或解析失败都会在界面出现前终止整个运行；每个文件各自解析 schema。
 - **没有 schema 也能编辑**：`-s`、配置指向和 SchemaStore 都找不到时进入无 schema 模式（对象为键菜单、数组为条目菜单、其他值按运行时类型；保存不校验），不会因缺少 schema 退出。详见[Schema 来源](schema-sources.md#4-全部失败无-schema-模式)。
-- **格式按扩展名**：`.json`/`.jsonc` 用 JSONC，`.yaml`/`.yml` 用 YAML；其它扩展名按 JSONC。详见[配置文件格式](formats.md)。
+- **格式按扩展名**：`.json`/`.jsonc` 用 JSONC，`.yaml`/`.yml` 用 YAML，`.toml` 用 TOML；其它扩展名按 JSONC。详见[配置文件格式](formats.md)。
 
 ## 多文件会话
 
@@ -71,8 +71,9 @@ jse -s server.schema.json a.json b.yaml c.json
 # 显式 schema
 jse -s examples/server.schema.json server.json
 
-# schema 已写在配置的 $schema / YAML 文件头里
+# schema 已写在配置的 $schema / YAML 文件头 / TOML `#:schema` 里
 jse server.yaml
+jse Cargo.toml
 
 # 远端 schema
 jse -s https://example.com/schemas/server.schema.json server.json

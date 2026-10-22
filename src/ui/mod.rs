@@ -48,9 +48,9 @@ pub enum Res {
 }
 
 /// RawCodec is the text syntax used by raw editors. The default is JSON;
-/// YAML documents pass a codec backed by yamldoc. MarshalDoc writes the
-/// whole live document (comments included when the codec captures the
-/// session); MarshalValue writes one subtree.
+/// YAML and TOML documents pass a codec backed by their format module.
+/// MarshalDoc writes the whole live document (comments included when the
+/// codec captures the session); MarshalValue writes one subtree.
 #[derive(Clone)]
 pub struct RawCodec {
     /// "JSON" (default) or "YAML"
@@ -170,7 +170,7 @@ pub enum RowKind {
     Remove,
     /// "< Save and exit >"
     Save,
-    /// "< Edit raw JSON/YAML >"
+    /// "< Edit raw JSON/YAML/TOML >"
     Raw,
     /// oneOf variant picker line
     Variant,

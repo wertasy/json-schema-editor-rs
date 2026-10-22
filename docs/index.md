@@ -9,7 +9,7 @@
 | [安装与构建](install.md) | 第一次安装、从源码构建、发布包内容 |
 | [命令行](cli.md) | 查参数、一次打开多个文件、看退出码与环境变量 |
 | [Schema 来源与缓存](schema-sources.md) | 配置没带 schema、想用 SchemaStore、远端 schema 缓存/离线 |
-| [配置文件格式](formats.md) | JSONC 注释、YAML 锚点/合并键、保存后格式变化 |
+| [配置文件格式](formats.md) | JSONC/TOML 注释、YAML 锚点/合并键、保存后格式变化 |
 | [界面与键位](interface.md) | 第一次打开 TUI、查某个键、理解状态行和标记 |
 | [编辑功能](editing.md) | 数组/映射/oneOf 编辑、复制粘贴、多选、搜索替换、撤销、宏 |
 | [校验与保存](validation.md) | 哪些关键字生效、出错怎么办、保存行为和退出码 |
