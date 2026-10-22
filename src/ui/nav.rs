@@ -170,8 +170,7 @@ mod tests {
             vanchor: 0,
             search_ti: Default::default(),
             searching: false,
-            search_prefilled: false,
-            search_applied: false,
+            search_cursor: 0,
         }
     }
 

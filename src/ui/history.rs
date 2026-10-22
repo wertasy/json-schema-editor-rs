@@ -87,6 +87,8 @@ impl History {
 pub struct Inputs {
     pub edit: bool,
     pub text: bool,
+    /// a search input has focus (document search, oneOf/enum-array picker,
+    /// enum picker, issues/errors/references/file-picker filter)
     pub search_active: bool,
     pub add: bool,
     pub write: bool,
@@ -96,12 +98,12 @@ pub struct Inputs {
     pub issues: bool,
     pub errs: bool,
     pub sel: bool,
+    /// gr reference picker
+    pub ref_pick: bool,
     /// dedicated long-comment page
     pub comment: bool,
     pub help: bool,
     pub file_pick: bool,
-    /// oneOf picker search mode (no overlay, but text input rules)
-    pub variant_search: bool,
     /// f/F fast move waits for a target character: u/q/@/. are characters
     pub fast_move: bool,
 }
@@ -110,15 +112,7 @@ pub struct Inputs {
 /// textarea, search, add-key input, anchor/merge inputs): q/@/. are ordinary
 /// characters there and history keys must not fire.
 pub fn typing(i: &Inputs) -> bool {
-    i.edit
-        || i.text
-        || i.search_active
-        || i.add
-        || i.write
-        || i.anc
-        || i.mrg
-        || i.variant_search
-        || i.fast_move
+    i.edit || i.text || i.search_active || i.add || i.write || i.anc || i.mrg || i.fast_move
 }
 
 /// list_mode reports whether the plain menu key table owns the keyboard.
@@ -127,6 +121,7 @@ pub fn list_mode(i: &Inputs) -> bool {
         && !i.issues
         && !i.errs
         && !i.sel
+        && !i.ref_pick
         && !i.comment
         && !i.help
         && !typing(i)
@@ -267,8 +262,7 @@ mod tests {
             vanchor: 0,
             search_ti: Default::default(),
             searching: false,
-            search_prefilled: false,
-            search_applied: false,
+            search_cursor: 0,
         }
     }
 
@@ -310,15 +304,7 @@ mod tests {
         assert!(typing(&i));
         assert!(!list_mode(&i));
 
-        for flag in [
-            "edit",
-            "text",
-            "add",
-            "write",
-            "anc",
-            "mrg",
-            "variant_search",
-        ] {
+        for flag in ["edit", "text", "add", "write", "anc", "mrg", "fast_move"] {
             let mut i = Inputs::default();
             match flag {
                 "edit" => i.edit = true,
@@ -327,7 +313,6 @@ mod tests {
                 "write" => i.write = true,
                 "anc" => i.anc = true,
                 "mrg" => i.mrg = true,
-                "variant_search" => i.variant_search = true,
                 "fast_move" => i.fast_move = true,
                 _ => unreachable!(),
             }
@@ -335,13 +320,22 @@ mod tests {
             assert!(!list_mode(&i));
         }
 
-        for flag in ["confirm", "issues", "errs", "sel", "help", "file_pick"] {
+        for flag in [
+            "confirm",
+            "issues",
+            "errs",
+            "sel",
+            "ref_pick",
+            "help",
+            "file_pick",
+        ] {
             let mut i = Inputs::default();
             match flag {
                 "confirm" => i.confirm = true,
                 "issues" => i.issues = true,
                 "errs" => i.errs = true,
                 "sel" => i.sel = true,
+                "ref_pick" => i.ref_pick = true,
                 "help" => i.help = true,
                 "file_pick" => i.file_pick = true,
                 _ => unreachable!(),

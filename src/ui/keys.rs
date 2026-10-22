@@ -15,7 +15,7 @@ use regex::Regex;
 use crate::doc::jsondoc;
 use crate::doc::{Doc, Member, NodeData, NodeId, PathSeg, Value};
 use crate::icons::{ERR, WARN};
-use crate::smodel::{FormNode, FormNodeId, Kind, Schema};
+use crate::smodel::{EnumOpt, FormNode, FormNodeId, Kind, Schema};
 use crate::ui::files::wrap_cursor;
 use crate::ui::menu::{
     AddState, AnchorMode, AnchorState, App, COMMENT_PREVIEW_LINES, CommentState, ConfirmState,
@@ -168,6 +168,58 @@ fn enum_index(schema: &Schema, fn_: FormNodeId, vdoc: &Doc, v: Option<NodeId>) -
         }
     }
     0
+}
+
+/// selMatches iterates the enum picker's options allowed by its search
+/// query: a case-insensitive substring over the display label. An empty
+/// query keeps every option.
+fn sel_matches(s: &SelState) -> impl Iterator<Item = &EnumOpt> {
+    let q = s.search_ti.value().to_lowercase();
+    s.opts
+        .iter()
+        .filter(move |o| q.is_empty() || o.display.to_lowercase().contains(&q))
+}
+
+/// listSearchMatch reports whether text contains the query
+/// (case-insensitive); an empty query matches everything.
+fn list_search_match(q: &str, text: &str) -> bool {
+    q.is_empty() || text.to_lowercase().contains(&q.to_lowercase())
+}
+
+/// issueIndices lists the issues matching the overlay's search query.
+fn issue_indices(s: &IssuesState) -> impl Iterator<Item = usize> + '_ {
+    let q = s.search_ti.value();
+    s.items
+        .iter()
+        .enumerate()
+        .filter(move |(_, it)| {
+            list_search_match(q, &it.msg)
+                || it.path.as_ref().map_or(false, |p| {
+                    list_search_match(q, &crate::doc::jsondoc::path_string(p))
+                })
+        })
+        .map(|(i, _)| i)
+}
+
+/// errIndices lists the save-error lines matching the search query.
+fn err_indices(s: &ErrsState) -> impl Iterator<Item = usize> + '_ {
+    let q = s.search_ti.value();
+    s.lines
+        .iter()
+        .enumerate()
+        .filter(move |(_, line)| list_search_match(q, line))
+        .map(|(i, _)| i)
+}
+
+/// selMatchCount is the number of options the picker currently lists.
+fn sel_match_count(s: &SelState) -> usize {
+    sel_matches(s).count()
+}
+
+/// selOptionAt resolves the option under the picker cursor in the filtered
+/// list.
+fn sel_option_at(s: &SelState, cursor: usize) -> Option<&EnumOpt> {
+    sel_matches(s).nth(cursor)
 }
 
 /// variantContains reports whether target is one of the oneOf node's
@@ -648,7 +700,7 @@ fn paste_has_key(members: &[Member], key: &str) -> bool {
 
 /// Map a Msg to the reduced widget Key (Go feeds the bubbles widgets the
 /// tea.KeyMsg directly; this covers the operations they exercise).
-fn msg_key(msg: &Msg) -> Option<Key> {
+pub(crate) fn msg_key(msg: &Msg) -> Option<Key> {
     Some(match msg {
         Msg::Char(c, false) => Key::Char(*c),
         Msg::Enter => Key::Enter,
@@ -667,13 +719,6 @@ fn msg_key(msg: &Msg) -> Option<Key> {
         Msg::Ctrl('w') => Key::CtrlW,
         _ => return None,
     })
-}
-
-/// searchModifiesText reports whether msg edits text (rather than moving the
-/// input cursor). The preset query is cleared before such a key, matching the
-/// schema picker's stale-query behavior.
-fn search_modifies_text(msg: &Msg) -> bool {
-    matches!(msg, Msg::Backspace | Msg::Delete) || matches!(msg, Msg::Char(c, _) if !c.is_control())
 }
 
 /// inputLine renders `prompt + value` with a reverse-video caret, scrolling
@@ -977,8 +1022,7 @@ impl App {
             vanchor: 0,
             search_ti: Default::default(),
             searching: false,
-            search_prefilled: false,
-            search_applied: false,
+            search_cursor: 0,
         };
         crate::ui::rows::seed_variant_cursor(&f.schema, &mut st, &f.doc);
         f.stack = vec![st];
@@ -1005,7 +1049,7 @@ impl App {
         let st_kind = self.top().map(|st| st.kind);
         let rows = self.menu_rows();
         self.clamp_cursor(&rows);
-        if self.variant_search_key(&msg) {
+        if self.menu_search_key(&msg) {
             return;
         }
         if rows.is_empty() {
@@ -1186,8 +1230,8 @@ impl App {
                 self.help_scroll = 0;
             }
             "/" => {
-                if st_kind == Some(MenuKind::OneOf) {
-                    self.start_variant_search();
+                if matches!(st_kind, Some(MenuKind::OneOf) | Some(MenuKind::EnumArray)) {
+                    self.start_menu_search();
                 } else {
                     self.open_search(false);
                 }
@@ -1195,7 +1239,12 @@ impl App {
             "r" => self.open_search(true),
             "s" => {
                 if self.files.len() > 1 {
-                    self.file_pick = Some(FilePickState { cursor: self.cur });
+                    self.file_pick = Some(FilePickState {
+                        cursor: self.cur,
+                        search_ti: TextInput::default(),
+                        searching: false,
+                        search_cursor: self.cur,
+                    });
                 } else {
                     self.notice = "only one file is open".to_string();
                 }
@@ -1283,7 +1332,10 @@ impl App {
             RowKind::Unknown => self.activate_unknown(r.path.clone()),
             RowKind::Expand => self.expand_alias(&r.path),
             RowKind::NoItems => {
-                if self.top().map(|st| st.kind) != Some(MenuKind::OneOf) {
+                if !matches!(
+                    self.top().map(|st| st.kind),
+                    Some(MenuKind::OneOf) | Some(MenuKind::EnumArray)
+                ) {
                     self.add_key(&r, false);
                 }
             }
@@ -1417,8 +1469,7 @@ impl App {
             vanchor: 0,
             search_ti: Default::default(),
             searching: false,
-            search_prefilled: false,
-            search_applied: false,
+            search_cursor: 0,
         };
         {
             let f = self.fs_mut();
@@ -1744,86 +1795,79 @@ impl App {
         self.open_field_synth(synth, path, false, None);
     }
 
-    /// startVariantSearch arms the in-picker search (the "/" key on a oneOf
-    /// picker). The search input follows the schema picker: it starts with
-    /// the selected type's name as a stale query, which the first text edit
-    /// replaces. The menu cursor and the unfiltered list stay put until the
-    /// user edits the query.
-    fn start_variant_search(&mut self) {
+    /// startMenuSearch arms the inline "/"-search of a oneOf picker or an
+    /// enum-array toggle list. The query always starts empty and the cursor
+    /// keeps the position it had (the current value's row when the picker
+    /// opened on a value).
+    fn start_menu_search(&mut self) {
         let Some(st) = self.top().cloned() else {
             return;
         };
-        if st.kind != MenuKind::OneOf {
+        if !matches!(st.kind, MenuKind::OneOf | MenuKind::EnumArray) {
             return;
         }
-        let rows = self.menu_rows();
-        let current = rows.get(st.cursor).cloned();
-        let variant = current.as_ref().and_then(|r| r.variant);
-        let name = variant
-            .map(|v| {
-                let f = &self.fs().schema.nodes[v as usize];
-                if !f.title.is_empty() {
-                    f.title.clone()
-                } else {
-                    variant_signature(&self.fs().schema, Some(v))
-                }
-            })
-            .unwrap_or_default();
         if let Some(t) = self.top_mut() {
             t.searching = true;
-            t.search_ti.set_value(name);
-            t.search_prefilled = true;
-            t.search_applied = false;
-            t.offset = 0;
+            t.search_ti = TextInput::default();
+            t.search_cursor = st.cursor;
         }
     }
 
-    /// variantSearchKey consumes keys while the oneOf picker's search input is
-    /// active. The input supports the same editing keys as the schema
-    /// picker; the query only starts searching after its first edit.
-    fn variant_search_key(&mut self, msg: &Msg) -> bool {
-        let (is_oneof, searching) = self
+    /// menuSearchKey consumes keys while the inline list search is active.
+    /// It supports the schema picker's editing keys; the query filters the
+    /// rows as it is typed.
+    fn menu_search_key(&mut self, msg: &Msg) -> bool {
+        let (inline_search, searching) = self
             .top()
-            .map(|st| (st.kind == MenuKind::OneOf, st.searching))
+            .map(|st| {
+                (
+                    matches!(st.kind, MenuKind::OneOf | MenuKind::EnumArray),
+                    st.searching,
+                )
+            })
             .unwrap_or((false, false));
-        if !is_oneof || !searching {
+        if !inline_search || !searching {
             return false;
         }
         match msg {
             Msg::Esc => {
                 if let Some(st) = self.top_mut() {
                     st.searching = false;
-                    st.search_prefilled = false;
-                    st.search_applied = false;
-                    st.search_ti.set_value("");
-                    st.cursor = 0;
-                    st.offset = 0;
+                    st.search_ti = TextInput::default();
+                }
+                let n = self.menu_rows().len();
+                if let Some(st) = self.top_mut() {
+                    st.cursor = st.search_cursor.min(n.saturating_sub(1));
                 }
                 true
             }
             Msg::Enter => {
                 let cur = self.top().map(|st| st.cursor).unwrap_or(0);
                 let row = self.menu_rows().get(cur).cloned();
-                if let Some(r) = row {
-                    // no match: stay in the search mode so backspace undoes it
-                    if r.kind != RowKind::NoItems {
-                        if let Some(st) = self.top_mut() {
-                            st.searching = false;
-                            st.search_prefilled = false;
-                            st.search_applied = false;
-                            st.search_ti.set_value("");
-                        }
-                        self.activate(r);
-                    }
+                let Some(r) = row else { return true };
+                // no match: stay in the search mode so backspace undoes it
+                if r.kind == RowKind::NoItems {
+                    return true;
                 }
+                // toggling an enum-array member keeps the filter: enter is
+                // the only toggle key while the query is being typed
+                if self.top().map(|st| st.kind) == Some(MenuKind::EnumArray) {
+                    self.activate(r);
+                    return true;
+                }
+                if let Some(st) = self.top_mut() {
+                    st.searching = false;
+                    st.search_ti = TextInput::default();
+                }
+                self.activate(r);
                 true
             }
             Msg::Up | Msg::BackTab | Msg::Ctrl('k') => {
-                self.variant_search_move(-1);
+                self.menu_search_move(-1);
                 true
             }
             Msg::Down | Msg::Tab | Msg::Ctrl('j') => {
-                self.variant_search_move(1);
+                self.menu_search_move(1);
                 true
             }
             _ => {
@@ -1834,14 +1878,8 @@ impl App {
                     return true;
                 };
                 let before = st.search_ti.value().to_string();
-                if st.search_prefilled && search_modifies_text(msg) {
-                    // the preset type name behaves like selected text
-                    st.search_prefilled = false;
-                    st.search_ti.set_value("");
-                }
                 st.search_ti.handle_key(key);
                 if st.search_ti.value() != before {
-                    st.search_applied = true;
                     st.cursor = 0;
                     st.offset = 0;
                 }
@@ -1850,7 +1888,7 @@ impl App {
         }
     }
 
-    fn variant_search_move(&mut self, delta: i64) {
+    fn menu_search_move(&mut self, delta: i64) {
         let n = self.menu_rows().len();
         let cur = self.top().map(|st| st.cursor).unwrap_or(0);
         if let Some(st) = self.top_mut() {
@@ -1947,6 +1985,9 @@ impl App {
                     path,
                     opts: f.enum_,
                     cursor,
+                    search_ti: TextInput::default(),
+                    searching: false,
+                    search_cursor: 0,
                     one_of: None,
                 }));
             }
@@ -2498,6 +2539,9 @@ impl App {
                     path,
                     opts,
                     cursor,
+                    search_ti: TextInput::default(),
+                    searching: false,
+                    search_cursor: 0,
                     one_of,
                 }));
             }
@@ -3417,7 +3461,13 @@ impl App {
             self.set_issues(items.clone());
         }
         self.fs_mut().issues_parked = None; // reopening resets the parked list
-        self.overlay = Some(Overlay::Issues(IssuesState { items, cursor: 0 }));
+        self.overlay = Some(Overlay::Issues(IssuesState {
+            items,
+            cursor: 0,
+            search_ti: TextInput::default(),
+            searching: false,
+            search_cursor: 0,
+        }));
     }
 
     /// issuesReturnTo reopens the parked issue list at the jump target.
@@ -3441,7 +3491,13 @@ impl App {
         if !items.is_empty() && cur > items.len() - 1 {
             cur = items.len() - 1;
         }
-        self.overlay = Some(Overlay::Issues(IssuesState { items, cursor: cur }));
+        self.overlay = Some(Overlay::Issues(IssuesState {
+            items,
+            cursor: cur,
+            search_ti: TextInput::default(),
+            searching: false,
+            search_cursor: cur,
+        }));
     }
 
     // --- search ------------------------------------------------------------
@@ -3698,6 +3754,9 @@ impl App {
                     name,
                     paths: targets,
                     cursor: 0,
+                    search_ti: TextInput::default(),
+                    searching: false,
+                    search_cursor: 0,
                 }));
             }
         }
@@ -4266,18 +4325,26 @@ impl App {
 
     /// keyErrs drives the save-time errors overlay (Go keyErrs).
     pub fn key_errs(&mut self, msg: Msg, mut s: ErrsState) -> Option<Overlay> {
+        if s.searching {
+            return self.key_errs_search(msg, s);
+        }
         if self.jump_keys(&msg, &mut s.cursor, s.lines.len()) {
             return Some(Overlay::Errs(s));
         }
         match msg.key_str().as_str() {
+            "/" => {
+                s.search_cursor = s.cursor;
+                s.search_ti = TextInput::default();
+                s.searching = true;
+            }
             "up" | "k" => s.cursor = wrap_cursor(s.cursor, -1, s.lines.len()),
             "down" | "j" => s.cursor = wrap_cursor(s.cursor, 1, s.lines.len()),
             "pgdown" | "ctrl+f" => {
-                let page = self.height.saturating_sub(3).max(1);
+                let page = self.errs_page_size(false);
                 s.cursor = page_cursor(s.cursor, 1, page, s.lines.len());
             }
             "pgup" | "ctrl+b" => {
-                let page = self.height.saturating_sub(3).max(1);
+                let page = self.errs_page_size(false);
                 s.cursor = page_cursor(s.cursor, -1, page, s.lines.len());
             }
             "enter" => {
@@ -4303,37 +4370,91 @@ impl App {
         Some(Overlay::Errs(s))
     }
 
+    /// keyErrsSearch consumes keys while the save-error filter is active.
+    fn key_errs_search(&mut self, msg: Msg, mut s: ErrsState) -> Option<Overlay> {
+        match msg {
+            Msg::Esc => {
+                s.searching = false;
+                s.search_ti = TextInput::default();
+                s.cursor = s.search_cursor.min(s.lines.len().saturating_sub(1));
+            }
+            Msg::Enter => {
+                let path = err_indices(&s)
+                    .nth(s.cursor)
+                    .and_then(|i| s.paths.get(i))
+                    .and_then(|p| p.clone());
+                if let Some(path) = path {
+                    self.fs_mut().issues_parked = None; // a fresh jump replaces a parked list
+                    self.nav_forward();
+                    self.jump_to_path(&path);
+                    return None;
+                }
+            }
+            Msg::Up | Msg::BackTab | Msg::Ctrl('k') => {
+                let n = err_indices(&s).count();
+                s.cursor = wrap_cursor(s.cursor, -1, n);
+            }
+            Msg::Down | Msg::Tab | Msg::Ctrl('j') => {
+                let n = err_indices(&s).count();
+                s.cursor = wrap_cursor(s.cursor, 1, n);
+            }
+            Msg::PageDown | Msg::Ctrl('f') => {
+                let n = err_indices(&s).count();
+                let page = self.errs_page_size(true);
+                s.cursor = page_cursor(s.cursor, 1, page, n);
+            }
+            Msg::PageUp | Msg::Ctrl('b') => {
+                let n = err_indices(&s).count();
+                let page = self.errs_page_size(true);
+                s.cursor = page_cursor(s.cursor, -1, page, n);
+            }
+            _ => {
+                let Some(key) = msg_key(&msg) else {
+                    return Some(Overlay::Errs(s));
+                };
+                let before = s.search_ti.value().to_string();
+                s.search_ti.handle_key(key);
+                if s.search_ti.value() != before {
+                    s.cursor = 0;
+                }
+            }
+        }
+        Some(Overlay::Errs(s))
+    }
+
+    fn errs_page_size(&self, searching: bool) -> usize {
+        self.height
+            .saturating_sub(2 + usize::from(searching))
+            .max(1)
+    }
+
     /// keyIssues drives the load-time issues overlay (Go keyIssues).
     pub fn key_issues(&mut self, msg: Msg, mut s: IssuesState) -> Option<Overlay> {
+        if s.searching {
+            return self.key_issues_search(msg, s);
+        }
         if self.jump_keys(&msg, &mut s.cursor, s.items.len()) {
             return Some(Overlay::Issues(s));
         }
         match msg.key_str().as_str() {
+            "/" if !s.items.is_empty() => {
+                s.search_cursor = s.cursor;
+                s.search_ti = TextInput::default();
+                s.searching = true;
+            }
             "up" | "k" | "ctrl+k" => s.cursor = wrap_cursor(s.cursor, -1, s.items.len()),
             "down" | "j" | "ctrl+j" => s.cursor = wrap_cursor(s.cursor, 1, s.items.len()),
             "pgdown" | "ctrl+f" => {
-                let page = self.issues_page_size();
+                let page = self.issues_page_size(false);
                 s.cursor = page_cursor(s.cursor, 1, page, s.items.len());
             }
             "pgup" | "ctrl+b" => {
-                let page = self.issues_page_size();
+                let page = self.issues_page_size(false);
                 s.cursor = page_cursor(s.cursor, -1, page, s.items.len());
             }
             "enter" => {
-                if let Some(path) = s.items.get(s.cursor).and_then(|it| it.path.clone()) {
-                    // closing the list (this park cycle or a later one)
-                    // returns here
-                    self.fs_mut().issues_parked = Some(IssuesState {
-                        items: s.items.clone(),
-                        cursor: s.cursor,
-                    });
-                    self.fs_mut().issues_origin = Some(self.fs().stack.clone());
-                    self.fs_mut().search_parked = None; // a fresh jump replaces a parked search
-                    self.fs_mut().jump_origin = None;
-                    self.fs_mut().jump_return = 0;
-                    self.nav_forward();
-                    self.jump_to_path(&path);
-                    self.fs_mut().issues_return = self.fs().stack.len();
+                let items = s.items.clone();
+                if self.issues_jump(&items, s.cursor) {
                     return None;
                 }
             }
@@ -4343,9 +4464,81 @@ impl App {
         Some(Overlay::Issues(s))
     }
 
+    /// keyIssuesSearch consumes keys while the issue-list filter is active.
+    fn key_issues_search(&mut self, msg: Msg, mut s: IssuesState) -> Option<Overlay> {
+        match msg {
+            Msg::Esc => {
+                s.searching = false;
+                s.search_ti = TextInput::default();
+                s.cursor = s.search_cursor.min(s.items.len().saturating_sub(1));
+            }
+            Msg::Enter => {
+                let idx = issue_indices(&s).nth(s.cursor);
+                if let Some(idx) = idx {
+                    let items = s.items.clone();
+                    if self.issues_jump(&items, idx) {
+                        return None;
+                    }
+                }
+            }
+            Msg::Up | Msg::BackTab | Msg::Ctrl('k') => {
+                let n = issue_indices(&s).count();
+                s.cursor = wrap_cursor(s.cursor, -1, n);
+            }
+            Msg::Down | Msg::Tab | Msg::Ctrl('j') => {
+                let n = issue_indices(&s).count();
+                s.cursor = wrap_cursor(s.cursor, 1, n);
+            }
+            Msg::PageDown | Msg::Ctrl('f') => {
+                let n = issue_indices(&s).count();
+                let page = self.issues_page_size(true);
+                s.cursor = page_cursor(s.cursor, 1, page, n);
+            }
+            Msg::PageUp | Msg::Ctrl('b') => {
+                let n = issue_indices(&s).count();
+                let page = self.issues_page_size(true);
+                s.cursor = page_cursor(s.cursor, -1, page, n);
+            }
+            _ => {
+                let Some(key) = msg_key(&msg) else {
+                    return Some(Overlay::Issues(s));
+                };
+                let before = s.search_ti.value().to_string();
+                s.search_ti.handle_key(key);
+                if s.search_ti.value() != before {
+                    s.cursor = 0;
+                }
+            }
+        }
+        Some(Overlay::Issues(s))
+    }
+
+    /// issuesJump parks the list and jumps to one issue's document path.
+    fn issues_jump(&mut self, items: &[Issue], idx: usize) -> bool {
+        let Some(path) = items.get(idx).and_then(|it| it.path.clone()) else {
+            return false;
+        };
+        // closing the list (this park cycle or a later one) returns here
+        self.fs_mut().issues_parked = Some(IssuesState {
+            items: items.to_vec(),
+            cursor: idx,
+            search_ti: TextInput::default(),
+            searching: false,
+            search_cursor: idx,
+        });
+        self.fs_mut().issues_origin = Some(self.fs().stack.clone());
+        self.fs_mut().search_parked = None; // a fresh jump replaces a parked search
+        self.fs_mut().jump_origin = None;
+        self.fs_mut().jump_return = 0;
+        self.nav_forward();
+        self.jump_to_path(&path);
+        self.fs_mut().issues_return = self.fs().stack.len();
+        true
+    }
+
     /// issues_page_size mirrors issues_view's item area.
-    fn issues_page_size(&self) -> usize {
-        let mut height = self.height.saturating_sub(3);
+    fn issues_page_size(&self, searching: bool) -> usize {
+        let mut height = self.height.saturating_sub(2 + usize::from(searching));
         if !self.notice.is_empty() {
             height = height.saturating_sub(1);
         }
@@ -4354,29 +4547,114 @@ impl App {
 
     /// keyRefPick drives the gr picker (Go keyRefPick).
     pub fn key_ref_pick(&mut self, msg: Msg, mut s: RefPickState) -> Option<Overlay> {
+        if s.searching {
+            return self.key_ref_search(msg, s);
+        }
         if self.jump_keys(&msg, &mut s.cursor, s.paths.len()) {
             return Some(Overlay::RefPick(s));
         }
         match msg.key_str().as_str() {
+            "/" => {
+                s.search_cursor = s.cursor;
+                s.search_ti = TextInput::default();
+                s.searching = true;
+            }
             "up" | "k" | "ctrl+k" => s.cursor = wrap_cursor(s.cursor, -1, s.paths.len()),
             "down" | "j" | "ctrl+j" => s.cursor = wrap_cursor(s.cursor, 1, s.paths.len()),
             "pgdown" | "ctrl+f" => {
-                let page = self.height.saturating_sub(2).max(1);
+                let page = self.refs_page_size(false);
                 s.cursor = page_cursor(s.cursor, 1, page, s.paths.len());
             }
             "pgup" | "ctrl+b" => {
-                let page = self.height.saturating_sub(2).max(1);
+                let page = self.refs_page_size(false);
                 s.cursor = page_cursor(s.cursor, -1, page, s.paths.len());
             }
             "enter" => {
-                let path = s.paths.get(s.cursor).cloned().unwrap_or_default();
-                self.anchor_jump(path);
-                return None;
+                if let Some(path) = s.paths.get(s.cursor).cloned() {
+                    self.anchor_jump(path);
+                    return None;
+                }
             }
             "esc" => return None,
             _ => {}
         }
         Some(Overlay::RefPick(s))
+    }
+
+    /// keyRefSearch consumes keys while the reference-picker filter is
+    /// active.
+    fn key_ref_search(&mut self, msg: Msg, mut s: RefPickState) -> Option<Overlay> {
+        match msg {
+            Msg::Esc => {
+                s.searching = false;
+                s.search_ti = TextInput::default();
+                s.cursor = s.search_cursor.min(s.paths.len().saturating_sub(1));
+            }
+            Msg::Enter => {
+                let path = self
+                    .ref_indices(&s)
+                    .nth(s.cursor)
+                    .map(|i| s.paths[i].clone());
+                if let Some(path) = path {
+                    self.anchor_jump(path);
+                    return None;
+                }
+            }
+            Msg::Up | Msg::BackTab | Msg::Ctrl('k') => {
+                let n = self.ref_indices(&s).count();
+                s.cursor = wrap_cursor(s.cursor, -1, n);
+            }
+            Msg::Down | Msg::Tab | Msg::Ctrl('j') => {
+                let n = self.ref_indices(&s).count();
+                s.cursor = wrap_cursor(s.cursor, 1, n);
+            }
+            Msg::PageDown | Msg::Ctrl('f') => {
+                let n = self.ref_indices(&s).count();
+                let page = self.refs_page_size(true);
+                s.cursor = page_cursor(s.cursor, 1, page, n);
+            }
+            Msg::PageUp | Msg::Ctrl('b') => {
+                let n = self.ref_indices(&s).count();
+                let page = self.refs_page_size(true);
+                s.cursor = page_cursor(s.cursor, -1, page, n);
+            }
+            _ => {
+                let Some(key) = msg_key(&msg) else {
+                    return Some(Overlay::RefPick(s));
+                };
+                let before = s.search_ti.value().to_string();
+                s.search_ti.handle_key(key);
+                if s.search_ti.value() != before {
+                    s.cursor = 0;
+                }
+            }
+        }
+        Some(Overlay::RefPick(s))
+    }
+
+    fn refs_page_size(&self, searching: bool) -> usize {
+        self.height
+            .saturating_sub(2 + usize::from(searching))
+            .max(1)
+    }
+
+    /// ref_label renders one reference row: path plus value summary.
+    fn ref_label(&self, p: &[PathSeg]) -> String {
+        format!(
+            "{}  {}",
+            crate::doc::jsondoc::path_string(p),
+            raw_value_summary(&self.fs().schema, self.doc(), p)
+        )
+    }
+
+    /// ref_indices lists the reference paths matching the picker query.
+    fn ref_indices<'a>(&'a self, s: &'a RefPickState) -> impl Iterator<Item = usize> + 'a {
+        let q = s.search_ti.value().to_lowercase();
+        s.paths
+            .iter()
+            .enumerate()
+            .filter(move |(_, p)| q.is_empty() || self.ref_label(p).to_lowercase().contains(&q))
+            .map(|(i, _)| i)
     }
 
     /// keyText drives the raw textarea overlay (Go keyText).
@@ -4448,10 +4726,20 @@ impl App {
 
     /// keySel drives the enum option picker (Go keySel).
     pub fn key_sel(&mut self, msg: Msg, mut s: SelState) -> Option<Overlay> {
-        if self.jump_keys(&msg, &mut s.cursor, s.opts.len()) {
+        if s.searching {
+            return self.key_sel_search(msg, s);
+        }
+        let matches = sel_match_count(&s);
+        if self.jump_keys(&msg, &mut s.cursor, matches) {
             return Some(Overlay::Sel(s));
         }
         match msg.key_str().as_str() {
+            "/" => {
+                // empty query; the cursor keeps its current row
+                s.search_cursor = s.cursor;
+                s.search_ti = TextInput::default();
+                s.searching = true;
+            }
             "t" => {
                 if let Some(one_of) = s.one_of {
                     let path = s.path.clone();
@@ -4460,21 +4748,69 @@ impl App {
                 }
                 return Some(Overlay::Sel(s));
             }
-            "up" | "k" => s.cursor = wrap_cursor(s.cursor, -1, s.opts.len()),
-            "down" | "j" => s.cursor = wrap_cursor(s.cursor, 1, s.opts.len()),
+            "up" | "k" => s.cursor = wrap_cursor(s.cursor, -1, sel_match_count(&s)),
+            "down" | "j" => s.cursor = wrap_cursor(s.cursor, 1, sel_match_count(&s)),
             "enter" => {
-                if let Some(opt) = s.opts.get(s.cursor) {
-                    let fi = self.cur;
-                    let f = &mut self.files[fi];
-                    let n = copy_from_doc(&mut f.doc, &f.schema.doc, opt.val);
-                    let _ = f.doc.set(&s.path, n);
+                if self.apply_sel(&s) {
+                    return None;
                 }
-                return None;
             }
             "esc" => return None,
             _ => {}
         }
         Some(Overlay::Sel(s))
+    }
+
+    /// keySelSearch consumes keys while the enum picker's search input is
+    /// active. It follows the schema/oneOf search: plain characters edit the
+    /// query, up/down or tab move the filtered list, enter selects, and esc
+    /// leaves the search without closing the picker.
+    fn key_sel_search(&mut self, msg: Msg, mut s: SelState) -> Option<Overlay> {
+        match msg {
+            Msg::Esc => {
+                s.searching = false;
+                s.search_ti = TextInput::default();
+                s.cursor = s.search_cursor.min(s.opts.len().saturating_sub(1));
+            }
+            Msg::Enter => {
+                // no match: stay in search mode so backspace can undo it
+                if self.apply_sel(&s) {
+                    return None;
+                }
+            }
+            Msg::Up | Msg::BackTab | Msg::Ctrl('k') => {
+                s.cursor = wrap_cursor(s.cursor, -1, sel_match_count(&s));
+            }
+            Msg::Down | Msg::Tab | Msg::Ctrl('j') => {
+                s.cursor = wrap_cursor(s.cursor, 1, sel_match_count(&s));
+            }
+            _ => {
+                let Some(key) = msg_key(&msg) else {
+                    return Some(Overlay::Sel(s));
+                };
+                let before = s.search_ti.value().to_string();
+                s.search_ti.handle_key(key);
+                if s.search_ti.value() != before {
+                    s.cursor = 0;
+                }
+            }
+        }
+        Some(Overlay::Sel(s))
+    }
+
+    /// applySel writes the option under the picker cursor. It reports
+    /// whether a (matching) option was selected.
+    fn apply_sel(&mut self, s: &SelState) -> bool {
+        let Some(opt) = sel_option_at(s, s.cursor) else {
+            return false;
+        };
+        let val = opt.val;
+        let path = s.path.clone();
+        let fi = self.cur;
+        let f = &mut self.files[fi];
+        let n = copy_from_doc(&mut f.doc, &f.schema.doc, val);
+        let _ = f.doc.set(&path, n);
+        true
     }
 
     /// keyEdit drives the in-place scalar input (Go keyEdit).
@@ -5062,8 +5398,7 @@ impl App {
             st.vanchor = 0;
             st.search_ti = Default::default();
             st.searching = false;
-            st.search_prefilled = false;
-            st.search_applied = false;
+            st.search_cursor = 0;
         }
     }
 
@@ -5363,6 +5698,14 @@ impl App {
             return self.rec_hint("Fast move: type a character to move down · esc cancels");
         }
         if let Some(st) = self.top() {
+            if st.searching {
+                let hints = if st.kind == MenuKind::EnumArray {
+                    "type to filter · ↑/↓ or tab move · enter toggle · esc cancel search"
+                } else {
+                    "type to filter · ↑/↓ or tab move · enter select · esc cancel search"
+                };
+                return self.rec_hint(hints);
+            }
             if st.visual {
                 return self.rec_hint(
                     "Visual select: j/k, gg/G or arrows mark rows · y copy · d delete · v/esc stop",
@@ -5378,6 +5721,20 @@ impl App {
             }
         }
         self.rec_hint(crate::ui::menu::MENU_HELP)
+    }
+
+    /// finish_with_hint pads the view with blank rows so the help row lands
+    /// on the terminal's last line, then appends it without a trailing
+    /// newline. Views must size their content to leave that row free (the
+    /// windowed overlays do).
+    fn finish_with_hint(&self, mut b: String, hint: String) -> String {
+        let mut lines = b.matches('\n').count();
+        while lines < self.height.saturating_sub(1) {
+            b.push('\n');
+            lines += 1;
+        }
+        b.push_str(&hint);
+        b
     }
 
     /// recHint renders a hint row with a right-aligned tail (cmd buffer /
@@ -5513,6 +5870,18 @@ impl App {
         if let Some(Overlay::Search(s)) = &self.overlay {
             return self.render_search_body(b, header, s);
         }
+        // Inline picker searches sit above their list, like every other
+        // search prompt.
+        if matches!(st.kind, MenuKind::OneOf | MenuKind::EnumArray) && st.searching {
+            // search rows use the terminal's default foreground (white);
+            // only the help row below the views is dim gray
+            b.push_str(&clip_display(
+                &search_input_line("search: ", &st.search_ti, self.width.saturating_sub(1)),
+                self.width.saturating_sub(1),
+            ));
+            b.push('\n');
+            header += 1;
+        }
         let desc = self.focused_desc(&st, &rows);
         let mut desc_lines: Vec<String> = Vec::new();
         if !desc.is_empty() {
@@ -5529,13 +5898,6 @@ impl App {
                 &format!("variant: {}", summary),
                 self.width.saturating_sub(1),
             );
-        }
-        if st.kind == MenuKind::OneOf && st.searching {
-            summary_lines.push(search_input_line(
-                "search: ",
-                &st.search_ti,
-                self.width.saturating_sub(1),
-            ));
         }
         let status = self.status_lines();
         let mut h = self
@@ -5634,13 +5996,13 @@ impl App {
         }
         let status = self.status_lines();
         b.push_str(&clip_display(
-            &format!("{}{}", style::help("search: "), ti_view(&s.ti)),
+            &format!("search: {}", ti_view(&s.ti)),
             self.width.saturating_sub(1),
         ));
         b.push('\n');
         if s.replace {
             b.push_str(&clip_display(
-                &format!("{}{}", style::help("replace: "), ti_view(&s.rti)),
+                &format!("replace: {}", ti_view(&s.rti)),
                 self.width.saturating_sub(1),
             ));
             b.push('\n');
@@ -6443,10 +6805,13 @@ impl App {
         } else {
             &c.hint
         };
-        format!(
-            "{}\n\n{}\n",
-            clip_display(&style::bold(&c.title), self.width.saturating_sub(1)),
-            clip_display(&style::help(hint), self.width.saturating_sub(1))
+        let b = format!(
+            "{}\n",
+            clip_display(&style::bold(&c.title), self.width.saturating_sub(1))
+        );
+        self.finish_with_hint(
+            b,
+            clip_display(&style::help(hint), self.width.saturating_sub(1)),
         )
     }
 
@@ -6464,25 +6829,34 @@ impl App {
         if s.items.is_empty() {
             b.push_str(&style::faint("( no issues )"));
             b.push('\n');
-            b.push_str(&self.rec_hint("esc close"));
+            return self.finish_with_hint(b, self.rec_hint("esc close"));
+        }
+        if s.searching {
+            b.push_str(&clip_display(
+                &search_input_line("search: ", &s.search_ti, self.width.saturating_sub(1)),
+                self.width.saturating_sub(1),
+            ));
             b.push('\n');
-            return b;
         }
-        let mut height = self.height.saturating_sub(3);
-        if !self.notice.is_empty() {
-            height = height.saturating_sub(1);
-        }
-        let height = height.max(1);
-        let mut cursor = s.cursor.min(s.items.len() - 1);
+        let notice = usize::from(!self.notice.is_empty());
+        let height = self
+            .height
+            .saturating_sub(2 + usize::from(s.searching) + notice)
+            .max(1);
+        let total = issue_indices(s).count();
+        let cursor = s.cursor.min(total.saturating_sub(1));
         let off = (cursor as i64 - height as i64 + 1).max(0) as usize;
-        cursor = cursor.min(s.items.len().saturating_sub(1));
-        for i in off..s.items.len().min(off + height) {
-            let it = &s.items[i];
+        for (i, idx) in issue_indices(s).skip(off).take(height).enumerate() {
+            let it = &s.items[idx];
             let mut line = format!("  {}", self.severity(it));
-            if i == cursor {
+            if off + i == cursor {
                 line = style::sel(&format!("> {}", it.msg));
             }
             b.push_str(&clip_display(&line, self.width.saturating_sub(1)));
+            b.push('\n');
+        }
+        if total == 0 {
+            b.push_str(&style::faint("(no matches)"));
             b.push('\n');
         }
         if !self.notice.is_empty() {
@@ -6492,11 +6866,12 @@ impl App {
             ));
             b.push('\n');
         }
-        b.push_str(
-            &self.rec_hint("↑/↓ or ctrl+j/k move · pgup/pgdn page · enter jump · esc close"),
-        );
-        b.push('\n');
-        b
+        let hint = if s.searching {
+            "enter jump · ↑/↓ or tab move · esc cancel search"
+        } else {
+            "↑/↓ or ctrl+j/k move · pgup/pgdn page · enter jump · / search · esc close"
+        };
+        self.finish_with_hint(b, self.rec_hint(hint))
     }
 
     fn ref_pick_view(&self, s: &RefPickState) -> String {
@@ -6506,17 +6881,23 @@ impl App {
             self.width.saturating_sub(1),
         ));
         b.push('\n');
-        let height = self.height.saturating_sub(2).max(1);
-        let cursor = s.cursor.min(s.paths.len().saturating_sub(1));
+        if s.searching {
+            b.push_str(&clip_display(
+                &search_input_line("search: ", &s.search_ti, self.width.saturating_sub(1)),
+                self.width.saturating_sub(1),
+            ));
+            b.push('\n');
+        }
+        let height = self
+            .height
+            .saturating_sub(2 + usize::from(s.searching))
+            .max(1);
+        let total = self.ref_indices(s).count();
+        let cursor = s.cursor.min(total.saturating_sub(1));
         let off = (cursor as i64 - height as i64 + 1).max(0) as usize;
-        for i in off..s.paths.len().min(off + height) {
-            let p = &s.paths[i];
-            let label = format!(
-                "{}  {}",
-                crate::doc::jsondoc::path_string(p),
-                raw_value_summary(&self.fs().schema, self.doc(), p)
-            );
-            let line = if i == cursor {
+        for (i, idx) in self.ref_indices(s).skip(off).take(height).enumerate() {
+            let label = self.ref_label(&s.paths[idx]);
+            let line = if off + i == cursor {
                 style::sel(&format!("> {label}"))
             } else {
                 format!("  {label}")
@@ -6524,11 +6905,16 @@ impl App {
             b.push_str(&clip_display(&line, self.width.saturating_sub(1)));
             b.push('\n');
         }
-        b.push_str(
-            &self.rec_hint("↑/↓ or ctrl+j/k move · pgup/pgdn page · enter jump · esc close"),
-        );
-        b.push('\n');
-        b
+        if total == 0 {
+            b.push_str(&style::faint("(no matches)"));
+            b.push('\n');
+        }
+        let hint = if s.searching {
+            "enter jump · ↑/↓ or tab move · esc cancel search"
+        } else {
+            "↑/↓ or ctrl+j/k move · pgup/pgdn page · enter jump · / search · esc close"
+        };
+        self.finish_with_hint(b, self.rec_hint(hint))
     }
 
     fn errs_view(&self, s: &ErrsState) -> String {
@@ -6538,29 +6924,44 @@ impl App {
             self.width.saturating_sub(1),
         ));
         b.push('\n');
-        let height = self.height.saturating_sub(3).max(1);
-        let cursor = s.cursor.min(s.lines.len().saturating_sub(1));
+        if s.searching {
+            b.push_str(&clip_display(
+                &search_input_line("search: ", &s.search_ti, self.width.saturating_sub(1)),
+                self.width.saturating_sub(1),
+            ));
+            b.push('\n');
+        }
+        let height = self
+            .height
+            .saturating_sub(2 + usize::from(s.searching))
+            .max(1);
+        let total = err_indices(s).count();
+        let cursor = s.cursor.min(total.saturating_sub(1));
         let off = (cursor as i64 - height as i64 + 1).max(0) as usize;
-        for i in off..s.lines.len().min(off + height) {
-            let line = if i == cursor {
-                style::sel(&format!("> {}", s.lines[i]))
+        for (i, idx) in err_indices(s).skip(off).take(height).enumerate() {
+            let line = if off + i == cursor {
+                style::sel(&format!("> {}", s.lines[idx]))
             } else {
-                format!("  {}", s.lines[i])
+                format!("  {}", s.lines[idx])
             };
             b.push_str(&clip_display(&line, self.width.saturating_sub(1)));
             b.push('\n');
         }
-        let hint = if self.opts().force {
-            "pgup/pgdn page · enter jump · y save anyway · n back"
+        if total == 0 {
+            b.push_str(&style::faint("(no matches)"));
+            b.push('\n');
+        }
+        let hint = if s.searching {
+            "enter jump · ↑/↓ or tab move · esc cancel search"
+        } else if self.opts().force {
+            "pgup/pgdn page · enter jump · / search · y save anyway · n back"
         } else {
-            "pgup/pgdn page · enter jump · fix fields and save again, or rerun with --force"
+            "pgup/pgdn page · enter jump · / search · fix fields and save again, or rerun with --force"
         };
-        b.push_str(&clip_display(
-            &style::help(hint),
-            self.width.saturating_sub(1),
-        ));
-        b.push('\n');
-        b
+        self.finish_with_hint(
+            b,
+            clip_display(&style::help(hint), self.width.saturating_sub(1)),
+        )
     }
 
     fn comment_view(&self, s: &CommentState) -> String {
@@ -6609,9 +7010,7 @@ impl App {
             b.push_str(&style::fg1(&s.err));
             b.push('\n');
         }
-        b.push_str(&style::help("ctrl+s apply · esc cancel"));
-        b.push('\n');
-        b
+        self.finish_with_hint(b, style::help("ctrl+s apply · esc cancel"))
     }
 
     fn sel_view(&self, s: &SelState) -> String {
@@ -6626,7 +7025,28 @@ impl App {
             self.width.saturating_sub(1),
         );
         b.push('\n');
-        for (i, o) in s.opts.iter().enumerate() {
+        if s.searching {
+            b.push_str(&clip_display(
+                &search_input_line("search: ", &s.search_ti, self.width.saturating_sub(1)),
+                self.width.saturating_sub(1),
+            ));
+            b.push('\n');
+        }
+        // Reserve the title, optional search row and the bottom help row;
+        // the option window scrolls with the cursor.
+        let list_height = self
+            .height
+            .saturating_sub(1 + usize::from(s.searching) + 1)
+            .max(1);
+        let total = sel_match_count(s);
+        let cursor = s.cursor.min(total.saturating_sub(1));
+        let mut off = cursor.saturating_sub(list_height - 1);
+        let max_off = total.saturating_sub(list_height);
+        if off > max_off {
+            off = max_off;
+        }
+        for (i, o) in sel_matches(s).skip(off).take(list_height).enumerate() {
+            let pos = off + i;
             let (mark, mark_style) = if o.encoded == cur_enc {
                 ("●", style::accent("●"))
             } else {
@@ -6634,23 +7054,33 @@ impl App {
             };
             let mut line = format!(
                 "{}{} {}",
-                cursor_prefix(i == s.cursor),
+                cursor_prefix(pos == cursor),
                 mark_style,
                 o.display
             );
-            if i == s.cursor {
+            if pos == cursor {
                 line = style::sel(&line);
             }
             let _ = mark;
             b.push_str(&clip_display(&line, self.width.saturating_sub(1)));
             b.push('\n');
         }
-        b.push_str(&clip_display(
-            &style::help(crate::ui::menu::OVERLAY_HELP),
-            self.width.saturating_sub(1),
-        ));
-        b.push('\n');
-        b
+        if total == 0 {
+            b.push_str(&clip_display(
+                &style::faint("(no matches)"),
+                self.width.saturating_sub(1),
+            ));
+            b.push('\n');
+        }
+        let hint = if s.searching {
+            "enter select · ↑/↓ or tab move · esc cancel search"
+        } else {
+            crate::ui::menu::OVERLAY_HELP
+        };
+        self.finish_with_hint(
+            b,
+            clip_display(&style::help(hint), self.width.saturating_sub(1)),
+        )
     }
 
     fn file_pick_view(&self) -> String {
@@ -6663,15 +7093,31 @@ impl App {
             self.width.saturating_sub(1),
         ));
         b.push('\n');
-        let height = self.height.saturating_sub(2).max(1);
-        let cursor = pick.cursor.min(self.files.len().saturating_sub(1));
+        if pick.searching {
+            b.push_str(&clip_display(
+                &search_input_line("search: ", &pick.search_ti, self.width.saturating_sub(1)),
+                self.width.saturating_sub(1),
+            ));
+            b.push('\n');
+        }
+        let height = self
+            .height
+            .saturating_sub(2 + usize::from(pick.searching))
+            .max(1);
+        let total = self.file_pick_indices(pick).count();
+        let cursor = pick.cursor.min(total.saturating_sub(1));
         let off = (cursor as i64 - height as i64 + 1).max(0) as usize;
-        for i in off..self.files.len().min(off + height) {
-            let mut label = self.files[i].opts.path.clone();
-            if self.tab_dirty(i) {
+        for (i, idx) in self
+            .file_pick_indices(pick)
+            .skip(off)
+            .take(height)
+            .enumerate()
+        {
+            let mut label = self.files[idx].opts.path.clone();
+            if self.tab_dirty(idx) {
                 label += &format!(" {}", style::diff("●"));
             }
-            let line = if i == cursor {
+            let line = if off + i == cursor {
                 style::sel(&format!("> {label}"))
             } else {
                 format!("  {label}")
@@ -6679,11 +7125,16 @@ impl App {
             b.push_str(&clip_display(&line, self.width.saturating_sub(1)));
             b.push('\n');
         }
-        b.push_str(
-            &self.rec_hint("↑/↓ or ctrl+j/k move · pgup/pgdn page · enter switch · esc close"),
-        );
-        b.push('\n');
-        b
+        if total == 0 {
+            b.push_str(&style::faint("(no matches)"));
+            b.push('\n');
+        }
+        let hint = if pick.searching {
+            "↑/↓ or tab move · enter switch · esc cancel search"
+        } else {
+            "↑/↓ or ctrl+j/k move · pgup/pgdn page · enter switch · / search · esc close"
+        };
+        self.finish_with_hint(b, self.rec_hint(hint))
     }
 }
 

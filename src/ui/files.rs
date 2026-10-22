@@ -16,8 +16,9 @@ use std::collections::{HashMap, HashSet};
 use crate::doc::PathSeg;
 use crate::smodel::Schema;
 use crate::ui::history::History;
-use crate::ui::menu::{App, IssuesState, SearchState};
+use crate::ui::menu::{App, FilePickState, IssuesState, Msg, SearchState};
 use crate::ui::rows::{SynthKey, menu_kind_for, seed_variant_cursor};
+use crate::ui::widgets::TextInput;
 use crate::ui::{FileSession, Issue, MenuState};
 
 /// fileState is the per-file half of the Go listModel: everything that
@@ -86,8 +87,7 @@ impl FileState {
             vanchor: 0,
             search_ti: Default::default(),
             searching: false,
-            search_prefilled: false,
-            search_applied: false,
+            search_cursor: 0,
         }];
         // oneOf root: open on the matched variant
         seed_variant_cursor(&schema, stack.last_mut().expect("root pushed"), &doc);
@@ -171,44 +171,114 @@ impl App {
 
     /// keyFilePick drives the s-key file switcher: enter switches to the
     /// highlighted file, esc closes without moving.
-    pub fn key_file_pick(&mut self, msg: &crate::ui::menu::Msg) {
+    pub fn key_file_pick(&mut self, msg: &Msg) {
+        let Some(mut s) = self.file_pick.take() else {
+            return;
+        };
+        if s.searching {
+            self.key_file_pick_search(msg, s);
+            return;
+        }
         let n = self.files.len();
-        let mut cursor = self.file_pick.as_ref().map_or(0, |p| p.cursor);
-        if self.jump_keys(msg, &mut cursor, n) {
-            if let Some(p) = self.file_pick.as_mut() {
-                p.cursor = cursor;
-            }
+        if self.jump_keys(msg, &mut s.cursor, n) {
+            self.file_pick = Some(s);
             return;
         }
         match msg.key_str().as_str() {
+            "/" => {
+                s.search_cursor = s.cursor;
+                s.search_ti = TextInput::default();
+                s.searching = true;
+            }
             "up" | "k" | "ctrl+k" => {
-                cursor = wrap_cursor(cursor, -1, n);
+                s.cursor = wrap_cursor(s.cursor, -1, n);
             }
             "down" | "j" | "ctrl+j" => {
-                cursor = wrap_cursor(cursor, 1, n);
+                s.cursor = wrap_cursor(s.cursor, 1, n);
             }
             "pgdown" | "ctrl+f" => {
-                let page = self.height.saturating_sub(2).max(1);
-                cursor = (cursor + page).min(n.saturating_sub(1));
+                let page = self.file_pick_page_size(false);
+                s.cursor = (s.cursor + page).min(n.saturating_sub(1));
             }
             "pgup" | "ctrl+b" => {
-                let page = self.height.saturating_sub(2).max(1);
-                cursor = cursor.saturating_sub(page);
+                let page = self.file_pick_page_size(false);
+                s.cursor = s.cursor.saturating_sub(page);
             }
             "enter" => {
-                self.file_pick = None;
-                self.switch_to_file(cursor);
+                self.switch_to_file(s.cursor);
                 return;
             }
-            "esc" => {
-                self.file_pick = None;
+            "esc" => return,
+            _ => {
+                self.file_pick = Some(s);
                 return;
             }
-            _ => return,
         }
-        if let Some(p) = self.file_pick.as_mut() {
-            p.cursor = cursor;
+        self.file_pick = Some(s);
+    }
+
+    /// keyFilePickSearch consumes keys while the file-picker filter is
+    /// active.
+    fn key_file_pick_search(&mut self, msg: &Msg, mut s: FilePickState) {
+        match msg {
+            Msg::Esc => {
+                s.searching = false;
+                s.search_ti = TextInput::default();
+                s.cursor = s.search_cursor.min(self.files.len().saturating_sub(1));
+            }
+            Msg::Enter => {
+                let idx = self.file_pick_indices(&s).nth(s.cursor);
+                if let Some(i) = idx {
+                    self.switch_to_file(i);
+                    return;
+                }
+            }
+            Msg::Up | Msg::BackTab | Msg::Ctrl('k') => {
+                let n = self.file_pick_indices(&s).count();
+                s.cursor = wrap_cursor(s.cursor, -1, n);
+            }
+            Msg::Down | Msg::Tab | Msg::Ctrl('j') => {
+                let n = self.file_pick_indices(&s).count();
+                s.cursor = wrap_cursor(s.cursor, 1, n);
+            }
+            Msg::PageDown | Msg::Ctrl('f') => {
+                let n = self.file_pick_indices(&s).count();
+                let page = self.file_pick_page_size(true);
+                s.cursor = (s.cursor + page).min(n.saturating_sub(1));
+            }
+            Msg::PageUp | Msg::Ctrl('b') => {
+                let page = self.file_pick_page_size(true);
+                s.cursor = s.cursor.saturating_sub(page);
+            }
+            _ => {
+                let Some(key) = crate::ui::keys::msg_key(msg) else {
+                    self.file_pick = Some(s);
+                    return;
+                };
+                let before = s.search_ti.value().to_string();
+                s.search_ti.handle_key(key);
+                if s.search_ti.value() != before {
+                    s.cursor = 0;
+                }
+            }
         }
+        self.file_pick = Some(s);
+    }
+
+    fn file_pick_page_size(&self, searching: bool) -> usize {
+        self.height
+            .saturating_sub(2 + usize::from(searching))
+            .max(1)
+    }
+
+    /// filePickIndices lists the files matching the picker query.
+    pub(crate) fn file_pick_indices(&self, s: &FilePickState) -> impl Iterator<Item = usize> + '_ {
+        let q = s.search_ti.value().to_lowercase();
+        self.files
+            .iter()
+            .enumerate()
+            .filter(move |(_, f)| q.is_empty() || f.opts.path.to_lowercase().contains(&q))
+            .map(|(i, _)| i)
     }
 
     /// tabDirty reports whether the tab at index i has unsaved changes: the

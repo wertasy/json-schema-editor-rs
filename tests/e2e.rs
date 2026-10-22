@@ -1171,6 +1171,76 @@ fn pty_external_raw_yaml_editor() {
 }
 
 #[test]
+fn pty_issues_search_filters() {
+    let dir = mktemp();
+    let schema = dir.path().join("strict.schema.json");
+    let cfg = dir.path().join("strict.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{
+		"port":{"type":"integer","title":"Port","minimum":1024},
+		"items":{"type":"array","title":"Items","items":{"type":"object","properties":{
+			"tag":{"type":"integer","title":"Tag","minimum":1}}}}}}"#,
+    );
+    write_file(&cfg, r#"{"port":1,"items":[{"tag":0}]}"#);
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+        return;
+    };
+
+    pty.wait_frame("root issues row", 0, &["Save and exit", "validation error"]);
+    pty.send(b"\r"); // the issues row is first at the root
+    let (_, mut off) = pty.wait_frame("issues overlay", 0, &["at '$.port'", "at '$.items[0].tag'"]);
+    pty.send(b"/");
+    (_, off) = pty.wait_frame("issues search", off, &["search: "]);
+    pty.send(b"port");
+    let (_, off) = pty.wait_frame("filtered issues", off, &["search: port", "at '$.port'"]);
+    pty.send(b"\r"); // jump to the matching issue
+    pty.wait_frame("jumped to port", off, &["> Port"]);
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+}
+
+#[test]
+fn pty_enum_array_search_toggles() {
+    let dir = mktemp();
+    let schema = dir.path().join("levels.schema.json");
+    let cfg = dir.path().join("levels.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{
+		"levels":{"type":"array","title":"Levels",
+			"items":{"enum":["alpha","beta","gamma"]}}}}"#,
+    );
+    write_file(&cfg, r#"{"levels":["beta"]}"#);
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+        return;
+    };
+
+    let (_, mut off) = pty.wait_frame("root menu", 0, &["Save and exit", "Levels"]);
+    pty.send(b"\r"); // Levels is the only field row
+    (_, off) = pty.wait_frame("enum array menu", off, &["alpha", "beta", "gamma"]);
+    pty.send(b"/");
+    (_, off) = pty.wait_frame("enum array search", off, &["search: "]);
+    pty.send(b"ga");
+    let (_, off) = pty.wait_frame("filtered toggles", off, &["search: ga", "gamma"]);
+    pty.send(b"\r"); // toggle the match; the filter stays
+    pty.send(b"\x1b"); // esc leaves the search input
+    pty.pause(Duration::from_millis(200)); // do not merge ESC with ctrl+s
+    pty.send(b"\x13"); // ctrl+s save
+    pty.wait_frame("saved", off, &["Write to "]);
+    let got = read_json(&cfg);
+    assert_eq!(got["levels"], json!(["beta", "gamma"]), "saved doc = {got}");
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+}
+
+#[test]
 fn pty_unknown_key_type_picker() {
     let dir = mktemp();
     let schema = dir.path().join("mini.schema.json");
@@ -1233,8 +1303,8 @@ fn pty_unknown_key_type_picker() {
     // t explicitly opens the type picker for an untyped value
     pty.send(b"t");
     (_, off) = pty.wait_frame("object type picker", off, &["Object", "JSON"]);
-    pty.send(b"/"); // in-picker search: seeded with the selected type
-    (_, off) = pty.wait_frame("type search seeded", off, &["search: Object", "> ● Object"]);
+    pty.send(b"/"); // in-picker search: empty query, cursor on the value
+    (_, off) = pty.wait_frame("type search opened", off, &["search: ", "> ● Object"]);
     pty.send(b"u"); // "u" is search text here, not undo
     (_, off) = pty.wait_frame("u typed into search", off, &["search: u"]);
     pty.send(b"\x7f"); // clear the query, then narrow it ourselves
@@ -1669,6 +1739,44 @@ fn pty_search_replace() {
     assert!(
         !content.contains("localhost"),
         "old host still present after save:\n{content}"
+    );
+    pty.send(b"\x03"); // ctrl+c abort
+    pty.wait_exit(130);
+}
+
+#[test]
+fn pty_enum_picker_search() {
+    let dir = mktemp();
+    let cfg = dir.path().join("server.config.json");
+    let src = std::fs::read_to_string(repo_root().join("examples/server.config.json")).unwrap();
+    std::fs::write(&cfg, &src).unwrap();
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(
+        &["-s", "examples/server.schema.json", cfg_arg.as_str()],
+        &[],
+        &cache,
+    ) else {
+        return;
+    };
+
+    let (_, mut off) = pty.wait_frame("root menu", 0, &["Save and exit", "Name"]);
+    pty.pause(Duration::from_millis(300)); // let the TUI finish raw-mode setup
+    // the unknown-key status row sits above Name: ↓ Name, ↓ Mode, enter
+    pty.send(b"\x1b[B\x1b[B\r");
+    (_, off) = pty.wait_frame("enum picker", off, &["Mode", "http", "grpc", "tcp"]);
+    pty.send(b"/");
+    (_, off) = pty.wait_frame("enum search", off, &["search: "]);
+    pty.send(b"GR"); // filtering is case-insensitive; only grpc matches
+    (_, off) = pty.wait_frame("enum search narrowed", off, &["search: GR", "grpc"]);
+    pty.send(b"\r");
+    (_, off) = pty.wait_frame("picker closed", off, &["Mode"]);
+    pty.send(b"\x13"); // ctrl+s: persist the picked option
+    pty.wait_frame("saved", off, &["Write to "]);
+    let content = read_text(&cfg);
+    assert!(
+        content.contains(r#""mode": "grpc""#),
+        "enum search did not select grpc:\n{content}"
     );
     pty.send(b"\x03"); // ctrl+c abort
     pty.wait_exit(130);

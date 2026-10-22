@@ -220,15 +220,14 @@ pub struct MenuState {
     pub visual: bool,
     /// row where visual select started
     pub vanchor: usize,
-    /// oneOf type picker: live search input ("" shows every variant)
+    /// inline list search (oneOf picker / enum-array toggles): the query is
+    /// empty when the search opens
     pub search_ti: crate::ui::widgets::TextInput,
-    /// oneOf type picker: / search input has focus
+    /// the inline search input has focus
     pub searching: bool,
-    /// the search started on the selected type's name and has not been
-    /// replaced by user input yet
-    pub search_prefilled: bool,
-    /// the search text has been edited and should narrow the variant rows
-    pub search_applied: bool,
+    /// cursor to restore when the search is cancelled (the row the search
+    /// was opened on, which is the current value's row for a fresh picker)
+    pub search_cursor: usize,
 }
 
 /// issue is one validation message with its parsed instance location.

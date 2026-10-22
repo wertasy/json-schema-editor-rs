@@ -197,12 +197,14 @@ impl PickerModel {
         );
         b.push_str(&s_status(&clip_display(&status, width.saturating_sub(1))));
         b.push('\n');
-        b.push_str(&s_help(&input_line(
+        // The query row keeps the terminal's default foreground (white);
+        // s_help is reserved for the bottom help row.
+        b.push_str(&input_line(
             "search: ",
             self.ti.value(),
             self.ti.cursor(),
             width,
-        )));
+        ));
         b.push('\n');
         let height = self.height.saturating_sub(4).max(1); // title, status, search, help
         // Go's View has a value receiver: the window correction is local to
@@ -593,6 +595,10 @@ mod tests {
             "a trailing newline scrolls the screen: {v:?}"
         );
         assert_eq!(v.matches('\n').count(), 9, "help must be the last row");
+        assert!(
+            !v.split('\n').nth(2).unwrap().contains("\x1b[38;5;248m"),
+            "the search row must use the default white foreground"
+        );
         for line in v.split('\n') {
             assert!(
                 display_width(line) <= 40,

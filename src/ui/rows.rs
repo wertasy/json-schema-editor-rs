@@ -380,7 +380,11 @@ pub fn menu_rows_for(
                     ..Row::default()
                 });
             } else {
-                for i in 0..opts_list.len() {
+                let q = st.search_ti.value().to_lowercase();
+                for (i, o) in opts_list.iter().enumerate() {
+                    if st.searching && !q.is_empty() && !o.display.to_lowercase().contains(&q) {
+                        continue;
+                    }
                     rows.push(Row {
                         kind: RowKind::Toggle,
                         fn_: Some(st.node),
@@ -394,9 +398,7 @@ pub fn menu_rows_for(
         MenuKind::OneOf => {
             let variants = schema.nodes[st.node as usize].variants.clone();
             for v in variants {
-                // the seeded keyword is just the search input text; the
-                // list is not searched until the user types
-                if st.search_applied && !variant_search_match(schema, v, st.search_ti.value()) {
+                if st.searching && !variant_search_match(schema, v, st.search_ti.value()) {
                     continue;
                 }
                 rows.push(Row {
@@ -413,10 +415,10 @@ pub fn menu_rows_for(
         rows.retain(|r| !empty_key_row_raw(schema, doc, r));
     }
     if rows.is_empty() {
-        let (label, kind) = if st.kind == MenuKind::OneOf {
-            ("( no matching types )", RowKind::NoItems)
-        } else {
-            ("< Add Key >", RowKind::NoItems)
+        let (label, kind) = match st.kind {
+            MenuKind::OneOf => ("( no matching types )", RowKind::NoItems),
+            MenuKind::EnumArray => ("( no matching options )", RowKind::NoItems),
+            _ => ("< Add Key >", RowKind::NoItems),
         };
         rows.push(Row {
             kind,
@@ -1583,8 +1585,7 @@ pub fn rebuild_stack(schema: &mut Schema, doc: &Doc, path: &[PathSeg]) -> Vec<Me
             vanchor: 0,
             search_ti: Default::default(),
             searching: false,
-            search_prefilled: false,
-            search_applied: false,
+            search_cursor: 0,
         }
     }
     let root = schema.root;
@@ -3285,8 +3286,7 @@ mod tests {
             vanchor: 0,
             search_ti: Default::default(),
             searching: false,
-            search_prefilled: false,
-            search_applied: false,
+            search_cursor: 0,
         }
     }
 

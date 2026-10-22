@@ -93,7 +93,7 @@ pub mod style {
 
 pub const MENU_HELP: &str =
     "↑/↓ move · enter edit/open · esc back · ctrl+s/w save · / search · ? help";
-pub const OVERLAY_HELP: &str = "enter select · esc cancel";
+pub const OVERLAY_HELP: &str = "enter select · / search · esc cancel";
 /// Comment preview cap: the focused row's description never pushes the menu
 /// further than this unless c expands it.
 pub const COMMENT_PREVIEW_LINES: usize = 3;
@@ -432,7 +432,15 @@ pub struct SelState {
     pub fn_: FormNodeId,
     pub path: Vec<PathSeg>,
     pub opts: Vec<EnumOpt>,
+    /// index into the options matched by `search_ti` (all of them when the
+    /// query is empty)
     pub cursor: usize,
+    /// '/'-search query for the option list (text input rules)
+    pub search_ti: TextInput,
+    /// the search input has focus; esc leaves it and restores the full list
+    pub searching: bool,
+    /// option index restored when the search is cancelled
+    pub search_cursor: usize,
     /// set for enum variant editors: t type switch
     pub one_of: Option<FormNodeId>,
 }
@@ -455,6 +463,10 @@ pub struct TextState {
 pub struct IssuesState {
     pub items: Vec<Issue>,
     pub cursor: usize,
+    /// inline '/'-search over issue messages and paths
+    pub search_ti: TextInput,
+    pub searching: bool,
+    pub search_cursor: usize,
 }
 
 /// refPickState is the gr picker.
@@ -462,6 +474,10 @@ pub struct RefPickState {
     pub name: String,
     pub paths: Vec<Vec<PathSeg>>,
     pub cursor: usize,
+    /// inline '/'-search over reference paths and value summaries
+    pub search_ti: TextInput,
+    pub searching: bool,
+    pub search_cursor: usize,
 }
 
 /// errsState is the save-time validation error overlay.
@@ -473,6 +489,10 @@ pub struct ErrsState {
     pub exit: bool,
     /// write-to path for a W save ("" = the session's own file)
     pub target: String,
+    /// inline '/'-search over the error lines
+    pub search_ti: TextInput,
+    pub searching: bool,
+    pub search_cursor: usize,
 }
 
 /// confirmState is a y/n question overlay. on_no is optional.
@@ -555,6 +575,10 @@ pub struct FastMoveState {
 /// filePickState is the s-key file switcher overlay.
 pub struct FilePickState {
     pub cursor: usize,
+    /// inline '/'-search over file paths
+    pub search_ti: TextInput,
+    pub searching: bool,
+    pub search_cursor: usize,
 }
 
 /// externalEdit is the target of a pending $EDITOR run. A non-negative
@@ -729,16 +753,31 @@ impl App {
             Some(Overlay::Anc(_)) => i.anc = true,
             Some(Overlay::Mrg(_)) => i.mrg = true,
             Some(Overlay::Confirm(_)) => i.confirm = true,
-            Some(Overlay::Issues(_)) => i.issues = true,
-            Some(Overlay::Errs(_)) => i.errs = true,
-            Some(Overlay::Sel(_)) => i.sel = true,
+            Some(Overlay::Issues(s)) => {
+                i.issues = true;
+                i.search_active = s.searching;
+            }
+            Some(Overlay::Errs(s)) => {
+                i.errs = true;
+                i.search_active = s.searching;
+            }
+            Some(Overlay::Sel(s)) => {
+                i.sel = true;
+                i.search_active = s.searching;
+            }
             Some(Overlay::Comment(_)) => i.comment = true,
-            Some(Overlay::RefPick(_)) => {}
+            Some(Overlay::RefPick(s)) => {
+                i.ref_pick = true;
+                i.search_active = s.searching;
+            }
             _ => {}
         }
         i.help = self.help;
         i.file_pick = self.file_pick.is_some();
-        i.variant_search = self.top().map_or(false, |st| st.searching);
+        if let Some(p) = &self.file_pick {
+            i.search_active = p.searching;
+        }
+        i.search_active |= self.top().map_or(false, |st| st.searching);
         i.fast_move = self.fast_move.is_some();
         i
     }
@@ -867,8 +906,7 @@ impl App {
             vanchor: 0,
             search_ti: Default::default(),
             searching: false,
-            search_prefilled: false,
-            search_applied: false,
+            search_cursor: 0,
         };
         let val = self.doc().get(&st.path);
         let cands = {
@@ -1335,6 +1373,9 @@ impl App {
             cursor: 0,
             exit,
             target: target.to_string(),
+            search_ti: TextInput::default(),
+            searching: false,
+            search_cursor: 0,
         }));
     }
 

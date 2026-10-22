@@ -11,7 +11,7 @@ use crate::doc::jsondoc::Member;
 use crate::doc::{Doc, NodeData, NodeId, PathSeg, Value};
 use crate::smodel::{EnumOpt, FormNode, FormNodeId, Kind, Schema};
 use crate::ui::menu::{alias_at, same_menu_row};
-use crate::ui::{FileSession, NodeRef, Options, RawCodec};
+use crate::ui::{FileSession, Issue, NodeRef, Options, RawCodec};
 
 // --- fixtures ---------------------------------------------------------------
 
@@ -654,6 +654,454 @@ fn menu_enum_overlay() {
         "picker must close on enter"
     );
     assert_eq!(str_at(&m.fs().doc, &["mode"]), "grpc");
+}
+
+#[test]
+fn menu_enum_overlay_search_filters_and_selects() {
+    let doc = test_doc();
+    let mut m = mk_app(doc.clone(), test_opts());
+    press(&mut m, &["down", "enter"]); // open enum picker on Mode
+    press(&mut m, &["/", "G", "R"]); // case-insensitive query
+    match &m.overlay {
+        Some(Overlay::Sel(s)) => {
+            assert!(s.searching);
+            assert_eq!(s.search_ti.value(), "GR");
+            assert_eq!(sel_match_count(s), 1, "only grpc matches");
+            let view = m.sel_view(s);
+            assert!(view.contains("grpc"));
+            assert!(!view.contains("http"), "non-matching options are hidden");
+        }
+        _ => panic!("enum picker should stay open while searching"),
+    }
+    press(&mut m, &["enter"]);
+    assert!(
+        !matches!(m.overlay, Some(Overlay::Sel(_))),
+        "enter selects the match and closes the picker"
+    );
+    assert_eq!(str_at(&m.fs().doc, &["mode"]), "grpc");
+}
+
+#[test]
+fn menu_enum_overlay_search_cancel_and_no_match() {
+    let doc = test_doc();
+    let mut m = mk_app(doc.clone(), test_opts());
+    press(&mut m, &["down", "enter", "/", "z", "z"]);
+    match &m.overlay {
+        Some(Overlay::Sel(s)) => {
+            assert_eq!(sel_match_count(s), 0);
+            assert!(m.sel_view(s).contains("(no matches)"));
+        }
+        _ => panic!("enum picker should stay open"),
+    }
+    press(&mut m, &["enter"]); // no match: must not write the hidden option
+    assert!(matches!(m.overlay, Some(Overlay::Sel(_))));
+    assert!(!has(&m.fs().doc, &sp(&["mode"])), "no option was written");
+
+    press(&mut m, &["esc"]); // leave search, keep the picker
+    match &m.overlay {
+        Some(Overlay::Sel(s)) => {
+            assert!(!s.searching);
+            assert_eq!(s.search_ti.value(), "");
+            assert_eq!(sel_match_count(s), 3, "the full option list is back");
+        }
+        _ => panic!("esc must only cancel the search"),
+    }
+    press(&mut m, &["down", "enter"]); // grpc from the restored list
+    assert_eq!(str_at(&m.fs().doc, &["mode"]), "grpc");
+    assert!(m.overlay.is_none());
+}
+
+#[test]
+fn menu_enum_overlay_search_takes_q_literally() {
+    let schema = schema_from_json(
+        r#"{
+          "type": "object",
+          "properties": {
+            "mode": {"type": "string", "enum": ["quiet", "loud", "http"]}
+          }
+        }"#,
+    );
+    let doc = dbuild(|db| db.obj(vec![("mode", db.s("http"))]));
+    let mut m = app_with(schema, doc, test_opts());
+    press(&mut m, &["enter"]); // open enum picker on the only field
+    press(&mut m, &["/", "q"]);
+    match &m.overlay {
+        Some(Overlay::Sel(s)) => {
+            assert!(s.searching, "q must be a query character, not esc");
+            assert_eq!(s.search_ti.value(), "q");
+            assert_eq!(sel_match_count(s), 1);
+        }
+        _ => panic!("enum picker should stay open"),
+    }
+    press(&mut m, &["enter"]);
+    assert_eq!(str_at(&m.fs().doc, &["mode"]), "quiet");
+}
+
+/// assertHintBottom checks that the view fills the terminal exactly and its
+/// last row carries the expected help text.
+fn assert_hint_bottom(m: &mut App, needle: &str) {
+    let view = m.view();
+    let lines: Vec<&str> = view.lines().collect();
+    assert_eq!(
+        lines.len(),
+        m.height,
+        "view must end on the terminal's last row:\n{view}"
+    );
+    assert!(
+        lines.last().unwrap().contains(needle),
+        "help row missing {needle:?}:\n{view}"
+    );
+}
+
+#[test]
+fn enum_picker_search_sits_above_the_list() {
+    let doc = test_doc();
+    let mut m = mk_app(doc, test_opts());
+    m.width = 80;
+    m.height = 12;
+    press(&mut m, &["down", "enter", "/", "g", "r"]);
+    let view = m.view();
+    let lines: Vec<&str> = view.lines().collect();
+    let search = lines
+        .iter()
+        .position(|l| l.contains("search: gr"))
+        .expect("search row");
+    let option = lines
+        .iter()
+        .position(|l| l.contains("grpc"))
+        .expect("matched option");
+    assert!(search < option, "search must be above the list:\n{view}");
+    assert!(
+        !lines[search].contains("\x1b[38;5;248m"),
+        "the search row must use the default white foreground:\n{view}"
+    );
+    assert_hint_bottom(&mut m, "esc cancel search");
+}
+
+#[test]
+fn oneof_picker_search_sits_above_the_list() {
+    let schema = schema_from_json(
+        r#"{
+          "type": "object",
+          "properties": {
+            "rule": {"oneOf": [
+              {"title": "Alpha", "type": "object",
+               "properties": {"a": {"type": "string"}}},
+              {"title": "Beta", "type": "object",
+               "properties": {"b": {"type": "string"}}}
+            ]}
+          }
+        }"#,
+    );
+    let mut m = app_with(schema, dbuild(|db| db.obj(vec![])), test_opts());
+    m.width = 80;
+    m.height = 14;
+    set_cursor_path(&mut m, &sp(&["rule"]));
+    press(&mut m, &["t", "/", "a", "l", "p"]);
+    let view = m.view();
+    let lines: Vec<&str> = view.lines().collect();
+    let search = lines
+        .iter()
+        .position(|l| l.contains("search: alp"))
+        .expect("search row");
+    let variant = lines
+        .iter()
+        .position(|l| l.contains("Alpha"))
+        .expect("matched variant");
+    assert!(search < variant, "search must be above the list:\n{view}");
+    assert!(
+        !lines[search].contains("\x1b[38;5;248m"),
+        "the search row must use the default white foreground:\n{view}"
+    );
+    assert_hint_bottom(&mut m, "esc cancel search");
+}
+
+#[test]
+fn overlay_help_rows_pin_to_the_terminal_bottom() {
+    let mut m = mk_app(test_doc(), test_opts());
+    m.width = 80;
+    m.height = 12;
+
+    m.overlay = Some(Overlay::Issues(IssuesState::default()));
+    assert_hint_bottom(&mut m, "esc close");
+
+    m.overlay = Some(Overlay::RefPick(RefPickState {
+        name: "x".into(),
+        paths: vec![sp(&["name"])],
+        cursor: 0,
+        search_ti: Default::default(),
+        searching: false,
+        search_cursor: 0,
+    }));
+    assert_hint_bottom(&mut m, "enter jump");
+
+    m.overlay = Some(Overlay::Errs(ErrsState {
+        lines: vec!["boom".into()],
+        paths: vec![Some(sp(&["server"]))],
+        cursor: 0,
+        exit: false,
+        target: String::new(),
+        search_ti: Default::default(),
+        searching: false,
+        search_cursor: 0,
+    }));
+    assert_hint_bottom(&mut m, "pgup/pgdn page");
+
+    m.overlay = Some(Overlay::Confirm(ConfirmState {
+        title: "Sure?".into(),
+        hint: String::new(),
+        on_yes: None,
+        on_no: None,
+    }));
+    assert_hint_bottom(&mut m, "y/enter/space yes");
+
+    let mut ta = TextArea::new();
+    ta.set_width(40);
+    ta.set_height(3);
+    m.overlay = Some(Overlay::Text(TextState {
+        path: None,
+        fn_: None,
+        ta,
+        err: String::new(),
+        verbatim_str: false,
+    }));
+    assert_hint_bottom(&mut m, "ctrl+s apply");
+
+    m.overlay = None;
+    m.file_pick = Some(FilePickState {
+        cursor: 0,
+        search_ti: Default::default(),
+        searching: false,
+        search_cursor: 0,
+    });
+    assert_hint_bottom(&mut m, "enter switch");
+}
+
+#[test]
+fn search_opens_empty_on_the_current_value() {
+    // oneOf: the cursor snaps back to the variant matching the document
+    // value, even after it was moved away
+    let schema = schema_from_json(
+        r#"{
+          "type": "object",
+          "properties": {
+            "rule": {"oneOf": [
+              {"title": "Alpha", "type": "object", "required": ["kind"],
+               "properties": {"kind": {"const": "a"}}},
+              {"title": "Beta", "type": "object", "required": ["kind"],
+               "properties": {"kind": {"const": "b"}}}
+            ]}
+          }
+        }"#,
+    );
+    let doc = dbuild(|db| {
+        let rule = db.obj(vec![("kind", db.s("b"))]);
+        db.obj(vec![("rule", rule)])
+    });
+    let mut m = app_with(schema, doc, test_opts());
+    m.width = 80;
+    m.height = 16;
+    set_cursor_path(&mut m, &sp(&["rule"]));
+    press(&mut m, &["t"]);
+    assert_eq!(m.top().unwrap().cursor, 1, "seeded on Beta");
+    press(&mut m, &["/"]);
+    assert!(m.top().unwrap().searching);
+    assert_eq!(m.top().unwrap().search_ti.value(), "", "empty query");
+    assert_eq!(m.top().unwrap().cursor, 1, "cursor keeps the value row");
+    press(&mut m, &["a", "l"]);
+    press(&mut m, &["esc"]);
+    assert_eq!(
+        m.top().unwrap().cursor,
+        1,
+        "cancelling restores the value cursor"
+    );
+
+    // enum: same rule for the single-select picker
+    let schema = schema_from_json(
+        r#"{"type":"object","properties":{
+          "mode":{"type":"string","enum":["http","grpc","tcp"]}}}"#,
+    );
+    let doc = dbuild(|db| db.obj(vec![("mode", db.s("tcp"))]));
+    let mut m = app_with(schema, doc, test_opts());
+    press(&mut m, &["enter"]);
+    match &m.overlay {
+        Some(Overlay::Sel(s)) => assert_eq!(s.cursor, 2, "current value tcp"),
+        _ => panic!("enum picker should open"),
+    }
+    press(&mut m, &["/"]);
+    match &m.overlay {
+        Some(Overlay::Sel(s)) => {
+            assert!(s.searching);
+            assert_eq!(s.search_ti.value(), "");
+            assert_eq!(s.cursor, 2, "cursor stays on the current value");
+            assert_eq!(s.search_cursor, 2);
+        }
+        _ => panic!("enum picker should stay open"),
+    }
+    press(&mut m, &["g", "r"]);
+    press(&mut m, &["enter"]);
+    assert_eq!(str_at(&m.fs().doc, &["mode"]), "grpc");
+}
+
+#[test]
+fn enum_array_search_filters_toggles() {
+    let schema = schema_from_json(
+        r#"{"type":"object","properties":{
+          "levels":{"type":"array","items":{"enum":["alpha","beta","gamma"]}}}}"#,
+    );
+    let doc = dbuild(|db| db.obj(vec![("levels", db.arr(vec![db.s("beta")]))]));
+    let mut m = app_with(schema, doc, test_opts());
+    m.width = 80;
+    m.height = 14;
+    set_cursor_path(&mut m, &sp(&["levels"]));
+    press(&mut m, &["enter"]);
+    assert_eq!(m.top().unwrap().kind, MenuKind::EnumArray);
+    assert_eq!(m.menu_rows().len(), 3);
+
+    press(&mut m, &["/", "g", "a"]);
+    assert!(m.top().unwrap().searching);
+    assert_eq!(m.top().unwrap().search_ti.value(), "ga");
+    assert_eq!(m.menu_rows().len(), 1, "only gamma matches");
+    assert!(!matches!(m.overlay, Some(Overlay::Search(_))));
+
+    press(&mut m, &["enter"]); // toggles the only match, filter stays
+    assert_eq!(arr_strs(&m.fs().doc, &sp(&["levels"])), ["beta", "gamma"]);
+    assert!(m.top().unwrap().searching);
+
+    press(&mut m, &["esc"]);
+    assert!(!m.top().unwrap().searching);
+    assert_eq!(m.menu_rows().len(), 3);
+}
+
+#[test]
+fn issues_list_search_and_cancel() {
+    let mk = |msg: &str, path: &[&str]| Issue {
+        msg: msg.into(),
+        path: Some(sp(path)),
+        ..Issue::default()
+    };
+    let mut m = mk_app(test_doc(), test_opts());
+    m.width = 80;
+    m.height = 12;
+    m.overlay = Some(Overlay::Issues(IssuesState {
+        items: vec![
+            mk("at '$.name': alpha problem", &["name"]),
+            mk("at '$.server': beta problem", &["server"]),
+        ],
+        cursor: 1,
+        ..IssuesState::default()
+    }));
+
+    press(&mut m, &["/", "b", "e", "t", "a"]);
+    assert!(m.overlay.is_some());
+    let view = m.view();
+    assert!(view.contains("beta problem"), "{view}");
+    assert!(!view.contains("alpha problem"), "{view}");
+
+    press(&mut m, &["esc"]);
+    match &m.overlay {
+        Some(Overlay::Issues(s)) => {
+            assert!(!s.searching);
+            assert_eq!(s.search_ti.value(), "");
+            assert_eq!(s.cursor, 1, "cancel restores the row");
+        }
+        _ => panic!("issues overlay should stay open"),
+    }
+
+    press(&mut m, &["/", "b", "e", "t", "a"]);
+    press(&mut m, &["enter"]);
+    assert!(m.overlay.is_none(), "enter jumps and closes the list");
+    assert_eq!(m.top().unwrap().path, sp(&["server"]));
+}
+
+#[test]
+fn save_error_list_search() {
+    let mut m = mk_app(test_doc(), test_opts());
+    m.width = 80;
+    m.height = 12;
+    m.overlay = Some(Overlay::Errs(ErrsState {
+        lines: vec!["$.name: bad".into(), "$.server: worse".into()],
+        paths: vec![Some(sp(&["name"])), Some(sp(&["server"]))],
+        cursor: 0,
+        exit: false,
+        target: String::new(),
+        search_ti: Default::default(),
+        searching: false,
+        search_cursor: 0,
+    }));
+
+    press(&mut m, &["/", "w", "o", "r"]);
+    let view = m.view();
+    assert!(view.contains("worse"), "{view}");
+    assert!(!view.contains("bad"), "{view}");
+    press(&mut m, &["enter"]);
+    assert!(m.overlay.is_none());
+    assert_eq!(m.top().unwrap().path, sp(&["server"]));
+}
+
+#[test]
+fn reference_list_search() {
+    let mut m = mk_app(test_doc(), test_opts());
+    m.width = 80;
+    m.height = 12;
+    m.overlay = Some(Overlay::RefPick(RefPickState {
+        name: "x".into(),
+        paths: vec![sp(&["name"]), sp(&["server", "host"])],
+        cursor: 0,
+        search_ti: Default::default(),
+        searching: false,
+        search_cursor: 0,
+    }));
+
+    press(&mut m, &["/", "h", "o", "s", "t"]);
+    let view = m.view();
+    assert!(view.contains("$.server.host"), "{view}");
+    assert!(!view.contains("$.name"), "{view}");
+    press(&mut m, &["enter"]);
+    assert!(m.overlay.is_none());
+}
+
+#[test]
+fn file_picker_search() {
+    let opts = |path: &str| {
+        let mut o = test_opts();
+        o.path = path.into();
+        o
+    };
+    let schema1 = test_schema();
+    let root1 = schema1.root;
+    let schema2 = test_schema();
+    let root2 = schema2.root;
+    let mut m = App::new(vec![
+        FileSession {
+            schema: schema1,
+            root: root1,
+            doc: test_doc(),
+            opts: opts("alpha.json"),
+        },
+        FileSession {
+            schema: schema2,
+            root: root2,
+            doc: test_doc(),
+            opts: opts("beta.json"),
+        },
+    ]);
+    m.width = 80;
+    m.height = 12;
+    m.file_pick = Some(FilePickState {
+        cursor: 0,
+        search_ti: Default::default(),
+        searching: false,
+        search_cursor: 0,
+    });
+
+    press(&mut m, &["/", "b", "e", "t", "a"]);
+    let view = m.view();
+    assert!(view.contains("beta.json"), "{view}");
+    assert!(!view.contains("alpha.json"), "{view}");
+    press(&mut m, &["enter"]);
+    assert_eq!(m.cur, 1);
+    assert!(m.file_pick.is_none());
 }
 
 #[test]
@@ -1376,33 +1824,17 @@ fn type_picker_search_filters_variants_inline() {
     assert_eq!(m.top().unwrap().kind, MenuKind::OneOf);
     let before = m.top().unwrap().cursor;
 
-    // "/" starts an in-picker search seeded with the selected type's name
-    // and keeps the cursor on that type
+    // "/" opens an empty search and keeps the cursor on the selected type
     press(&mut m, &["/"]);
     assert!(m.overlay.is_none());
     assert!(m.top().unwrap().searching);
-    assert!(m.top().unwrap().search_prefilled);
-    assert_eq!(m.top().unwrap().search_ti.value(), "Object");
-    assert_eq!(m.top().unwrap().cursor, before);
-    assert_eq!(m.top().unwrap().search_ti.cursor(), 6);
-    assert!(!m.top().unwrap().search_applied);
-
-    // the search bar supports the schema picker's editing keys
-    press(&mut m, &["left"]);
-    assert_eq!(m.top().unwrap().search_ti.cursor(), 5);
-    assert_eq!(m.top().unwrap().search_ti.value(), "Object");
-    press(&mut m, &["home"]);
-    assert_eq!(m.top().unwrap().search_ti.cursor(), 0);
-    press(&mut m, &["end"]);
-    assert_eq!(m.top().unwrap().search_ti.cursor(), 6);
-    press(&mut m, &["backspace"]);
     assert_eq!(m.top().unwrap().search_ti.value(), "");
-    assert!(m.top().unwrap().search_applied);
+    assert_eq!(m.top().unwrap().cursor, before);
+    assert_eq!(m.top().unwrap().search_cursor, before);
 
-    // typing replaces the seed; "u" is a filter character, not undo
+    // "u" is a filter character, not undo
     press(&mut m, &["u"]);
     assert_eq!(m.top().unwrap().search_ti.value(), "u");
-    assert!(!m.top().unwrap().search_prefilled);
     press(&mut m, &["x"]);
     assert_eq!(m.top().unwrap().search_ti.value(), "ux");
     assert!(m.top().unwrap().searching);
@@ -4798,8 +5230,7 @@ fn mstate(kind: MenuKind, node: FormNodeId, path: Vec<PathSeg>) -> MenuState {
         vanchor: 0,
         search_ti: Default::default(),
         searching: false,
-        search_prefilled: false,
-        search_applied: false,
+        search_cursor: 0,
     }
 }
 
