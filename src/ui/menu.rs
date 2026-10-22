@@ -94,6 +94,9 @@ pub mod style {
 pub const MENU_HELP: &str =
     "↑/↓ move · enter edit/open · esc back · ctrl+s/w save · / search · ? help";
 pub const OVERLAY_HELP: &str = "enter select · esc cancel";
+/// Comment preview cap: the focused row's description never pushes the menu
+/// further than this unless c expands it.
+pub const COMMENT_PREVIEW_LINES: usize = 3;
 
 /// maxMacroKeys caps a single recorded macro; reaching it stops recording
 /// and keeps the keys captured so far.
@@ -252,6 +255,10 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
     HelpEntry {
         keys: "@ / .",
         desc: "record / play a macro",
+    },
+    HelpEntry {
+        keys: "c",
+        desc: "description: expand/fold; too long for one page opens a scrollable page (↑/↓ or j/k scroll, c/q/esc close)",
     },
     HelpEntry {
         keys: "?",
@@ -543,6 +550,16 @@ pub struct ExternalEdit {
     pub whole_doc: bool,
 }
 
+/// commentState is the dedicated page for a description that does not fit
+/// the menu's inline description area. `scroll` is the first visible line.
+pub struct CommentState {
+    /// the field/row label shown in the page title
+    pub title: String,
+    /// the fully wrapped description lines
+    pub lines: Vec<String>,
+    pub scroll: usize,
+}
+
 /// Overlay is the single open surface (Go's 16 nullable fields + routeKey
 /// priority chain). Only one can be open at a time; the key router matches
 /// on it.
@@ -559,6 +576,7 @@ pub enum Overlay {
     Write(WriteState),
     Anc(AnchorState),
     Mrg(MergeState),
+    Comment(CommentState),
 }
 
 // --- the app ------------------------------------------------------------------
@@ -576,6 +594,10 @@ pub struct App {
     pub help: bool,
     /// z filter: hide object keys with no document value
     pub hide_empty: bool,
+    /// c: the focused row's description is expanded inline. Any other key
+    /// collapses it before acting; descriptions too long for one page open
+    /// Overlay::Comment instead.
+    pub desc_expanded: bool,
     /// transient list-mode message, cleared on the next key
     pub notice: String,
     /// pending multi-key command (vi-style: shown bottom-right, never
@@ -614,6 +636,7 @@ impl App {
             fast_move: None,
             help: false,
             hide_empty: false,
+            desc_expanded: false,
             notice: String::new(),
             cmd_buf: Vec::new(),
             recording: false,
@@ -685,6 +708,7 @@ impl App {
             Some(Overlay::Issues(_)) => i.issues = true,
             Some(Overlay::Errs(_)) => i.errs = true,
             Some(Overlay::Sel(_)) => i.sel = true,
+            Some(Overlay::Comment(_)) => i.comment = true,
             Some(Overlay::RefPick(_)) => {}
             _ => {}
         }
@@ -1120,6 +1144,11 @@ impl App {
     /// stack, so one undo step reverts exactly one key's worth of changes.
     /// u/ctrl+r act only in list mode and bypass the snapshot wrap.
     pub fn dispatch_key(&mut self, msg: Msg) {
+        // An expanded description is transient: any key except the c toggle
+        // folds it first, then runs normally.
+        if self.desc_expanded && msg.key_str() != "c" {
+            self.desc_expanded = false;
+        }
         if self.list_mode() && self.apply_history_key(&msg) {
             self.cmd_buf.clear(); // a history key breaks any pending g combo
             self.refresh_variant_menu();
@@ -1186,6 +1215,7 @@ impl App {
             Overlay::Write(s) => self.key_write(msg, s),
             Overlay::Anc(s) => self.key_anchor(msg, s),
             Overlay::Mrg(s) => self.key_merge(msg, s),
+            Overlay::Comment(s) => self.key_comment(msg, s),
         };
     }
 

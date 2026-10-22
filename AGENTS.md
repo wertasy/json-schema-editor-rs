@@ -74,6 +74,7 @@ tests/
 
 - Editing is **write-through** to the live document; there is no form submit. Saving only serializes the current document.
 - Exactly one overlay can be open: `App.overlay: Option<Overlay>`. Opening a surface must close/replace the previous one. Overlay routing order is in `menu.rs::route_key`; update history `Inputs`/`list_mode` predicates when adding a surface.
+- The focused description preview is capped at `menu::COMMENT_PREVIEW_LINES` with a `...` cut. `c` expands it transiently (`desc_expanded`; any other key folds it first) or opens `Overlay::Comment` when it cannot fit one screen; that page consumes keys (j/k scrolling, c/q/esc close) and must stay out of `list_mode`.
 - Per-file state lives in `FileState` (`files[cur]`): menu stack, cursor, selection, undo/redo, baseline, live issues, parked search/issues returns, navigation origin. Switching files is an index switch; do not add global fields that should be per-file.
 - Undo is snapshot-per-key: the dispatcher snapshots before a key and pushes only when the document changed. Any new mutating key must go through that path; do not mutate the document outside the dispatcher without ensuring history/issue refresh.
 - The change marker (`●`) compares against `baseline` (load/last save), not undo state. Saving refreshes the baseline.

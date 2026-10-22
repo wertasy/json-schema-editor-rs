@@ -75,6 +75,10 @@ pub struct FormNode {
     pub desc: String,
     /// Title is the key fallback, not a schema title
     pub title_fallback: bool,
+    /// Title came from a referenced schema (a bare `$ref` property) rather
+    /// than this property's own schema. Menus still use it as the header,
+    /// but object rows label the member with its key.
+    pub title_from_ref: bool,
     pub kind: Kind,
     /// Scalar: "string"|"integer"|"number"
     pub json_type: String,
@@ -198,6 +202,7 @@ pub fn untyped(doc: &Doc) -> Schema {
             nodes.push(FormNode {
                 key: "$".into(),
                 title: "$".into(),
+                title_fallback: true,
                 kind: Kind::Object,
                 ..FormNode::default()
             });
@@ -214,6 +219,7 @@ pub fn untyped(doc: &Doc) -> Schema {
             nodes.push(FormNode {
                 key: "$".into(),
                 title: "$".into(),
+                title_fallback: true,
                 kind: Kind::Array,
                 items: Some(0),
                 ..FormNode::default()
@@ -224,6 +230,7 @@ pub fn untyped(doc: &Doc) -> Schema {
             nodes.push(FormNode {
                 key: "$".into(),
                 title: "$".into(),
+                title_fallback: true,
                 kind: Kind::Raw,
                 ..FormNode::default()
             });
@@ -531,6 +538,13 @@ impl Parser {
                         let m = &mut self.nodes[merged as usize];
                         m.title = t;
                         m.title_fallback = false;
+                        m.title_from_ref = false;
+                    } else {
+                        // The property has no title of its own: the row must
+                        // stay identifiable by its key (Cargo profile,
+                        // package, workspace, …), while the referenced
+                        // title still names the submenu.
+                        self.nodes[merged as usize].title_from_ref = true;
                     }
                     let d = desc_of(&self.doc, n);
                     if !d.is_empty() {

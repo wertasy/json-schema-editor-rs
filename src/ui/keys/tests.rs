@@ -993,6 +993,186 @@ fn untitled_schema_variants_render_signature_in_title_column() {
 }
 
 #[test]
+fn comment_preview_is_capped_and_c_expands_it() {
+    let desc = "L1\nL2\nL3\nL4\nL5\nTAILMARK";
+    let src = serde_json::json!({
+        "type": "object",
+        "properties": {"name": {"type": "string", "title": "Name", "description": desc}}
+    });
+    let schema = schema_from_json(&src.to_string());
+    let mut m = app_with(schema, test_doc(), test_opts());
+    m.width = 40;
+    m.height = 24;
+    set_cursor_path(&mut m, &sp(&["name"]));
+
+    let view = m.view();
+    assert!(view.contains("L1"), "{view}");
+    assert!(
+        view.contains("..."),
+        "collapsed preview must mark the cut:\n{view}"
+    );
+    assert!(
+        !view.contains("TAILMARK"),
+        "preview leaked the tail:\n{view}"
+    );
+
+    press(&mut m, &["c"]);
+    assert!(
+        m.desc_expanded,
+        "c must expand a description that fits one page"
+    );
+    let view = m.view();
+    assert!(
+        view.contains("TAILMARK"),
+        "expanded description lost text:\n{view}"
+    );
+
+    // Any other key folds the description and still performs its action.
+    let before = m.top().unwrap().cursor;
+    press(&mut m, &["j"]);
+    assert!(!m.desc_expanded, "j must collapse the expanded description");
+    assert_eq!(
+        m.top().unwrap().cursor,
+        before + 1,
+        "j must still move the cursor"
+    );
+    let view = m.view();
+    assert!(
+        !view.contains("TAILMARK"),
+        "collapsed view still expanded:\n{view}"
+    );
+}
+
+#[test]
+fn long_comment_opens_a_scrollable_page() {
+    let desc = (1..=40)
+        .map(|i| format!("L{i:02}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\nTAILMARK";
+    let src = serde_json::json!({
+        "type": "object",
+        "properties": {"name": {"type": "string", "title": "Name", "description": desc}}
+    });
+    let schema = schema_from_json(&src.to_string());
+    let mut m = app_with(schema, test_doc(), test_opts());
+    m.width = 40;
+    m.height = 24;
+    set_cursor_path(&mut m, &sp(&["name"]));
+
+    press(&mut m, &["c"]);
+    match &m.overlay {
+        Some(Overlay::Comment(c)) => {
+            assert_eq!(c.lines.len(), 41);
+            assert_eq!(c.scroll, 0);
+        }
+        _ => panic!("long comment did not open the comment page"),
+    }
+    let view = m.view();
+    assert!(view.contains("Comment: Name"), "{view}");
+    assert!(view.contains("L01"), "{view}");
+    assert!(
+        !view.contains("TAILMARK"),
+        "first page leaks the tail:\n{view}"
+    );
+    assert!(view.contains("c/q/esc close"), "page hint missing:\n{view}");
+
+    for _ in 0..25 {
+        press(&mut m, &["down"]);
+    }
+    match &m.overlay {
+        Some(Overlay::Comment(c)) => {
+            assert_eq!(c.scroll, 19, "scroll must clamp to the last page");
+            let view = m.view();
+            assert!(!view.contains("L01"), "old lines still visible:\n{view}");
+            assert!(
+                view.contains("TAILMARK"),
+                "last page lost the tail:\n{view}"
+            );
+        }
+        _ => panic!("comment page closed unexpectedly"),
+    }
+
+    press(&mut m, &["c"]);
+    assert!(m.overlay.is_none(), "c must close the comment page");
+
+    // q aliases esc outside inputs and also closes the page.
+    press(&mut m, &["c"]);
+    assert!(matches!(m.overlay, Some(Overlay::Comment(_))));
+    press(&mut m, &["q"]);
+    assert!(m.overlay.is_none(), "q must close the comment page");
+}
+
+#[test]
+fn root_title_uses_file_name_and_submenus_keep_schema_titles() {
+    let schema = schema_from_json(
+        r#"{
+          "type": "object",
+          "properties": {
+            "server": {
+              "type": "object",
+              "title": "Server Title",
+              "properties": {"port": {"type": "integer"}}
+            },
+            "plain": {
+              "type": "object",
+              "properties": {"x": {"type": "string"}}
+            }
+          }
+        }"#,
+    );
+    let mut opts = test_opts();
+    opts.path = "/tmp/demo.json".into();
+    let m = app_with(schema, test_doc(), opts);
+    let root = m.fs().schema.root;
+
+    let st = mstate(MenuKind::Object, root, vec![]);
+    assert_eq!(
+        m.menu_title(&st).0,
+        "demo.json",
+        "root fallback must be the file name"
+    );
+
+    let server = child(&m.fs().schema, root, "server");
+    let st = mstate(MenuKind::Object, server, sp(&["server"]));
+    assert_eq!(
+        m.menu_title(&st).0,
+        "Server Title",
+        "submenu keeps the schema title"
+    );
+
+    let plain = child(&m.fs().schema, root, "plain");
+    let st = mstate(MenuKind::Object, plain, sp(&["plain"]));
+    assert_eq!(
+        m.menu_title(&st).0,
+        "plain",
+        "untitled submenu falls back to its key"
+    );
+
+    // The root screen always names the file, even when the schema has a
+    // title of its own.
+    let schema = schema_from_json(r#"{"title":"My Config","type":"object"}"#);
+    let mut opts = test_opts();
+    opts.path = "/tmp/other.json".into();
+    let m = app_with(schema, test_doc(), opts);
+    let root = m.fs().schema.root;
+    let st = mstate(MenuKind::Object, root, vec![]);
+    assert_eq!(m.menu_title(&st).0, "other.json");
+}
+
+#[test]
+fn schema_less_root_title_uses_file_name() {
+    let doc = test_doc();
+    let schema = crate::smodel::untyped(&doc);
+    let mut opts = test_opts();
+    opts.path = "/tmp/plain.json".into();
+    let m = app_with(schema, doc, opts);
+    let root = m.fs().schema.root;
+    let st = mstate(MenuKind::Object, root, vec![]);
+    assert_eq!(m.menu_title(&st).0, "plain.json");
+}
+
+#[test]
 fn schema_typed_field_does_not_switch_type() {
     let mut m = mk_app(test_doc(), test_opts());
     set_cursor_path(&mut m, &sp(&["name"]));

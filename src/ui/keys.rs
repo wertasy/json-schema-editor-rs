@@ -18,12 +18,13 @@ use crate::icons::{ERR, WARN};
 use crate::smodel::{FormNode, FormNodeId, Kind, Schema};
 use crate::ui::files::wrap_cursor;
 use crate::ui::menu::{
-    AddState, AnchorMode, AnchorState, App, ConfirmState, EditState, ErrsState, ExternalEdit,
-    FastMoveState, FilePickState, IssuesState, MergeState, Msg, Overlay, RefPickState, SearchState,
-    SelState, TextState, WriteState, anchor_defs, anchor_holder, anchor_holder_path,
-    anchor_merge_use_paths, anchor_role, copy_detached_from_doc, copy_from_doc, count_anchor_uses,
-    cursor_by_path, cursor_for_row, cursor_prefix, is_path_prefix, merge_ref_uses, nodes_equal_doc,
-    read_clipboard, ref_would_cycle, remap_state_cursor, vertical_delta, write_clipboard,
+    AddState, AnchorMode, AnchorState, App, COMMENT_PREVIEW_LINES, CommentState, ConfirmState,
+    EditState, ErrsState, ExternalEdit, FastMoveState, FilePickState, IssuesState, MergeState, Msg,
+    Overlay, RefPickState, SearchState, SelState, TextState, WriteState, anchor_defs,
+    anchor_holder, anchor_holder_path, anchor_merge_use_paths, anchor_role, copy_detached_from_doc,
+    copy_from_doc, count_anchor_uses, cursor_by_path, cursor_for_row, cursor_prefix,
+    is_path_prefix, merge_ref_uses, nodes_equal_doc, read_clipboard, ref_would_cycle,
+    remap_state_cursor, vertical_delta, write_clipboard,
 };
 use crate::ui::rows::{
     SynthKey, any_type_menu, clip_runes, current_variant, display_title, doc_array_len,
@@ -436,7 +437,25 @@ fn wrap_text(s: &str, max: usize) -> Vec<String> {
     out
 }
 
-/// The style helpers (menu.rs style module) as Go's lipgloss constants.
+/// comment_preview caps the collapsed description at
+/// [`COMMENT_PREVIEW_LINES`] lines, marking a cut with "...".
+fn comment_preview(mut lines: Vec<String>, width: usize) -> Vec<String> {
+    if lines.len() <= COMMENT_PREVIEW_LINES {
+        return lines;
+    }
+    lines.truncate(COMMENT_PREVIEW_LINES);
+    if let Some(last) = lines.last_mut() {
+        const ELLIPSIS: &str = "...";
+        let avail = width.saturating_sub(ELLIPSIS.len());
+        if avail == 0 {
+            *last = ELLIPSIS.to_string();
+        } else {
+            *last = clip_display(last, avail);
+            last.push_str(ELLIPSIS);
+        }
+    }
+    lines
+}
 use crate::ui::menu::style;
 
 /// worstIssueIcon picks the severity glyph for a set of issues: any real
@@ -1082,6 +1101,7 @@ impl App {
                     self.add_key(&r, true);
                 }
             }
+            "c" => self.toggle_desc(&r, &rows),
             "?" => self.help = true,
             "/" => {
                 if st_kind == Some(MenuKind::OneOf) {
@@ -5037,6 +5057,7 @@ impl App {
             Some(Overlay::RefPick(s)) => return self.ref_pick_view(s),
             Some(Overlay::Text(s)) => return self.text_view(s),
             Some(Overlay::Sel(s)) => return self.sel_view(s),
+            Some(Overlay::Comment(s)) => return self.comment_view(s),
             _ => {}
         }
         if self.file_pick.is_some() {
@@ -5091,16 +5112,17 @@ impl App {
 
     /// menuTitle is the title-line label of the current menu (Go menuTitle).
     fn menu_title(&self, st: &MenuState) -> (String, String) {
+        // The root screen always names the file, never the schema's title
+        // ("Schema for rust-toolchain.toml", "Server Configuration", …).
+        if st.path.is_empty() {
+            let base = crate::file_base(&self.opts().path);
+            if !base.is_empty() && base != "." {
+                return (base.to_string(), self.menu_summary(st));
+            }
+        }
         let node = &self.fs().schema.nodes[st.node as usize];
         if !node.title.is_empty() {
-            let summary = if st.kind == MenuKind::OneOf {
-                self.variant_picker_summary(st)
-            } else if st.one_of.is_some() {
-                variant_label(&self.fs().schema, st.node)
-            } else {
-                String::new()
-            };
-            return (node.title.clone(), summary);
+            return (node.title.clone(), self.menu_summary(st));
         }
         let field = st.one_of.or(st.variant_of);
         let mut title = String::new();
@@ -5132,6 +5154,18 @@ impl App {
             variant_signature(&self.fs().schema, Some(st.node))
         };
         (title, summary)
+    }
+
+    /// menu_summary is the bottom line for a titled menu (schema title or the
+    /// root filename).
+    fn menu_summary(&self, st: &MenuState) -> String {
+        if st.kind == MenuKind::OneOf {
+            self.variant_picker_summary(st)
+        } else if st.one_of.is_some() {
+            variant_label(&self.fs().schema, st.node)
+        } else {
+            String::new()
+        }
     }
 
     /// variantPickerSummary is the bottom `variant:` line of a oneOf type
@@ -5294,14 +5328,15 @@ impl App {
             title += &format!(" {}", style::diff("●"));
         }
         if self.files.len() > 1 {
-            let base = std::path::Path::new(&self.opts().path)
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default();
-            title += &format!(
-                " {}",
-                style::faint(&format!("[{}/{} {}]", self.cur + 1, self.files.len(), base))
-            );
+            let base = crate::file_base(&self.opts().path);
+            // The root title is already the file name; repeat only the
+            // position, not the name.
+            let label = if base == title_text {
+                format!("[{}/{}]", self.cur + 1, self.files.len())
+            } else {
+                format!("[{}/{} {}]", self.cur + 1, self.files.len(), base)
+            };
+            title += &format!(" {}", style::faint(&label));
         }
         b.push_str(&clip_display(&title, self.width.saturating_sub(1)));
         b.push('\n');
@@ -5329,7 +5364,12 @@ impl App {
         let desc = self.focused_desc(&st, &rows);
         let mut desc_lines: Vec<String> = Vec::new();
         if !desc.is_empty() {
-            desc_lines = wrap_text(&desc, self.width.saturating_sub(1));
+            let full = wrap_text(&desc, self.width.saturating_sub(1));
+            desc_lines = if self.desc_expanded {
+                full
+            } else {
+                comment_preview(full, self.width.saturating_sub(1))
+            };
         }
         let mut summary_lines: Vec<String> = Vec::new();
         if !summary.is_empty() {
@@ -5589,6 +5629,60 @@ impl App {
                 self.write_cut(b, &h);
             }
         }
+    }
+
+    /// toggle_desc implements c: expand the focused description inline, or
+    /// open the dedicated scrolling page when it cannot fit one screen.
+    fn toggle_desc(&mut self, r: &Row, rows: &[Row]) {
+        let Some(st) = self.top().cloned() else {
+            return;
+        };
+        let desc = self.focused_desc(&st, rows);
+        if desc.is_empty() {
+            return;
+        }
+        let lines = wrap_text(&desc, self.width.saturating_sub(1));
+        if lines.len() > self.desc_page_capacity() {
+            self.desc_expanded = false;
+            let title = if !r.label.is_empty() {
+                r.label.clone()
+            } else if let Some(f) = r.fn_ {
+                self.fs().schema.nodes[f as usize].title.clone()
+            } else {
+                String::new()
+            };
+            self.overlay = Some(Overlay::Comment(CommentState {
+                title,
+                lines,
+                scroll: 0,
+            }));
+        } else {
+            self.desc_expanded = !self.desc_expanded;
+        }
+    }
+
+    /// desc_page_capacity is how many wrapped description lines fit while
+    /// keeping the title, breadcrumb, one menu row and the help bar.
+    fn desc_page_capacity(&self) -> usize {
+        let status = self.status_lines().len();
+        let notice = usize::from(!self.notice.is_empty());
+        let hidden = usize::from(self.hide_empty);
+        self.height
+            .saturating_sub(4 + status + notice + hidden)
+            .max(1)
+    }
+
+    /// keyComment drives the dedicated long-comment page.
+    pub fn key_comment(&mut self, msg: Msg, mut s: CommentState) -> Option<Overlay> {
+        let page = self.height.saturating_sub(2).max(1);
+        let max_scroll = s.lines.len().saturating_sub(page);
+        match msg.key_str().as_str() {
+            "up" | "k" => s.scroll = s.scroll.saturating_sub(1),
+            "down" | "j" => s.scroll = (s.scroll + 1).min(max_scroll),
+            "c" | "esc" => return None,
+            _ => {}
+        }
+        Some(Overlay::Comment(s))
     }
 
     /// focusedDesc returns the schema description of the highlighted row.
@@ -6308,6 +6402,37 @@ impl App {
             self.width.saturating_sub(1),
         ));
         b.push('\n');
+        b
+    }
+
+    fn comment_view(&self, s: &CommentState) -> String {
+        let mut b = String::new();
+        let title = if s.title.is_empty() {
+            "Comment".to_string()
+        } else {
+            format!("Comment: {}", s.title)
+        };
+        b.push_str(&clip_display(
+            &style::bold(&title),
+            self.width.saturating_sub(1),
+        ));
+        b.push('\n');
+        let page = self.height.saturating_sub(2).max(1);
+        let max_scroll = s.lines.len().saturating_sub(page);
+        let off = s.scroll.min(max_scroll);
+        for line in s.lines.iter().skip(off).take(page) {
+            b.push_str(&clip_display(
+                &style::desc(line),
+                self.width.saturating_sub(1),
+            ));
+            b.push('\n');
+        }
+        let mut lines = b.matches('\n').count();
+        while lines < self.height.saturating_sub(1) {
+            b.push('\n');
+            lines += 1;
+        }
+        b.push_str(&self.rec_hint("↑/↓ or j/k scroll · c/q/esc close"));
         b
     }
 

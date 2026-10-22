@@ -286,6 +286,18 @@ pub fn menu_rows_for(
                 Kind::Object => {
                     let mut known: HashSet<String> = HashSet::new();
                     let children = schema.nodes[st.node as usize].children.clone();
+                    // Several properties may $ref the same titled definition
+                    // (Cargo profiles: dev/release/bench/test all reuse
+                    // "Profile with Build Override"). Showing that title on
+                    // every row hides which key is which, so duplicated
+                    // titles fall back to the property keys.
+                    let mut title_counts: HashMap<String, usize> = HashMap::new();
+                    for &c in &children {
+                        let title = &schema.nodes[c as usize].title;
+                        if !title.is_empty() {
+                            *title_counts.entry(title.clone()).or_default() += 1;
+                        }
+                    }
                     for c in children {
                         let key = schema.nodes[c as usize].key.clone();
                         known.insert(key.clone());
@@ -294,7 +306,12 @@ pub fn menu_rows_for(
                             rows.push(merged_row(schema, &mut env.synth, st, mk));
                             continue;
                         }
-                        rows.push(child_row(schema, &st.path, c));
+                        let mut row = child_row(schema, &st.path, c);
+                        let title = &schema.nodes[c as usize].title;
+                        if !title.is_empty() && title_counts.get(title).copied().unwrap_or(0) > 1 {
+                            row.label = key;
+                        }
+                        rows.push(row);
                     }
                     // document members the schema does not define stay visible
                     if let Some(cur) = doc.get(&st.path) {
@@ -513,12 +530,18 @@ pub fn move_to_value(ctx: &MenuCtx, st: &mut MenuState, rows: &[Row], delta: i64
 /// childRow maps one object child to a field or drill row.
 pub fn child_row(schema: &Schema, parent_path: &[PathSeg], c: FormNodeId) -> Row {
     let p = path_for(parent_path, &schema.nodes[c as usize].key);
+    let label = if schema.nodes[c as usize].title_from_ref {
+        schema.nodes[c as usize].key.clone()
+    } else {
+        String::new()
+    };
     if menu_leaf(schema, c) {
         Row {
             kind: RowKind::Field,
             fn_: Some(c),
             path: p,
             idx: -1,
+            label,
             ..Row::default()
         }
     } else {
@@ -527,6 +550,7 @@ pub fn child_row(schema: &Schema, parent_path: &[PathSeg], c: FormNodeId) -> Row
             fn_: Some(c),
             path: p,
             idx: -1,
+            label,
             ..Row::default()
         }
     }
@@ -3942,6 +3966,77 @@ mod tests {
         assert_eq!(fx.schema.nodes[rows[5].fn_.unwrap() as usize].key, "auth");
         assert_eq!(rows[6].label, "< Save and exit >");
         assert_eq!(rows[7].label, "< Edit raw JSON >");
+    }
+
+    #[test]
+    fn test_menu_rows_duplicate_child_titles_fall_back_to_keys() {
+        // Cargo.toml: dev/release/bench/test all $ref the same titled
+        // definition; their rows must still name the actual profile keys.
+        let schema = must_schema(
+            r##"{
+              "type": "object",
+              "properties": {"profile": {"$ref": "#/definitions/Profiles"}},
+              "definitions": {
+                "Profile": {
+                  "title": "Profile with Build Override",
+                  "type": "object",
+                  "properties": {"opt-level": {"type": "integer"}}
+                },
+                "Special": {
+                  "title": "Special profile",
+                  "type": "object",
+                  "properties": {"x": {"type": "string"}}
+                },
+                "Profiles": {
+                  "title": "Profiles",
+                  "type": "object",
+                  "properties": {
+                    "bench": {"$ref": "#/definitions/Profile"},
+                    "dev": {"$ref": "#/definitions/Profile"},
+                    "release": {"$ref": "#/definitions/Profile"},
+                    "test": {"$ref": "#/definitions/Profile"},
+                    "special": {"$ref": "#/definitions/Special"},
+                    "documented": {
+                      "title": "Documented field",
+                      "type": "object",
+                      "properties": {"y": {"type": "string"}}
+                    }
+                  },
+                  "additionalProperties": {"$ref": "#/definitions/Profile"}
+                }
+              }
+            }"##,
+        );
+        let doc = dbuild(|db| db.obj(vec![("profile", db.obj(vec![]))]));
+        let mut fx = Fx {
+            schema,
+            doc,
+            opts: test_opts(),
+            cache: HashMap::new(),
+        };
+        let root_st = root_state(&fx.schema);
+        let root_rows = rows_for(&mut fx, vec![root_st], true);
+        let profile_row = root_rows
+            .iter()
+            .find(|r| path_string(&r.path) == "$.profile")
+            .expect("profile row");
+        assert_eq!(
+            profile_row.label, "profile",
+            "a bare $ref property must keep its key as the row label"
+        );
+
+        let profile = child_of(&fx.schema, fx.schema.root, "profile");
+        let rows = rows_for(
+            &mut fx,
+            vec![st(MenuKind::Object, profile, vec![PathSeg::key("profile")])],
+            false,
+        );
+        let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["bench", "dev", "release", "test", "special", ""],
+            "ref-derived children use keys; an own title still wins: {rows:?}"
+        );
     }
 
     #[test]

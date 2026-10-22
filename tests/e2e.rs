@@ -526,6 +526,141 @@ fn pty_schema_less_whole_doc_edit_rebuilds_root() {
 }
 
 #[test]
+fn pty_json_and_yaml_titles_match_toml_behavior() {
+    let schema_src = r#"{
+      "type": "object",
+      "properties": {
+        "server": {
+          "type": "object",
+          "title": "Server Title",
+          "properties": {"port": {"type": "integer"}}
+        }
+      }
+    }"#;
+    for (name, config) in [
+        ("config.json", "{\"server\":{\"port\":8080}}\n"),
+        ("config.yaml", "server:\n  port: 8080\n"),
+    ] {
+        let dir = mktemp();
+        let schema = dir.path().join("schema.json");
+        let cfg = dir.path().join(name);
+        write_file(&schema, schema_src);
+        write_file(&cfg, config);
+        let schema_arg = arg(&schema);
+        let cfg_arg = arg(&cfg);
+        let cache = mktemp();
+        let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+            return;
+        };
+
+        let (_, off) = pty.wait_frame("root title is the file name", 0, &[name, "Server Title"]);
+        pty.send(b"\r");
+        pty.wait_frame(
+            "submenu keeps the schema title",
+            off,
+            &["Server Title", "port"],
+        );
+        pty.send(b"\x03");
+        pty.wait_exit(130);
+    }
+}
+
+#[test]
+fn pty_duplicate_child_titles_show_their_keys() {
+    let dir = mktemp();
+    let schema = dir.path().join("profiles.schema.json");
+    let cfg = dir.path().join("Cargo.toml");
+    let src = json!({
+        "type": "object",
+        "properties": {"profile": {"$ref": "#/definitions/Profiles"}},
+        "definitions": {
+            "Profile": {
+                "title": "Profile with Build Override",
+                "type": "object",
+                "properties": {"opt-level": {"type": "string"}}
+            },
+            "Profiles": {
+                "title": "Profiles",
+                "type": "object",
+                "properties": {
+                    "bench": {"$ref": "#/definitions/Profile"},
+                    "dev": {"$ref": "#/definitions/Profile"},
+                    "release": {"$ref": "#/definitions/Profile"},
+                    "test": {"$ref": "#/definitions/Profile"}
+                },
+                "additionalProperties": {"$ref": "#/definitions/Profile"}
+            }
+        }
+    });
+    write_file(&schema, &src.to_string());
+    write_file(&cfg, "[profile.release]\nopt-level = \"z\"\n");
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+        return;
+    };
+
+    pty.wait_frame("root", 0, &["profile", "Save and exit"]);
+    pty.send(b"\r");
+    let (snap, _) = pty.wait_frame(
+        "profiles menu",
+        0,
+        &["Profiles", "bench", "dev", "release", "test"],
+    );
+    assert!(
+        !snap.contains("Profile with Build Override"),
+        "duplicate titles hid the profile keys:\n{snap}"
+    );
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+}
+
+#[test]
+fn pty_long_comment_page_scrolls_and_closes() {
+    let dir = mktemp();
+    let schema = dir.path().join("long-desc.schema.json");
+    let cfg = dir.path().join("cfg.json");
+    let desc = (1..=80)
+        .map(|i| format!("COMMENT LINE {i:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let src = json!({
+        "type": "object",
+        "properties": {"name": {"type": "string", "title": "Name", "description": desc}}
+    });
+    write_file(&schema, &src.to_string());
+    write_file(&cfg, r#"{"name":"x"}"#);
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+        return;
+    };
+
+    pty.wait_frame("root with description", 0, &["Name", "Save and exit"]);
+    pty.send(b"c");
+    let (snap, off) = pty.wait_frame(
+        "long comment page",
+        0,
+        &["Comment: Name", "COMMENT LINE 01", "c/q/esc close"],
+    );
+    assert!(
+        !snap.contains("COMMENT LINE 80"),
+        "first page shows the tail:\n{snap}"
+    );
+
+    let down = "j".repeat(35);
+    pty.send(down.as_bytes());
+    pty.wait_frame("scrolled comment page", off, &["COMMENT LINE 36"]);
+
+    pty.send(b"c");
+    pty.wait_frame("menu after comment page", 0, &["Name", "Save and exit"]);
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+}
+
+#[test]
 fn pty_yaml_schema_less_editing_keeps_comments() {
     let dir = mktemp();
     let cfg = dir.path().join("plain.yaml");
@@ -1551,7 +1686,7 @@ fn pty_undo_redo() {
         return;
     };
 
-    let (_, mut off) = pty.wait_frame("root menu", 0, &["Server Configuration", "Name"]);
+    let (_, mut off) = pty.wait_frame("root menu", 0, &["server.config.json", "Name"]);
     pty.pause(Duration::from_millis(300)); // let the TUI finish raw-mode setup
     // the example carries a schema-unknown key, so a status row sits above
     // Name; step over it. name is pattern-bound (^[a-z][a-z0-9-]*$), so -x
@@ -1816,15 +1951,15 @@ fn pty_multi_file_session() {
         return;
     };
 
-    let (_, off) = pty.wait_frame("first file root", 0, &["[1/2 a.json]", "Save and exit"]);
+    let (_, off) = pty.wait_frame("first file root", 0, &["a.json [1/2]", "Save and exit"]);
     pty.send(b"s"); // file switcher
     let (_, off) = pty.wait_frame("file picker", off, &["Files (2)", "b.json"]);
     pty.send(b"j\r"); // switch to b.json
-    let (_, off) = pty.wait_frame("second file root", off, &["[2/2 b.json]"]);
+    let (_, off) = pty.wait_frame("second file root", off, &["b.json [2/2]"]);
     pty.send(b"\x0f"); // ctrl+o back across the boundary
-    let (_, off) = pty.wait_frame("back on first file", off, &["[1/2 a.json]"]);
+    let (_, off) = pty.wait_frame("back on first file", off, &["a.json [1/2]"]);
     pty.send(b"\t"); // ctrl+i forward again
-    let (_, off) = pty.wait_frame("forward to second file", off, &["[2/2 b.json]"]);
+    let (_, off) = pty.wait_frame("forward to second file", off, &["b.json [2/2]"]);
     pty.send(b"\r\x15gamma\r"); // edit b.json's name
     let (_, off) = pty.wait_frame("edited name", off, &["●"]);
     pty.send(b"\x13"); // ctrl+s saves the active file only
@@ -1856,13 +1991,13 @@ fn pty_multi_file_quit_saves_all() {
         return;
     };
 
-    let (_, off) = pty.wait_frame("first file root", 0, &["[1/2 a.json]"]);
+    let (_, off) = pty.wait_frame("first file root", 0, &["a.json [1/2]"]);
     pty.send(b"\r\x15one\r"); // dirty a.json
     let (_, off) = pty.wait_frame("a.json dirty", off, &["●"]);
     pty.send(b"s"); // file switcher (keys split: a pty write of "sj"
     let (_, off) = pty.wait_frame("file picker", off, &["Files (2)"]); // coalesces runes)
     pty.send(b"j\r");
-    let (_, off) = pty.wait_frame("second file root", off, &["[2/2 b.json]"]);
+    let (_, off) = pty.wait_frame("second file root", off, &["b.json [2/2]"]);
     pty.send(b"\r\x15two\r"); // dirty b.json
     let (_, off) = pty.wait_frame("b.json dirty", off, &["●"]);
     pty.send(b"\x1b"); // quit at the root: one confirm for both files

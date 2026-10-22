@@ -96,6 +96,8 @@ pub struct Inputs {
     pub issues: bool,
     pub errs: bool,
     pub sel: bool,
+    /// dedicated long-comment page
+    pub comment: bool,
     pub help: bool,
     pub file_pick: bool,
     /// oneOf picker search mode (no overlay, but text input rules)
@@ -121,7 +123,14 @@ pub fn typing(i: &Inputs) -> bool {
 
 /// list_mode reports whether the plain menu key table owns the keyboard.
 pub fn list_mode(i: &Inputs) -> bool {
-    !i.confirm && !i.issues && !i.errs && !i.sel && !i.help && !typing(i) && !i.file_pick
+    !i.confirm
+        && !i.issues
+        && !i.errs
+        && !i.sel
+        && !i.comment
+        && !i.help
+        && !typing(i)
+        && !i.file_pick
 }
 
 /// repairStack drops navigation levels whose path no longer resolves in the
