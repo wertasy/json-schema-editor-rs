@@ -23,7 +23,7 @@ jse 把表单当作编辑辅助，把 **JSON Schema 校验**当作权威判定�
 
 ## 降级规则
 
-- 不可达 `$ref`、数组套数组、未知类型、schema 深度超过 32 层、递归 `$ref`：该字段渲染为「Edit as JSON/YAML」文本区；提交时只做语法校验，语义交给保存期校验。
+- 不可达 `$ref`、数组套数组、未知类型、schema 深度超过 32 层、递归 `$ref`：有值时按运行时类型直接编辑；无值/null 时使用类型选择器（String/Number/Boolean/Object/Array/Null、schema `$defs`/`definitions` 命名类型、JSON），选 `JSON` 时渲染为 raw 文本区，提交时只做语法校验，语义交给保存期校验。
 - schema 编译失败（非法 schema、远端 ref 不可达等）：**停用保存期校验**，根屏状态行提示 `<warn> schema compile failed, save-time validation disabled: ...`。此时保存不再有 schema 兜底。
 - 加载的配置已有校验问题：不阻止编辑，根菜单首行显示问题计数。加载时的错误只用于展示；每次文档修改后会重新校验并刷新。
 - 明确不做：`format` 的表单校验、数组重排序 UI、`if-then-else`/`not` 的表单化、多模式 `patternProperties`、远端配置路径。

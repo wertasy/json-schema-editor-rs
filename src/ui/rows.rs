@@ -90,6 +90,8 @@ pub enum SynthKey {
     Merged(FormNodeId),
     /// variant's menu with discriminator keys unionized
     Pinned(FormNodeId, FormNodeId),
+    /// arbitrary JSON type picker (unknown keys, untyped schema fields)
+    AnyType,
 }
 
 // --- helpers usually found on listModel ------------------------------------
@@ -119,6 +121,21 @@ fn path_idx(path: &[PathSeg], idx: usize) -> Vec<PathSeg> {
 
 fn path_eq(a: &[PathSeg], b: &[PathSeg]) -> bool {
     a == b
+}
+
+/// variantSearchMatch reports whether a variant row matches the picker's
+/// search: case-insensitive substring over its title, key and signature.
+fn variant_search_match(schema: &Schema, v: FormNodeId, q: &str) -> bool {
+    if q.is_empty() {
+        return true;
+    }
+    let q = q.to_lowercase();
+    let f = &schema.nodes[v as usize];
+    f.title.to_lowercase().contains(&q)
+        || f.key.to_lowercase().contains(&q)
+        || variant_signature(schema, Some(v))
+            .to_lowercase()
+            .contains(&q)
 }
 
 /// scalarText (widgets.go): renders a current/default scalar node as text.
@@ -226,6 +243,7 @@ pub fn menu_rows_for(
     // A menu for an array item (path ends with an index) offers removal.
     if !st.path.is_empty()
         && st.kind != MenuKind::EnumArray
+        && st.kind != MenuKind::OneOf
         && matches!(st.path.last(), Some(PathSeg::Idx(_)))
     {
         rows.push(Row {
@@ -359,6 +377,11 @@ pub fn menu_rows_for(
         MenuKind::OneOf => {
             let variants = schema.nodes[st.node as usize].variants.clone();
             for v in variants {
+                // the seeded keyword is just the search input text; the
+                // list is not searched until the user types
+                if st.search_applied && !variant_search_match(schema, v, st.search_ti.value()) {
+                    continue;
+                }
                 rows.push(Row {
                     kind: RowKind::Variant,
                     variant: Some(v),
@@ -373,10 +396,15 @@ pub fn menu_rows_for(
         rows.retain(|r| !empty_key_row_raw(schema, doc, r));
     }
     if rows.is_empty() {
+        let (label, kind) = if st.kind == MenuKind::OneOf {
+            ("( no matching types )", RowKind::NoItems)
+        } else {
+            ("< Add Key >", RowKind::NoItems)
+        };
         rows.push(Row {
-            kind: RowKind::NoItems,
+            kind,
             idx: -1,
-            label: "< Add Key >".into(),
+            label: label.into(),
             ..Row::default()
         });
     }
@@ -1334,6 +1362,94 @@ fn push_node(schema: &mut Schema, n: FormNode) -> FormNodeId {
     id
 }
 
+/// anyTypeMenu builds the variant picker for a value with no concrete schema
+/// type (a document key the schema does not define, or a field that degrades
+/// to "json"). It offers the JSON built-ins, the schema's own named types
+/// (`$defs`/`definitions`), and a JSON escape hatch that opens the built-in
+/// raw textarea. The array variant's items use the picker itself, so
+/// arbitrary nested arrays keep the same type-choice flow.
+pub fn any_type_menu(schema: &mut Schema, synth: &mut HashMap<SynthKey, FormNodeId>) -> FormNodeId {
+    if let Some(&id) = synth.get(&SynthKey::AnyType) {
+        return id;
+    }
+    let schema_defs = schema.defs.clone();
+    let mut variants = vec![
+        push_node(
+            schema,
+            FormNode {
+                title: "String".into(),
+                kind: Kind::Scalar,
+                json_type: "string".into(),
+                ..FormNode::default()
+            },
+        ),
+        push_node(
+            schema,
+            FormNode {
+                title: "Number".into(),
+                kind: Kind::Scalar,
+                json_type: "number".into(),
+                ..FormNode::default()
+            },
+        ),
+        push_node(
+            schema,
+            FormNode {
+                title: "Boolean".into(),
+                kind: Kind::Boolean,
+                ..FormNode::default()
+            },
+        ),
+        push_node(
+            schema,
+            FormNode {
+                title: "Object".into(),
+                kind: Kind::Object,
+                ..FormNode::default()
+            },
+        ),
+        push_node(
+            schema,
+            FormNode {
+                title: "Array".into(),
+                kind: Kind::Array,
+                ..FormNode::default()
+            },
+        ),
+        push_node(
+            schema,
+            FormNode {
+                title: "Null".into(),
+                kind: Kind::Raw,
+                null_only: true,
+                ..FormNode::default()
+            },
+        ),
+    ];
+    variants.extend(schema_defs);
+    variants.push(push_node(
+        schema,
+        FormNode {
+            title: "JSON".into(),
+            kind: Kind::Raw,
+            raw_editor: true,
+            ..FormNode::default()
+        },
+    ));
+    let array = variants[4];
+    let id = push_node(
+        schema,
+        FormNode {
+            kind: Kind::OneOf,
+            variants,
+            ..FormNode::default()
+        },
+    );
+    schema.nodes[array as usize].items = Some(id);
+    synth.insert(SynthKey::AnyType, id);
+    id
+}
+
 /// mergedOneOfMenu synthesizes the union-menu node over the variant list:
 /// the merge of every variant's fields (discriminator keys as union enums,
 /// same-kind keys as the first definition, conflicting keys dropped).
@@ -1439,6 +1555,10 @@ pub fn rebuild_stack(schema: &mut Schema, doc: &Doc, path: &[PathSeg]) -> Vec<Me
             sel: HashSet::new(),
             visual: false,
             vanchor: 0,
+            search_ti: Default::default(),
+            searching: false,
+            search_prefilled: false,
+            search_applied: false,
         }
     }
     let root = schema.root;
@@ -1490,7 +1610,7 @@ pub fn rebuild_stack(schema: &mut Schema, doc: &Doc, path: &[PathSeg]) -> Vec<Me
                 let cpath = path_for(&cur_path, s);
                 if schema.nodes[child as usize].kind == Kind::OneOf {
                     // an existing value edits its variant directly; the
-                    // picker stays one ctrl+t away
+                    // picker stays one t away
                     if let Some(v) = doc.get(&cpath) {
                         if !is_null(doc, v) {
                             let vi = current_variant(schema, child, doc, Some(v));
@@ -2801,6 +2921,7 @@ mod tests {
             Schema {
                 nodes: self.nodes,
                 root: self.root,
+                defs: Vec::new(),
                 doc: self.doc,
             }
         }
@@ -3102,6 +3223,10 @@ mod tests {
             sel: Default::default(),
             visual: false,
             vanchor: 0,
+            search_ti: Default::default(),
+            searching: false,
+            search_prefilled: false,
+            search_applied: false,
         }
     }
 
@@ -3927,7 +4052,7 @@ mod tests {
         assert_eq!(stx[2].kind, MenuKind::Items);
 
         // oneOf descent follows the current variant; an existing value edits
-        // it directly (oneOf carried for the ctrl+t type switch)
+        // it directly (oneOf carried for the t type switch)
         let doc_auth = dbuild(|db| db.obj(vec![("auth", db.obj(vec![("token", db.s("x"))]))]));
         let stx = rebuild_stack(
             &mut fx.schema,

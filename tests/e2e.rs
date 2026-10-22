@@ -750,7 +750,7 @@ fn pty_external_raw_yaml_editor() {
 }
 
 #[test]
-fn pty_external_unknown_key_editor() {
+fn pty_unknown_key_type_picker() {
     let dir = mktemp();
     let schema = dir.path().join("mini.schema.json");
     let cfg = dir.path().join("o.json");
@@ -760,13 +760,7 @@ fn pty_external_unknown_key_editor() {
         r#"{"type":"object","properties":{"name":{"type":"string","title":"Name"}}}"#,
     );
     write_file(&cfg, r#"{"name":"z","inline":"old","extra":{"old":1}}"#);
-    write_file(
-        &editor,
-        "#!/bin/sh\n\
-         grep -q '\"old\"' \"$1\" || exit 3\n\
-         grep -q '\"name\"' \"$1\" && exit 4\n\
-         echo '{\"from\":\"editor\"}' > \"$1\"\n",
-    );
+    write_file(&editor, "#!/bin/sh\nexit 9\n");
     set_executable(&editor);
 
     let schema_arg = arg(&schema);
@@ -788,7 +782,8 @@ fn pty_external_unknown_key_editor() {
     (_, off) = pty.wait_frame("cursor on $schema", off, &["> $schema"]);
     pty.send(b"j"); // $schema → inline
     (_, off) = pty.wait_frame("cursor on scalar unknown key", off, &["> inline"]);
-    pty.send(b"\r"); // open the in-place scalar editor
+    // a known string value edits directly, without the type picker
+    pty.send(b"\r");
     (_, off) = pty.wait_frame("inline scalar editor", off, &["> inline", "old"]);
     pty.send(b"\x15"); // clear the in-place scalar input
     for ch in ["n", "e", "w"] {
@@ -803,15 +798,36 @@ fn pty_external_unknown_key_editor() {
     (_, off) = pty.wait_frame("scalar edited in place", off, &["inline", "new"]);
     pty.send(b"j"); // inline → extra
     (_, off) = pty.wait_frame("cursor on object unknown key", off, &["> extra"]);
-    pty.send(b"\r"); // launch $EDITOR on the object value
-    (_, off) = pty.wait_frame("value edited", off, &["Value edited"]);
+    // a known object value drills straight into the schema-less menu
+    pty.send(b"\r");
+    (_, off) = pty.wait_frame("object menu", off, &["Object", "old"]);
+    pty.send(b"\r"); // nested known number edits directly
+    (_, off) = pty.wait_frame("nested number editor", off, &["old", "1"]);
+    pty.send(b"\x15"); // clear, then type 2
+    pty.send(b"2");
+    pty.send(b"\r");
+    (_, off) = pty.wait_frame("nested value edited", off, &["old", "2"]);
+    pty.send(b"\x1b"); // back to the root menu
+    (_, off) = pty.wait_frame("back on extra", off, &["> extra"]);
+    // t explicitly opens the type picker for an untyped value
+    pty.send(b"t");
+    (_, off) = pty.wait_frame("object type picker", off, &["Object", "JSON"]);
+    pty.send(b"/"); // in-picker search: seeded with the selected type
+    (_, off) = pty.wait_frame("type search seeded", off, &["search: Object", "> ● Object"]);
+    pty.send(b"u"); // "u" is search text here, not undo
+    (_, off) = pty.wait_frame("u typed into search", off, &["search: u"]);
+    pty.send(b"\x7f"); // clear the query, then narrow it ourselves
+    pty.send(b"Obj");
+    (_, off) = pty.wait_frame("type search narrowed", off, &["search: Obj", "Object"]);
+    pty.send(b"\r"); // select the filtered Object type
+    (_, off) = pty.wait_frame("object menu again", off, &["Object", "old"]);
     pty.send(b"\x13"); // ctrl+s save
     pty.wait_frame("saved", off, &["Write to "]);
     pty.send(b"\x03");
     pty.wait_exit(130);
 
     let got = read_json(&cfg);
-    assert_eq!(got["extra"], json!({"from": "editor"}), "saved doc = {got}");
+    assert_eq!(got["extra"], json!({"old": 2}), "saved doc = {got}");
     assert_eq!(got["inline"], json!("new"), "saved doc = {got}");
     assert_eq!(got["name"], json!("z"), "saved doc = {got}");
 }
@@ -1542,7 +1558,7 @@ fn pty_internal_raw_textarea_is_windowed() {
     let dir = mktemp();
     let schema = dir.path().join("blob.schema.json");
     let cfg = dir.path().join("blob.json");
-    // no "type" on blob: the editor falls back to the built-in raw textarea
+    // no "type" on blob: a known value edits directly, t offers types
     write_file(
         &schema,
         r#"{"type":"object","properties":{"blob":{"title":"Blob"}}}"#,
@@ -1560,7 +1576,9 @@ fn pty_internal_raw_textarea_is_windowed() {
         return;
     };
     pty.wait_frame("root menu", 0, &["Blob"]);
-    pty.send(b"\r"); // open the blob value in the built-in textarea
+    pty.send(b"t"); // untyped field: t opens the type picker
+    pty.wait_frame("type picker", 0, &["String", "JSON"]);
+    pty.send(b"G\r"); // choose the JSON variant: built-in raw textarea
     let (_, off) = pty.wait_frame("raw textarea", 0, &["ctrl+s apply"]);
     pty.pause(std::time::Duration::from_millis(200));
     let snap = pty.snapshot();

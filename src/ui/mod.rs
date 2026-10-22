@@ -198,7 +198,7 @@ pub struct Row {
 /// menuState is one level of the navigation stack; cursor/offset are
 /// remembered so popping restores the exact view. variant_of is Some when
 /// this is the dynamic item menu of an all-object oneOf; one_of is Some on
-/// the top-level editor menu of a classic oneOf variant (ctrl+t type
+/// the top-level editor menu of a classic oneOf variant (t type
 /// switch).
 #[derive(Clone, Debug)]
 pub struct MenuState {
@@ -215,6 +215,15 @@ pub struct MenuState {
     pub visual: bool,
     /// row where visual select started
     pub vanchor: usize,
+    /// oneOf type picker: live search input ("" shows every variant)
+    pub search_ti: crate::ui::widgets::TextInput,
+    /// oneOf type picker: / search input has focus
+    pub searching: bool,
+    /// the search started on the selected type's name and has not been
+    /// replaced by user input yet
+    pub search_prefilled: bool,
+    /// the search text has been edited and should narrow the variant rows
+    pub search_applied: bool,
 }
 
 /// issue is one validation message with its parsed instance location.

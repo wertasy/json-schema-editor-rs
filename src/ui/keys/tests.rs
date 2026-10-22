@@ -49,6 +49,7 @@ impl TB {
         Schema {
             nodes: self.nodes,
             root: self.root,
+            defs: Vec::new(),
             doc: self.doc,
         }
     }
@@ -332,7 +333,6 @@ fn key(k: &str) -> Msg {
         "ctrl+k" => Msg::Ctrl('k'),
         "ctrl+s" => Msg::Ctrl('s'),
         "ctrl+r" => Msg::Ctrl('r'),
-        "ctrl+t" => Msg::Ctrl('t'),
         "ctrl+o" => Msg::Ctrl('o'),
         "ctrl+i" => Msg::Ctrl('i'),
         "ctrl+u" => Msg::Ctrl('u'),
@@ -352,8 +352,8 @@ fn press(app: &mut App, keys: &[&str]) {
         match k {
             "enter" | "esc" | "up" | "down" | "left" | "right" | "space" | "tab" | "shift+tab"
             | "backspace" | "delete" | "home" | "end" | "ctrl+c" | "ctrl+j" | "ctrl+k"
-            | "ctrl+s" | "ctrl+r" | "ctrl+t" | "ctrl+o" | "ctrl+i" | "ctrl+u" | "ctrl+n"
-            | "ctrl+p" | "alt+i" | "alt+x" => {
+            | "ctrl+s" | "ctrl+r" | "ctrl+o" | "ctrl+i" | "ctrl+u" | "ctrl+n" | "ctrl+p"
+            | "alt+i" | "alt+x" => {
                 app.update(key(k));
             }
             _ => {
@@ -846,7 +846,7 @@ fn root_esc_clears_selection_before_save_prompt() {
 }
 
 #[test]
-fn unknown_key_external_edit() {
+fn unknown_key_type_picker_object_and_switch() {
     let mut doc = test_doc();
     let extra = doc.new_object();
     let old = doc.new_str("value");
@@ -854,49 +854,411 @@ fn unknown_key_external_edit() {
     let _ = doc.insert_member(&sp(&["extra"]), "old", 0, old);
     let mut m = mk_app(doc.clone(), test_opts());
 
-    let open = |m: &mut App| {
-        set_cursor(m, |r| r.kind == RowKind::Unknown && r.label == "extra");
-        press(m, &["enter"]);
-        assert!(
-            !matches!(m.overlay, Some(Overlay::Text(_))),
-            "unknown object must not use the raw textarea"
-        );
-        assert!(
-            m.pending_edit.is_some(),
-            "unknown object value must use $EDITOR"
-        );
-    };
+    // a known object type drills straight into the schema-less object menu
+    set_cursor(&mut m, |r| r.kind == RowKind::Unknown && r.label == "extra");
+    press(&mut m, &["enter"]);
+    assert_eq!(m.top().unwrap().kind, MenuKind::Object);
+    assert!(m.pending_edit.is_none(), "no $EDITOR is launched");
+    let nested = find_row(&mut m, |r, _| {
+        r.kind == RowKind::Unknown && r.label == "old"
+    })
+    .expect("unknown nested key");
+    let i = m
+        .menu_rows()
+        .iter()
+        .position(|r| same_menu_row(r, &nested))
+        .unwrap();
+    m.top_mut().unwrap().cursor = i;
 
-    open(&mut m);
-    let path = m.pending_edit.as_ref().unwrap().path.clone();
-    let data = std::fs::read_to_string(&path).expect("editor prefill");
-    let pre = crate::doc::jsondoc::parse(&data).expect("prefill must be valid JSON");
-    assert_eq!(sget(&pre, &sp(&["old"])), "value");
-    let _ = std::fs::remove_file(&path);
+    // a nested known string edits directly
+    press(&mut m, &["enter"]);
+    match &mut m.overlay {
+        Some(Overlay::Edit(e)) => e.ti.set_value("new"),
+        _ => panic!("string editor missing"),
+    }
+    press(&mut m, &["enter"]);
+    assert_eq!(sget(&m.fs().doc, &sp(&["extra", "old"])), "new");
 
-    // invalid JSON leaves the value untouched
-    m.finish_external_value("{oops");
-    assert!(has(&m.fs().doc, &sp(&["extra", "old"])));
-    assert!(m.notice.contains("invalid JSON"), "notice = {}", m.notice);
+    // t explicitly opens the type picker even with a value
+    press(&mut m, &["esc"]);
+    set_cursor(&mut m, |r| r.kind == RowKind::Unknown && r.label == "extra");
+    press(&mut m, &["t"]);
+    assert_eq!(m.top().unwrap().kind, MenuKind::OneOf);
+    let titles: Vec<String> = m
+        .menu_rows()
+        .iter()
+        .filter_map(|r| r.variant)
+        .map(|v| m.fs().schema.nodes[v as usize].title.clone())
+        .collect();
+    assert_eq!(
+        titles,
+        [
+            "String", "Number", "Boolean", "Object", "Array", "Null", "JSON"
+        ]
+    );
+    press(&mut m, &["home", "enter"]);
+    assert!(matches!(m.overlay, Some(Overlay::Confirm(_))));
+    press(&mut m, &["y"]);
+    match &mut m.overlay {
+        Some(Overlay::Edit(e)) => e.ti.set_value("text"),
+        _ => panic!("string editor missing after type switch"),
+    }
+    press(&mut m, &["enter"]);
+    assert_eq!(str_at(&m.fs().doc, &["extra"]), "text");
 
-    // valid JSON replaces the value as one undo step
-    open(&mut m);
-    m.finish_external_value(r#"{"new":"value"}"#);
-    assert_eq!(sget(&m.fs().doc, &sp(&["extra", "new"])), "value");
+    // the confirm nulls the old value as one step; the new string is the
+    // next, so two undos restore the object
+    press(&mut m, &["u"]);
+    assert!(matches!(
+        m.fs()
+            .doc
+            .value(getv(&m.fs().doc, &sp(&["extra"])).unwrap()),
+        Value::Null
+    ));
     press(&mut m, &["u"]);
     assert_eq!(
         sget(&m.fs().doc, &sp(&["extra", "old"])),
-        "value",
+        "new",
         "undo must restore the object"
     );
+}
 
-    // an empty file removes the key
-    open(&mut m);
-    m.finish_external_value("  ");
-    assert!(
-        !has(&m.fs().doc, &sp(&["extra"])),
-        "empty external value removes the key"
+#[test]
+fn add_unknown_key_uses_type_picker() {
+    let mut m = mk_app(test_doc(), test_opts());
+    press(&mut m, &["a"]);
+    match &mut m.overlay {
+        Some(Overlay::Add(s)) => s.ti.set_value("extra"),
+        _ => panic!("add-key input missing"),
+    }
+    press(&mut m, &["enter"]);
+    assert!(has(&m.fs().doc, &sp(&["extra"])));
+    assert_eq!(
+        m.top().unwrap().kind,
+        MenuKind::OneOf,
+        "a new schema-less key picks its type instead of launching $EDITOR"
     );
+    assert!(m.pending_edit.is_none());
+
+    // the null placeholder takes the chosen type
+    press(&mut m, &["enter"]);
+    match &mut m.overlay {
+        Some(Overlay::Edit(e)) => e.ti.set_value("value"),
+        _ => panic!("string editor missing"),
+    }
+    press(&mut m, &["enter"]);
+    assert_eq!(str_at(&m.fs().doc, &["extra"]), "value");
+}
+
+#[test]
+fn schema_typed_field_does_not_switch_type() {
+    let mut m = mk_app(test_doc(), test_opts());
+    set_cursor_path(&mut m, &sp(&["name"]));
+    press(&mut m, &["t"]);
+    assert!(m.overlay.is_none());
+    assert_eq!(
+        m.top().unwrap().kind,
+        MenuKind::Object,
+        "a schema-typed field must not open a type picker"
+    );
+    // enter still edits the declared type in place
+    press(&mut m, &["enter"]);
+    assert!(matches!(m.overlay, Some(Overlay::Edit(_))));
+}
+
+#[test]
+fn any_type_picker_includes_schema_definitions() {
+    let schema = schema_from_json(
+        r#"{
+          "type": "object",
+          "properties": {"value": {}},
+          "$defs": {
+            "server": {
+              "title": "Server",
+              "type": "object",
+              "properties": {"port": {"type": "integer", "title": "Port"}},
+              "required": ["port"]
+            },
+            "mode": {"title": "Mode", "enum": ["a", "b"]},
+            "blob": {"type": "string"},
+            "pick": {
+              "title": "Pick",
+              "oneOf": [
+                {"type": "string"},
+                {"type": "object", "properties": {"n": {"type": "number"}}}
+              ]
+            }
+          }
+        }"#,
+    );
+    let titles: Vec<String> = schema
+        .defs
+        .iter()
+        .map(|id| schema.nodes[*id as usize].title.clone())
+        .collect();
+    assert_eq!(titles, ["Server", "Mode", "blob", "Pick"]);
+
+    let doc = dbuild(|db| {
+        let value = db.obj(vec![]);
+        let extra = db.obj(vec![("x", db.n("1"))]);
+        db.obj(vec![("value", value), ("extra", extra)])
+    });
+    let mut m = app_with(schema, doc, test_opts());
+    set_cursor_path(&mut m, &sp(&["value"]));
+    press(&mut m, &["t"]);
+    let got: Vec<String> = m
+        .menu_rows()
+        .iter()
+        .filter_map(|r| r.variant)
+        .map(|v| m.fs().schema.nodes[v as usize].title.clone())
+        .collect();
+    assert_eq!(
+        got,
+        [
+            "String", "Number", "Boolean", "Object", "Array", "Null", "Server", "Mode", "blob",
+            "Pick", "JSON"
+        ]
+    );
+
+    // picking a schema-defined object type opens its real form
+    press(&mut m, &["down", "down", "down", "enter"]);
+    assert!(matches!(m.overlay, Some(Overlay::Confirm(_))));
+    press(&mut m, &["y"]);
+    assert_eq!(m.top().unwrap().kind, MenuKind::Object);
+    set_cursor_path(&mut m, &sp(&["value", "port"]));
+    press(&mut m, &["enter"]);
+    match &mut m.overlay {
+        Some(Overlay::Edit(e)) => e.ti.set_value("8080"),
+        _ => panic!("schema-defined Port editor missing"),
+    }
+    press(&mut m, &["enter"]);
+    assert_eq!(num_at(&m.fs().doc, &["value", "port"]), "8080");
+
+    // a schema definition that is itself a oneOf opens its variant picker
+    press(&mut m, &["esc"]);
+    set_cursor_path(&mut m, &sp(&["value"]));
+    press(&mut m, &["t"]);
+    press(&mut m, &["down", "down", "down", "down", "down", "down"]);
+    press(&mut m, &["enter"]);
+    assert!(matches!(m.overlay, Some(Overlay::Confirm(_))));
+    press(&mut m, &["y"]);
+    assert_eq!(m.top().unwrap().kind, MenuKind::OneOf);
+}
+
+#[test]
+fn type_picker_search_filters_variants_inline() {
+    let schema = schema_from_json(
+        r#"{
+          "type": "object",
+          "properties": {"value": {}},
+          "$defs": {
+            "server": {
+              "title": "Server",
+              "type": "object",
+              "properties": {"port": {"type": "integer"}}
+            },
+            "mode": {"title": "Mode", "enum": ["a", "b"]}
+          }
+        }"#,
+    );
+    let doc = dbuild(|db| {
+        let value = db.obj(vec![("x", db.n("1"))]);
+        db.obj(vec![("value", value)])
+    });
+    let mut m = app_with(schema, doc, test_opts());
+    set_cursor_path(&mut m, &sp(&["value"]));
+    press(&mut m, &["t"]); // explicitly switch the untyped value's type
+    assert_eq!(m.top().unwrap().kind, MenuKind::OneOf);
+    let before = m.top().unwrap().cursor;
+
+    // "/" starts an in-picker search seeded with the selected type's name
+    // and keeps the cursor on that type
+    press(&mut m, &["/"]);
+    assert!(m.overlay.is_none());
+    assert!(m.top().unwrap().searching);
+    assert!(m.top().unwrap().search_prefilled);
+    assert_eq!(m.top().unwrap().search_ti.value(), "Object");
+    assert_eq!(m.top().unwrap().cursor, before);
+    assert_eq!(m.top().unwrap().search_ti.cursor(), 6);
+    assert!(!m.top().unwrap().search_applied);
+
+    // the search bar supports the schema picker's editing keys
+    press(&mut m, &["left"]);
+    assert_eq!(m.top().unwrap().search_ti.cursor(), 5);
+    assert_eq!(m.top().unwrap().search_ti.value(), "Object");
+    press(&mut m, &["home"]);
+    assert_eq!(m.top().unwrap().search_ti.cursor(), 0);
+    press(&mut m, &["end"]);
+    assert_eq!(m.top().unwrap().search_ti.cursor(), 6);
+    press(&mut m, &["backspace"]);
+    assert_eq!(m.top().unwrap().search_ti.value(), "");
+    assert!(m.top().unwrap().search_applied);
+
+    // typing replaces the seed; "u" is a filter character, not undo
+    press(&mut m, &["u"]);
+    assert_eq!(m.top().unwrap().search_ti.value(), "u");
+    assert!(!m.top().unwrap().search_prefilled);
+    press(&mut m, &["x"]);
+    assert_eq!(m.top().unwrap().search_ti.value(), "ux");
+    assert!(m.top().unwrap().searching);
+
+    // no match keeps search mode alive so backspace can undo the query
+    let rows = m.menu_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].kind, RowKind::NoItems);
+    assert!(rows[0].label.contains("no matching"));
+    press(&mut m, &["backspace", "backspace"]);
+    assert_eq!(m.top().unwrap().search_ti.value(), "");
+    press(&mut m, &["esc"]);
+    assert!(!m.top().unwrap().searching);
+    assert!(m.top().unwrap().search_ti.value().is_empty());
+
+    // a fresh search narrows to the schema-defined type
+    press(&mut m, &["/", "S", "e", "r", "v", "e", "r"]);
+    let rows = m.menu_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].kind, RowKind::Variant);
+    let variant = rows[0].variant.unwrap();
+    assert_eq!(m.fs().schema.nodes[variant as usize].title, "Server");
+
+    // enter selects the filtered type (confirming the replacement first)
+    press(&mut m, &["enter"]);
+    assert!(matches!(m.overlay, Some(Overlay::Confirm(_))));
+    press(&mut m, &["y"]);
+    assert_eq!(m.top().unwrap().kind, MenuKind::Object);
+    let node = m.top().unwrap().node;
+    assert_eq!(m.fs().schema.nodes[node as usize].key, "server");
+    assert_eq!(m.fs().schema.nodes[node as usize].title, "Server");
+}
+
+#[test]
+fn schema_oneof_picker_uses_variant_search() {
+    let schema = schema_from_json(
+        r#"{
+          "type": "object",
+          "properties": {
+            "rule": {
+              "oneOf": [
+                {
+                  "title": "DnsRule",
+                  "type": "object",
+                  "properties": {
+                    "type": {"type": "string"},
+                    "inbound": {"type": "string"},
+                    "ip_version": {"type": "string"},
+                    "query_type": {"type": "string"},
+                    "extra": {"type": "string"}
+                  }
+                },
+                {
+                  "title": "HashRule",
+                  "type": "object",
+                  "properties": {"hash": {"type": "string"}}
+                },
+                {"title": "TextRule", "type": "string"}
+              ]
+            }
+          },
+          "$defs": {
+            "Unused": {
+              "title": "Unused",
+              "type": "object",
+              "properties": {"z": {"type": "string"}}
+            }
+          }
+        }"#,
+    );
+    let doc = dbuild(|db| {
+        let rule = db.obj(vec![
+            ("type", db.s("dns")),
+            ("inbound", db.s("in")),
+            ("ip_version", db.s("4")),
+            ("query_type", db.s("A")),
+            ("extra", db.s("e")),
+        ]);
+        db.obj(vec![("rule", rule)])
+    });
+    let mut m = app_with(schema, doc, test_opts());
+    set_cursor_path(&mut m, &sp(&["rule"]));
+    press(&mut m, &["enter"]); // DnsRule editor
+    assert_eq!(m.top().unwrap().kind, MenuKind::Object);
+    let st = m.top().unwrap().clone();
+    let (_title, summary) = m.menu_title(&st);
+    assert_eq!(
+        summary, "DnsRule {type, inbound, ip_version, query_type, +1}",
+        "the variant editor shows the type name in its bottom info"
+    );
+    press(&mut m, &["t"]); // back to the schema's variant picker
+    assert_eq!(m.top().unwrap().kind, MenuKind::OneOf);
+
+    // only the oneOf's own variants: no built-in JSON types, no $defs
+    let rows = m.menu_rows();
+    let titles: Vec<String> = rows
+        .iter()
+        .filter_map(|r| r.variant)
+        .map(|v| m.fs().schema.nodes[v as usize].title.clone())
+        .collect();
+    assert_eq!(titles, ["DnsRule", "HashRule", "TextRule"]);
+
+    // the bottom variant line names the matched type
+    let st = m.top().unwrap().clone();
+    let (_title, summary) = m.menu_title(&st);
+    assert_eq!(
+        summary,
+        "DnsRule {type, inbound, ip_version, query_type, +1}"
+    );
+
+    // the same search component as the any-type picker, over this list only
+    press(&mut m, &["/", "H", "a", "s", "h"]);
+    let rows = m.menu_rows();
+    assert_eq!(rows.len(), 1);
+    let v = rows[0].variant.unwrap();
+    assert_eq!(m.fs().schema.nodes[v as usize].title, "HashRule");
+    assert!(!rows.iter().any(|r| {
+        r.variant
+            .map(|v| m.fs().schema.nodes[v as usize].title == "Unused")
+            .unwrap_or(false)
+    }));
+    press(&mut m, &["enter"]);
+    assert!(matches!(m.overlay, Some(Overlay::Confirm(_))));
+    press(&mut m, &["y"]);
+    assert_eq!(m.top().unwrap().kind, MenuKind::Object);
+}
+
+#[test]
+fn unknown_array_add_string_edits_inline() {
+    let mut m = mk_app(test_doc(), test_opts());
+    press(&mut m, &["a"]);
+    match &mut m.overlay {
+        Some(Overlay::Add(s)) => s.ti.set_value("arr"),
+        _ => panic!("add-key input missing"),
+    }
+    press(&mut m, &["enter"]);
+    assert_eq!(m.top().unwrap().kind, MenuKind::OneOf);
+    // String, Number, Boolean, Object, Array -> Array
+    press(&mut m, &["down", "down", "down", "down", "enter"]);
+    assert_eq!(m.top().unwrap().kind, MenuKind::Items);
+
+    // < Add item > inserts a null slot, then the type picker opens
+    press(&mut m, &["enter"]);
+    assert_eq!(m.top().unwrap().kind, MenuKind::OneOf);
+    assert_eq!(m.top().unwrap().path, vec![ks("arr"), PathSeg::Idx(0)]);
+    press(&mut m, &["enter"]); // String
+    let rows = m.menu_rows();
+    let rendered = match &m.overlay {
+        Some(Overlay::Edit(e)) => {
+            assert_eq!(e.path, vec![ks("arr"), PathSeg::Idx(0)]);
+            m.has_inline_edit_row(&rows, e)
+        }
+        _ => panic!("string editor missing"),
+    };
+    assert!(rendered, "arr[0] must get a rendered inline editor row");
+    match &mut m.overlay {
+        Some(Overlay::Edit(e)) => e.ti.set_value("hello"),
+        _ => unreachable!(),
+    }
+    press(&mut m, &["enter"]);
+    assert_eq!(sget(&m.fs().doc, &[ks("arr"), PathSeg::Idx(0)]), "hello");
 }
 
 #[test]
@@ -924,7 +1286,7 @@ fn unknown_key_scalar_inline_edit() {
     let _ = doc.insert(&sp(&["arrval"]), 0, one);
     let mut m = mk_app(doc.clone(), test_opts());
 
-    // string → text input prefilled
+    // string: known type edits directly
     set_cursor(&mut m, |r| r.kind == RowKind::Unknown && r.label == "text");
     press(&mut m, &["enter"]);
     match &m.overlay {
@@ -938,7 +1300,7 @@ fn unknown_key_scalar_inline_edit() {
     press(&mut m, &["ctrl+u", "n", "e", "w", "enter"]);
     assert_eq!(str_at(&m.fs().doc, &["text"]), "new");
 
-    // number → numeric input; invalid text rejected
+    // number: known type edits directly; invalid text rejected
     set_cursor(&mut m, |r| r.kind == RowKind::Unknown && r.label == "count");
     press(&mut m, &["enter"]);
     match &m.overlay {
@@ -956,34 +1318,53 @@ fn unknown_key_scalar_inline_edit() {
     press(&mut m, &["ctrl+u", "4", "3", "enter"]);
     assert_eq!(num_at(&m.fs().doc, &["count"]), "43");
 
-    // boolean toggles
+    // boolean toggles directly
     set_cursor(&mut m, |r| r.kind == RowKind::Unknown && r.label == "flag");
     press(&mut m, &["enter"]);
     assert_eq!(bget(&m.fs().doc, &sp(&["flag"])), Some(false));
     press(&mut m, &["space"]);
     assert_eq!(bget(&m.fs().doc, &sp(&["flag"])), Some(true));
 
-    // null and containers use the external editor
-    for (label, content) in [
-        ("nothing", "null"),
-        ("objval", r#"{"a":2}"#),
-        ("arrval", "[2]"),
-    ] {
-        set_cursor(&mut m, |r| r.kind == RowKind::Unknown && r.label == label);
-        press(&mut m, &["enter"]);
-        assert!(
-            m.pending_edit.is_some(),
-            "{label} must use the external editor"
-        );
-        m.finish_external_value(content);
-    }
+    // null: choose the Null type (last but one row)
+    set_cursor(&mut m, |r| {
+        r.kind == RowKind::Unknown && r.label == "nothing"
+    });
+    press(&mut m, &["enter", "G", "up", "enter"]);
     assert!(matches!(
         m.fs()
             .doc
             .value(getv(&m.fs().doc, &sp(&["nothing"])).unwrap()),
         Value::Null
     ));
+
+    // object: known type drills into a schema-less object menu
+    set_cursor(&mut m, |r| {
+        r.kind == RowKind::Unknown && r.label == "objval"
+    });
+    press(&mut m, &["enter"]);
+    assert_eq!(m.top().unwrap().kind, MenuKind::Object);
+    set_cursor(&mut m, |r| r.kind == RowKind::Unknown && r.label == "a");
+    press(&mut m, &["enter"]);
+    match &mut m.overlay {
+        Some(Overlay::Edit(e)) => e.ti.set_value("2"),
+        _ => panic!("nested number editor missing"),
+    }
+    press(&mut m, &["enter"]);
     assert_eq!(num_at(&m.fs().doc, &["objval", "a"]), "2");
+    press(&mut m, &["esc"]);
+
+    // array: known type drills into an items menu
+    set_cursor(&mut m, |r| {
+        r.kind == RowKind::Unknown && r.label == "arrval"
+    });
+    press(&mut m, &["enter"]);
+    assert_eq!(m.top().unwrap().kind, MenuKind::Items);
+    press(&mut m, &["down", "enter"]);
+    match &mut m.overlay {
+        Some(Overlay::Edit(e)) => e.ti.set_value("2"),
+        _ => panic!("array item number editor missing"),
+    }
+    press(&mut m, &["enter"]);
     assert_eq!(n_at_idx(&m.fs().doc, "arrval", 0), "2");
 }
 
@@ -3972,6 +4353,10 @@ fn mstate(kind: MenuKind, node: FormNodeId, path: Vec<PathSeg>) -> MenuState {
         sel: Default::default(),
         visual: false,
         vanchor: 0,
+        search_ti: Default::default(),
+        searching: false,
+        search_prefilled: false,
+        search_applied: false,
     }
 }
 
@@ -4305,6 +4690,35 @@ fn scalar_one_of_schema() -> Schema {
 }
 
 #[test]
+fn t_on_variant_key_opens_picker() {
+    // scalar value: t switches without entering the inline editor
+    let schema = scalar_one_of_schema();
+    let mut m = app_with(
+        schema,
+        dbuild(|db| db.obj(vec![("http_client", db.s("abc"))])),
+        test_opts(),
+    );
+    set_cursor_path(&mut m, &sp(&["http_client"]));
+    press(&mut m, &["t"]);
+    assert!(m.overlay.is_none());
+    assert_eq!(m.top().unwrap().kind, MenuKind::OneOf);
+    assert_eq!(m.top().unwrap().cursor, 0, "current scalar variant");
+
+    // object value: the same shortcut works without drilling in first
+    let schema = scalar_one_of_schema();
+    let mut m = app_with(
+        schema,
+        dbuild(|db| db.obj(vec![("http_client", db.obj(vec![("engine", db.s("x"))]))])),
+        test_opts(),
+    );
+    set_cursor_path(&mut m, &sp(&["http_client"]));
+    press(&mut m, &["t"]);
+    assert!(m.overlay.is_none());
+    assert_eq!(m.top().unwrap().kind, MenuKind::OneOf);
+    assert_eq!(m.top().unwrap().cursor, 1, "current object variant");
+}
+
+#[test]
 fn scalar_variant_selection() {
     let schema = scalar_one_of_schema();
     let client = child(&schema, schema.root, "http_client");
@@ -4336,8 +4750,9 @@ fn scalar_variant_selection() {
         Some(Overlay::Edit(e)) => assert_eq!(e.ti.value(), "abc"),
         _ => panic!("editor should open prefilled"),
     }
-    // ctrl+t offers the type switch on the current variant
-    press(&mut m, &["ctrl+t"]);
+    // t on the variant key switches without entering the scalar editor
+    press(&mut m, &["esc"]);
+    press(&mut m, &["t"]);
     assert_eq!(m.top().unwrap().kind, MenuKind::OneOf);
     assert_eq!(m.top().unwrap().cursor, 0);
     press(&mut m, &["enter"]);
@@ -4349,7 +4764,7 @@ fn scalar_variant_selection() {
     press(&mut m, &["esc"]);
 
     // switching to the object variant asks first
-    press(&mut m, &["enter", "ctrl+t"]);
+    press(&mut m, &["t"]);
     press(&mut m, &["down"]);
     press(&mut m, &["enter"]);
     assert!(
@@ -4402,7 +4817,7 @@ fn variant_picker_cursor_on_current_value() {
         "enter with a list value edits the list variant"
     );
     assert!(m.top().unwrap().one_of.is_some());
-    press(&mut m, &["ctrl+t"]);
+    press(&mut m, &["t"]);
     assert_eq!(m.top().unwrap().kind, MenuKind::OneOf);
     assert_eq!(
         m.top().unwrap().cursor,
@@ -4473,7 +4888,7 @@ fn variant_picker_cursor_on_current_value() {
     press(&mut m3, &["/", "c", "i", "d", "r", "enter"]);
     assert_eq!(m3.top().unwrap().kind, MenuKind::Items);
     assert!(m3.top().unwrap().one_of.is_some());
-    press(&mut m3, &["ctrl+t"]);
+    press(&mut m3, &["t"]);
     assert_eq!(m3.top().unwrap().kind, MenuKind::OneOf);
     assert_eq!(m3.top().unwrap().cursor, 1);
 }
@@ -5402,6 +5817,30 @@ fn worst_issue_icon_selection() {
 }
 
 #[test]
+fn fast_move_takes_u_as_target() {
+    let mut doc = test_doc();
+    let n = doc.new_str("x");
+    let _ = doc.set(&sp(&["u_key"]), n);
+    let mut m = mk_app(doc, test_opts());
+
+    // create one undoable edit so a stray undo is observable
+    set_cursor_path(&mut m, &sp(&["name"]));
+    press(&mut m, &["enter"]);
+    press(&mut m, &["ctrl+u"]);
+    for c in "changed".chars() {
+        press(&mut m, &[&c.to_string()]);
+    }
+    press(&mut m, &["enter"]);
+    assert_eq!(str_at(&m.fs().doc, &["name"]), "changed");
+
+    // f waits for a target character: u must move, not undo
+    press(&mut m, &["home", "f", "u"]);
+    assert!(m.fast_move.is_none(), "fast move consumed u");
+    assert_eq!(str_at(&m.fs().doc, &["name"]), "changed", "u must not undo");
+    assert_eq!(row_at(&mut m).label, "u_key");
+}
+
+#[test]
 fn unknown_key_rows() {
     let mut doc = test_doc();
     let n = doc.new_str("x");
@@ -5421,6 +5860,7 @@ fn unknown_key_rows() {
         .position(|r| same_menu_row(r, &extra))
         .unwrap();
     m.top_mut().unwrap().cursor = i;
+    // a known string value edits in place without the type picker
     press(&mut m, &["enter"]);
     assert!(
         matches!(m.overlay, Some(Overlay::Edit(_))),
@@ -6285,7 +6725,7 @@ fn menu_one_of_variants() {
     );
     assert!(m.top().unwrap().one_of.is_some());
 
-    press(&mut m, &["ctrl+t"]);
+    press(&mut m, &["t"]);
     assert_eq!(m.top().unwrap().kind, MenuKind::OneOf);
     assert_eq!(m.top().unwrap().cursor, 1);
     press(&mut m, &["enter"]);
@@ -6297,7 +6737,7 @@ fn menu_one_of_variants() {
     press(&mut m, &["esc"]);
 
     // picker, cursor onto None, confirm, then the enum picker
-    press(&mut m, &["enter", "ctrl+t", "up"]);
+    press(&mut m, &["enter", "t", "up"]);
     press(&mut m, &["enter"]);
     assert!(matches!(m.overlay, Some(Overlay::Confirm(_))));
     press(&mut m, &["y"]);
@@ -6312,7 +6752,7 @@ fn menu_one_of_variants() {
     press(
         &mut m2,
         &[
-            "down", "down", "down", "down", "down", "enter", "ctrl+t", "down", "enter",
+            "down", "down", "down", "down", "down", "enter", "t", "down", "enter",
         ],
     );
     assert!(matches!(m2.overlay, Some(Overlay::Confirm(_))));
@@ -7315,10 +7755,18 @@ fn open_msg_textarea(schema: Schema, doc: Doc, codec: RawCodec) -> App {
     let mut opts = test_opts();
     opts.raw = codec;
     let mut m = app_with(schema, doc, opts);
-    press(&mut m, &["enter"]);
+    // t opens the type picker; the JSON variant is the explicit
+    // raw-textarea escape hatch
+    press(&mut m, &["t"]);
+    assert_eq!(
+        m.top().unwrap().kind,
+        MenuKind::OneOf,
+        "t selects a different value type"
+    );
+    press(&mut m, &["G", "enter"]);
     assert!(
         matches!(m.overlay, Some(Overlay::Text(_))),
-        "an untyped field edits in the built-in textarea"
+        "the JSON variant edits in the built-in textarea"
     );
     m
 }
@@ -7328,6 +7776,28 @@ fn textarea_text(m: &App) -> String {
         Some(Overlay::Text(s)) => s.ta.value(),
         _ => panic!("no textarea open"),
     }
+}
+
+#[test]
+fn untyped_field_with_value_edits_directly() {
+    let doc = dbuild(|db| db.obj(vec![("msg", db.s("old"))]));
+    let mut m = app_with(raw_field_schema(), doc, test_opts());
+    // a known runtime type edits directly; no picker, no external editor
+    press(&mut m, &["enter"]);
+    assert!(matches!(m.overlay, Some(Overlay::Edit(_))));
+    assert!(m.pending_edit.is_none());
+    match &mut m.overlay {
+        Some(Overlay::Edit(e)) => e.ti.set_value("new"),
+        _ => unreachable!(),
+    }
+    press(&mut m, &["enter"]);
+    assert_eq!(str_at(&m.fs().doc, &["msg"]), "new");
+
+    // null has no inferable type: enter opens the picker
+    let doc = dbuild(|db| db.obj(vec![("msg", db.push(Value::Null))]));
+    let mut m = app_with(raw_field_schema(), doc, test_opts());
+    press(&mut m, &["enter"]);
+    assert_eq!(m.top().unwrap().kind, MenuKind::OneOf);
 }
 
 #[test]

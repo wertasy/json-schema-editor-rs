@@ -139,7 +139,7 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
     },
     HelpEntry {
         keys: "f / F",
-        desc: "quick move: type a character to jump to the next/previous key starting with it",
+        desc: "fast move: type a character to jump to the next/previous key starting with it",
     },
     HelpEntry {
         keys: "p / P",
@@ -218,8 +218,8 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
         desc: "move the item under the cursor down / up",
     },
     HelpEntry {
-        keys: "ctrl+t",
-        desc: "switch the variant type of a oneOf value",
+        keys: "t",
+        desc: "switch a oneOf value's variant type / open the type picker for untyped values",
     },
     HelpEntry {
         keys: "u / ctrl+r",
@@ -347,8 +347,6 @@ pub struct EditState {
     pub sugs: Vec<String>,
     /// tab cycle position (-1 = none)
     pub sug_idx: i64,
-    /// set for scalar variant edits: ctrl+t type switch
-    pub one_of: Option<FormNodeId>,
 }
 
 impl EditState {
@@ -390,7 +388,7 @@ pub struct SelState {
     pub path: Vec<PathSeg>,
     pub opts: Vec<EnumOpt>,
     pub cursor: usize,
-    /// set for enum variant editors: ctrl+t type switch
+    /// set for enum variant editors: t type switch
     pub one_of: Option<FormNodeId>,
 }
 
@@ -501,9 +499,9 @@ pub struct MergeState {
     pub err: String,
 }
 
-/// findState is f/F quick move: waiting for the character.
+/// fastMoveState is f/F fast move: waiting for the character.
 #[derive(Clone)]
-pub struct FindState {
+pub struct FastMoveState {
     /// F: search upward
     pub backward: bool,
 }
@@ -552,8 +550,8 @@ pub struct App {
     pub width: usize,
     pub height: usize,
     pub overlay: Option<Overlay>,
-    /// f/F quick move: waiting for the character
-    pub find: Option<FindState>,
+    /// f/F fast move: waiting for the character
+    pub fast_move: Option<FastMoveState>,
     /// "?" keyboard-help overlay
     pub help: bool,
     /// z filter: hide object keys with no document value
@@ -593,7 +591,7 @@ impl App {
             width: 80,
             height: 24,
             overlay: None,
-            find: None,
+            fast_move: None,
             help: false,
             hide_empty: false,
             notice: String::new(),
@@ -663,6 +661,8 @@ impl App {
         }
         i.help = self.help;
         i.file_pick = self.file_pick.is_some();
+        i.variant_search = self.top().map_or(false, |st| st.searching);
+        i.fast_move = self.fast_move.is_some();
         i
     }
 
@@ -788,6 +788,10 @@ impl App {
             sel: std::collections::HashSet::new(),
             visual: false,
             vanchor: 0,
+            search_ti: Default::default(),
+            searching: false,
+            search_prefilled: false,
+            search_applied: false,
         };
         let val = self.doc().get(&st.path);
         let cands = {

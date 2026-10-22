@@ -13,13 +13,12 @@
 | 数组 | 进入数组管理菜单。 |
 | 映射（`additionalProperties`） | 进入映射菜单，键是文档成员。 |
 | `oneOf` / `anyOf` | 变体选择或直接编辑当前变体。 |
-| 无法表单化 | 内置 raw 文本区或 `$EDITOR`。 |
+| 无法表单化 / 无 `type` | 已有值按运行时类型直接编辑（标量就地、布尔切换、对象/数组进子菜单）；无值或显式 null 时才先选类型。`t` 可显式打开类型选择器。 |
 
 输入框内：
 
 - `enter` 应用，`esc` 取消。
 - `tab`/`ctrl+n`、`shift+tab`/`ctrl+p` 循环补全候选。
-- `ctrl+t`（oneOf 标量变体）打开类型选择器。
 - 普通行内移动/删除键可用；`ctrl+a`/`ctrl+e` 行首/行尾，`ctrl+k`/`ctrl+u`/`ctrl+w` 删除。
 
 ### 文本自动补全
@@ -39,7 +38,7 @@
 - 字段按 schema 声明顺序排列；schema 未定义的键排在后面，保持文档顺序。
 - `a` / `A`：在光标成员前/后添加 schema 未定义的键。先输入键名，再按下 `enter`：
   - 键名不能为空，不能与 schema 字段或已有键重复。
-  - 映射（`additionalProperties`）的值按子 schema 编辑；对象/数组值立即创建空容器，标量值进 `$EDITOR` 或就地输入。
+  - 映射（`additionalProperties`）的值按子 schema 编辑；对象/数组值立即创建空容器；无具体类型的值先选类型，再进就地输入、子菜单或 `JSON` raw 文本区。
   - 映射受 `patternProperties` 约束时，新键必须匹配该正则，否则行内提示 `key must match <pattern>`。
 - `d`：删除键值对；required 合并键等受保护行拒绝。
 - 映射的键就是文档成员；删除映射键即删除该成员。
@@ -56,6 +55,7 @@
 
 - 对象条目进入条目表单，顶部有 `< Remove this item >`，删除需确认 `Remove this item? (y/n)`。
 - 标量条目插入时先放 `null` 占位，取消编辑会留下空位，可 `d` 删除。
+- `oneOf` / 任意类型条目同样先放 `null` 占位并打开类型选择器；选中标量后直接在该条目行就地输入，不再出现多余的 `< Remove this item >` 操作行。
 - 对象/数组条目插入时立即创建空容器占位。
 - `items` 为枚举的数组显示为多选 toggle 列表。
 
@@ -64,27 +64,34 @@
 - 每个变体一行：`●` 当前变体 + 变体签名；无标题变体不合成 `variant N` 标签。
 - **无值**：先选类型再编辑。
 - **已有值**：`enter` 跳过类型拣选，直接进入当前变体的编辑界面。
-- `ctrl+t` 随时打开类型拣选器切换变体；切换已有值前确认 `Replace current value? (y/n)`。
+- 光标在变体 key（oneOf 字段行）或变体编辑器内按 `t` 打开变体选择器；无需先进入标量编辑。切换已有值前确认 `Replace current value? (y/n)`。
 - 标量变体：回到上一级菜单，在字段行就地编辑；提交后 `●` 移到该变体。
 - 枚举变体：选项选择器。
 - 对象/数组/映射变体：各自子菜单（映射变体列出文档键，可 `a`/`d`）。
 - `items` 是「全对象 oneOf」的数组：`< Add item >` 进入并集字段菜单，按已填字段（如判别 `const`）自动识别变体；改判别键即可切换。经 `<<` 合并来的键同样参与识别。
+- 普通 oneOf 变体选择器与任意类型选择器共用同一个搜索栏组件（`/` 进入、`search:` 状态行、相同编辑/移动键），但列表只包含该 oneOf 自己的变体，不会混入 JSON 内建类型或 `$defs` 类型。
+- 选择器底部的 `variant:` 显示当前匹配变体：有类型名时显示 `variant: DnsRule {type, inbound, ip_version, query_type, +51}`，无类型名时只显示结构签名。
 - `allOf` 浅合并（properties 拼接、required 并集、约束取更严者）；其中的 `oneOf`/`anyOf` 按分配律展开为嵌套变体。
 
 ### schema 未定义的键
 
 文档有、schema 没有的键显示为黄色行，带 `(not in schema)` 与值摘要，行尾 `<warn>`：
 
-- 字符串/数字就地输入（数字按 number 校验），布尔直接切换。
-- 无值（缺失或显式 null）或值是对象/数组：用 `$EDITOR` 打开只含该值的临时文件，JSON/JSONC 文件用 JSON，YAML 文件用 YAML；退出后解析并作为一步撤销写回。语法无效只提示并保留原值。
+- 已有值时 `enter` 按值的运行时类型直接编辑：字符串/数字就地输入，布尔切换，对象/数组进入 schema-less 子菜单；不会先弹类型选择器，也不会直接拉起 `$EDITOR`。
+- 无值（缺失或显式 null）时才主动打开类型选择器：JSON 内建类型 `String`、`Number`、`Boolean`、`Object`、`Array`、`Null`，以及 schema 顶层 `$defs` / `definitions` 中定义的命名类型（按定义顺序排在 `Null` 之后、`JSON` 之前）。
+- `t` 可在已有值上显式打开同一个类型选择器，用于主动切换类型；切换前确认 `Replace current value? (y/n)`。
+- 选中 schema 定义的类型会使用该定义的真实表单：对象按 `properties` 下钻、枚举进入选择器、数组进入条目菜单、`oneOf` 定义进入其变体选择器；定义若降级为 raw（例如递归或不可达 `$ref`）则不会列入。
+- 类型较多时在变体/类型选择器内按 `/` 进入搜索模式。搜索栏与 `Select a schema` 一致：`search: ` 前缀、块状光标、支持 `←`/`→`/`Home`/`End`、`backspace`/`delete`、`ctrl+a/e/k/u/w` 编辑；`tab`/`shift+tab` 与 `ctrl+j`/`ctrl+k` 移动结果。状态行显示 `search: <当前类型名>`，光标和列表暂不变化；第一次文本编辑会把预填的类型名当作已选中文本替换掉，再按输入实时收窄列表（匹配标题、键与结构签名）。`enter` 选中，`esc` 清除并退出搜索模式。搜索模式中的 `u` 是普通字符，不会触发撤销；这里也不会打开字段搜索 overlay。
+- 选择器内 `String`/`Number` 就地输入，`Boolean` 直接切换，`Object`/`Array` 进入可直接增删键/条目的子菜单，`Null` 写入 `null`；`JSON` 打开内置 raw 文本区，已有值按当前文件格式预填（显式按 `e` 仍可外编）。
 - `d` 删除。
-- `a`/`A` 新增。
+- `a`/`A` 新增的键没有值，因此先选类型；键以 `null` 占位并保留插入位置，取消类型选择后可用 `d` 删除。
 - 同时作为编辑器级警告进入问题列表（`unknown key ... not in the schema`），不阻断保存；顶层 `$schema`（编辑器自动写回的指向）不警告。
+- schema 明确定义类型的字段不显示此选择器：`enter` 始终按 schema 类型编辑。
 - 如果 `additionalProperties: false` 已产生校验错误，不重复列出未知键警告。
 
 ## 原始编辑与外部编辑器
 
-- **内置 raw 文本区**：用于无法表单化的字段；`ctrl+s` 应用，`esc` 取消；语法错误留在文本区并提示。
+- **内置 raw 文本区**：用于无法表单化的字段、以及任意类型选择器中的 `JSON` 变体；`ctrl+s` 应用，`esc` 取消；语法错误留在文本区并提示。
 - **整份文档外编**：根菜单 `< Edit raw JSON >` / `< Edit raw YAML >` 挂起 TUI，用 `$EDITOR`（`$VISUAL`，再退回 `vi`）打开整份文档的临时文件，内容为文件自身格式；退出后解析并作为一步撤销应用。语法无效只提示，保留原文档。
 - **单值外编**：`e` 在光标行打开 `$EDITOR` 编辑该值；无值提示 `no value to edit`。对象/数组容器行也可用。
 - **多行字符串**：含换行的字符串 `enter` 不就地输入，直接进 `$EDITOR`（临时文件只含该值，JSON 转义或 YAML 块标量）。

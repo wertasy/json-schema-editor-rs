@@ -285,6 +285,7 @@ pub enum Key {
 /// support — the bubbles textinput operations menu_keys.go uses: SetValue /
 /// Value / CursorEnd, character insert, backspace/delete, left/right,
 /// home/end (ctrl+a/ctrl+e), ctrl+k/ctrl+u line kills, ctrl+w word kill.
+#[derive(Clone, Debug)]
 pub struct TextInput {
     value: String,
     /// Byte offset into `value`, always on a char boundary.

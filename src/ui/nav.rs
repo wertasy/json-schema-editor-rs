@@ -168,6 +168,10 @@ mod tests {
             sel: Default::default(),
             visual: false,
             vanchor: 0,
+            search_ti: Default::default(),
+            searching: false,
+            search_prefilled: false,
+            search_applied: false,
         }
     }
 

@@ -80,6 +80,9 @@ pub struct FormNode {
     pub json_type: String,
     /// Raw: schema admits only JSON null
     pub null_only: bool,
+    /// Raw: edit in the built-in raw textarea instead of the any-type picker
+    /// (the synthetic "JSON" variant of that picker)
+    pub raw_editor: bool,
 
     pub min: Option<f64>,
     pub max: Option<f64>,
@@ -118,6 +121,9 @@ pub type FormNodeId = u32;
 pub struct Schema {
     pub nodes: Vec<FormNode>,
     pub root: FormNodeId,
+    /// Top-level `$defs`/`definitions` entries, normalized as selectable
+    /// types. Raw fallbacks are omitted: they have no concrete shape.
+    pub defs: Vec<FormNodeId>,
     /// The parsed schema JSON document (plus grafted remote $ref documents
     /// and synthetic merge nodes); enum/default values use NodeIds into it.
     pub doc: Doc,
@@ -166,14 +172,48 @@ pub fn load(loc: &str) -> Result<Schema, SmodelError> {
         loc: canon,
     };
     let root = p.schema(doc_root, &ctx, "$", false, 0);
+    let defs = p.build_defs(doc_root, &ctx);
     Ok(Schema {
         nodes: p.nodes,
         root,
+        defs,
         doc: p.doc,
     })
 }
 
 impl Parser {
+    /// build_defs normalizes the top-level `$defs`/`definitions` entries so
+    /// the arbitrary-type picker can offer the schema's own named types
+    /// alongside the JSON built-ins. Unreachable/raw shapes are skipped.
+    fn build_defs(&mut self, doc_root: NodeId, ctx: &RefCtx) -> Vec<FormNodeId> {
+        let mut entries: Vec<(String, NodeId)> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for keyword in ["$defs", "definitions"] {
+            let Some(defs) = field(&self.doc, doc_root, keyword) else {
+                continue;
+            };
+            let Value::Object(members) = self.doc.value(defs) else {
+                continue;
+            };
+            for m in members {
+                if seen.insert(m.key.clone()) {
+                    entries.push((m.key.clone(), m.val));
+                }
+            }
+        }
+        let mut out: Vec<FormNodeId> = Vec::new();
+        for (key, node) in entries {
+            let fid = self.schema(node, ctx, &key, false, 0);
+            if self.nodes[fid as usize].kind == Kind::Raw {
+                continue;
+            }
+            if !out.contains(&fid) {
+                out.push(fid);
+            }
+        }
+        out
+    }
+
     fn cached_load(&mut self, loc: &str) -> Result<NodeId, SmodelError> {
         if let Some(&d) = self.docs.get(loc) {
             return Ok(d);

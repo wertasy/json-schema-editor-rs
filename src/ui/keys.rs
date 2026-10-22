@@ -18,17 +18,18 @@ use crate::smodel::{FormNode, FormNodeId, Kind, Schema};
 use crate::ui::files::wrap_cursor;
 use crate::ui::menu::{
     AddState, AnchorMode, AnchorState, App, ConfirmState, EditState, ErrsState, ExternalEdit,
-    FilePickState, FindState, IssuesState, MergeState, Msg, Overlay, RefPickState, SearchState,
+    FastMoveState, FilePickState, IssuesState, MergeState, Msg, Overlay, RefPickState, SearchState,
     SelState, TextState, WriteState, anchor_defs, anchor_holder, anchor_holder_path,
     anchor_merge_use_paths, anchor_role, copy_detached_from_doc, copy_from_doc, count_anchor_uses,
     cursor_by_path, cursor_for_row, cursor_prefix, is_path_prefix, merge_ref_uses, nodes_equal_doc,
     read_clipboard, ref_would_cycle, remap_state_cursor, write_clipboard,
 };
 use crate::ui::rows::{
-    clip_runes, current_variant, display_title, doc_array_len, dynamic_variants, filter_search,
-    is_dot_query, is_path_query, match_variant_list, matched_leaf_variant, path_pattern,
-    raw_value_summary, rebuild_stack, replace_all, replace_hits, search_index, seed_variant_cursor,
-    summary, variant_field_defs, variant_signature, variant_value_summary,
+    SynthKey, any_type_menu, clip_runes, current_variant, display_title, doc_array_len,
+    dynamic_variants, filter_search, is_dot_query, is_path_query, match_variant_list,
+    matched_leaf_variant, path_pattern, raw_value_summary, rebuild_stack, replace_all,
+    replace_hits, search_index, seed_variant_cursor, summary, variant_field_defs,
+    variant_signature, variant_value_summary,
 };
 use crate::ui::widgets::{Key, RawExt, TextArea, TextInput, apply_scalar, scalar_text};
 use crate::ui::{Issue, MenuKind, MenuState, Row, RowKind};
@@ -271,6 +272,20 @@ fn is_null_val(doc: &Doc, v: NodeId) -> bool {
 
 fn is_null_opt(doc: &Doc, v: Option<NodeId>) -> bool {
     v.map_or(true, |v| is_null_val(doc, v))
+}
+
+/// variantLabel renders a variant for the picker's bottom information line:
+/// its type name (when it has one) plus the structural signature.
+fn variant_label(schema: &Schema, v: FormNodeId) -> String {
+    let f = &schema.nodes[v as usize];
+    let sig = variant_signature(schema, Some(v));
+    if f.title.is_empty() {
+        sig
+    } else if f.title.eq_ignore_ascii_case(&sig) {
+        f.title.clone()
+    } else {
+        format!("{} {}", f.title, sig)
+    }
 }
 
 /// completionCandidate text extraction: the value form the field accepts —
@@ -600,6 +615,51 @@ fn msg_key(msg: &Msg) -> Option<Key> {
     })
 }
 
+/// searchModifiesText reports whether msg edits text (rather than moving the
+/// input cursor). The preset query is cleared before such a key, matching the
+/// schema picker's stale-query behavior.
+fn search_modifies_text(msg: &Msg) -> bool {
+    matches!(msg, Msg::Backspace | Msg::Delete) || matches!(msg, Msg::Char(c, _) if !c.is_control())
+}
+
+/// inputLine renders `prompt + value` with a reverse-video caret, scrolling
+/// horizontally so the caret stays visible (the schema picker's search row).
+fn search_input_line(prompt: &str, ti: &TextInput, width: usize) -> String {
+    let avail = width.saturating_sub(display_width(prompt) + 2); // caret + margin
+    let value = ti.value();
+    let chars: Vec<char> = value.chars().collect();
+    let cursor = ti.cursor().min(chars.len());
+    let cell_at = |n: usize| chars[..n].iter().map(|&c| char_width(c)).sum::<usize>();
+    let cursor_cell = cell_at(cursor);
+    let mut start = 0usize;
+    let window = avail.max(1);
+    while start < cursor && cursor_cell - cell_at(start) >= window {
+        start += 1;
+    }
+    let mut end = start;
+    let mut used = 0usize;
+    while end < chars.len() {
+        let w = char_width(chars[end]);
+        if used + w > avail {
+            break;
+        }
+        used += w;
+        end += 1;
+    }
+    let before: String = chars[start..cursor].iter().collect();
+    let mut out = String::from(prompt);
+    out.push_str(&before);
+    if cursor < end {
+        out.push_str("\x1b[7m");
+        out.push(chars[cursor]);
+        out.push_str("\x1b[27m");
+        out.push_str(&chars[cursor + 1..end].iter().collect::<String>());
+    } else {
+        out.push_str("\x1b[7m \x1b[27m");
+    }
+    out
+}
+
 /// Render a TextInput like bubbles textinput.View(): the value with the
 /// cursor cell reverse-video.
 fn ti_view(ti: &TextInput) -> String {
@@ -648,13 +708,16 @@ impl App {
         let st_kind = self.top().map(|st| st.kind);
         let rows = self.menu_rows();
         self.clamp_cursor(&rows);
+        if self.variant_search_key(&msg) {
+            return;
+        }
         if rows.is_empty() {
             return;
         }
-        if self.find.is_some() && self.find_key(&msg) {
+        if self.fast_move.is_some() && self.fast_move_key(&msg) {
             return;
         }
-        self.find = None; // any other key cancels the find and works as usual
+        self.fast_move = None; // any other key cancels fast move and works as usual
         let cursor = self.top().map(|st| st.cursor).unwrap_or(0);
         let r = rows[cursor].clone();
         if self.g_anchor_keys(&msg, &r) {
@@ -719,8 +782,8 @@ impl App {
                 self.visual_sync(&rows);
                 self.notice = notice;
             }
-            "f" => self.find = Some(FindState { backward: false }),
-            "F" => self.find = Some(FindState { backward: true }),
+            "f" => self.fast_move = Some(FastMoveState { backward: false }),
+            "F" => self.fast_move = Some(FastMoveState { backward: true }),
             "z" => self.toggle_empty_keys(),
             "e" => self.edit_value_external_row(&r),
             "E" => {
@@ -775,12 +838,34 @@ impl App {
             "d" | "delete" => self.delete_row(&r),
             "J" => self.move_item(&r, 1),
             "K" => self.move_item(&r, -1),
-            "ctrl+t" => {
-                let one_of = self.top().and_then(|st| st.one_of);
-                if let Some(one_of) = one_of {
-                    let path = self.top().map(|st| st.path.clone()).unwrap_or_default();
-                    self.fs_mut().stack.pop();
-                    self.push(one_of, path);
+            "t" => {
+                let variant_key = match r.fn_ {
+                    Some(f) if self.fs().schema.nodes[f as usize].kind == Kind::OneOf => Some(f),
+                    _ => None,
+                };
+                if st_kind != Some(MenuKind::OneOf) {
+                    if let Some(f) = variant_key {
+                        // t on a variant key opens its picker without
+                        // entering the current scalar/object editor
+                        self.push(f, r.path.clone());
+                    } else if let Some(one_of) = self.top().and_then(|st| st.one_of) {
+                        let path = self.top().map(|st| st.path.clone()).unwrap_or_default();
+                        self.fs_mut().stack.pop();
+                        self.push(one_of, path);
+                    } else {
+                        match r.fn_ {
+                            Some(f) => {
+                                let n = &self.fs().schema.nodes[f as usize];
+                                if n.kind == Kind::Raw && !n.null_only && !n.raw_editor {
+                                    self.open_any_type(r.path.clone());
+                                }
+                            }
+                            None if r.kind == RowKind::Unknown => {
+                                self.open_any_type(r.path.clone());
+                            }
+                            None => {}
+                        }
+                    }
                 }
             }
             "a" => {
@@ -798,7 +883,13 @@ impl App {
                 }
             }
             "?" => self.help = true,
-            "/" => self.open_search(false),
+            "/" => {
+                if st_kind == Some(MenuKind::OneOf) {
+                    self.start_variant_search();
+                } else {
+                    self.open_search(false);
+                }
+            }
             "r" => self.open_search(true),
             "s" => {
                 if self.files.len() > 1 {
@@ -888,7 +979,11 @@ impl App {
             RowKind::Toggle => self.toggle_enum_member(&r),
             RowKind::Unknown => self.activate_unknown(r.path.clone()),
             RowKind::Expand => self.expand_alias(&r.path),
-            RowKind::NoItems => self.add_key(&r, false),
+            RowKind::NoItems => {
+                if self.top().map(|st| st.kind) != Some(MenuKind::OneOf) {
+                    self.add_key(&r, false);
+                }
+            }
             RowKind::Issues => self.open_issues(),
         }
     }
@@ -1017,6 +1112,10 @@ impl App {
             sel: HashSet::new(),
             visual: false,
             vanchor: 0,
+            search_ti: Default::default(),
+            searching: false,
+            search_prefilled: false,
+            search_applied: false,
         };
         {
             let f = self.fs_mut();
@@ -1136,29 +1235,29 @@ impl App {
         false // empty array: only < Add item >
     }
 
-    // --- quick move (f/F) ---------------------------------------------------
+    // --- fast move (f/F) ---------------------------------------------------
 
-    /// findKey handles a key while quick move waits for a character.
-    pub fn find_key(&mut self, msg: &Msg) -> bool {
+    /// fastMoveKey handles a key while fast move waits for a character.
+    pub fn fast_move_key(&mut self, msg: &Msg) -> bool {
         match msg {
             Msg::Esc => {
-                self.find = None;
-                self.notice = "quick move cancelled".to_string();
+                self.fast_move = None;
+                self.notice = "fast move cancelled".to_string();
                 true
             }
             Msg::Char(ch, false) => {
-                let backward = self.find.as_ref().map(|f| f.backward).unwrap_or(false);
-                self.find = None;
-                self.find_move(*ch, backward);
+                let backward = self.fast_move.as_ref().map(|f| f.backward).unwrap_or(false);
+                self.fast_move = None;
+                self.fast_move_to(*ch, backward);
                 true
             }
             _ => false,
         }
     }
 
-    /// findMove moves the cursor to the nearest row after (or, backward,
+    /// fastMoveTo moves the cursor to the nearest row after (or, backward,
     /// before) the cursor whose key starts with ch (Go findMove).
-    fn find_move(&mut self, ch: char, backward: bool) {
+    fn fast_move_to(&mut self, ch: char, backward: bool) {
         let Some(st) = self.top() else { return };
         let cursor = st.cursor;
         let rows = self.menu_rows();
@@ -1281,28 +1380,48 @@ impl App {
         }
     }
 
-    /// activateUnknown edits the value of a schema-less key (Go
-    /// activateUnknown).
+    /// activateUnknown edits a schema-less key like a oneOf value: a known
+    /// runtime type edits directly, while an absent/null value has no type
+    /// to infer and opens the type picker.
     fn activate_unknown(&mut self, path: Vec<PathSeg>) {
-        let cur = self.doc().get(&path);
-        let scalar_kind = cur.map(|n| match self.doc().value(n) {
-            Value::Bool(_) => Some("bool"),
-            Value::Num(_) => Some("number"),
-            Value::Str(_) => Some("string"),
-            _ => None,
-        });
-        // containers, missing and null values stay in the external editor
-        let container =
-            cur.map(|n| matches!(self.doc().value(n), Value::Object(_) | Value::Array(_)));
-        if cur.is_none() || container == Some(true) || is_null_opt(self.doc(), cur) {
-            self.edit_value_external(path, -1);
+        self.open_runtime_value(path);
+    }
+
+    /// openRuntimeValue opens the editor for a value with no schema type,
+    /// dispatching on its JSON runtime type. Null/missing values cannot
+    /// determine a type, so they open the picker instead.
+    fn open_runtime_value(&mut self, path: Vec<PathSeg>) {
+        let Some(n) = self.doc().get(&path) else {
+            self.open_any_type(path);
             return;
+        };
+        match self.doc().value(n) {
+            Value::Null => self.open_any_type(path),
+            Value::Bool(_) => self.toggle_unknown_bool(&path),
+            Value::Num(_) => self.open_unknown_scalar(path, "number"),
+            Value::Str(_) => self.open_unknown_scalar(path, "string"),
+            Value::Object(_) => self.open_generic_container(path, Kind::Object),
+            Value::Array(_) => self.open_generic_container(path, Kind::Array),
         }
-        match scalar_kind.flatten() {
-            Some("bool") => self.toggle_unknown_bool(&path),
-            Some("number") => self.open_unknown_scalar(path, "number"),
-            Some("string") => self.open_unknown_scalar(path, "string"),
-            _ => self.edit_value_external(path, -1),
+    }
+
+    /// openGenericContainer pushes the schema-less Object/Array editor from
+    /// the any-type picker: members/items are edited like unknown keys.
+    fn open_generic_container(&mut self, path: Vec<PathSeg>, kind: Kind) {
+        let f = self.fs_mut();
+        let mut cache = std::mem::take(&mut f.menu_cache);
+        let any = any_type_menu(&mut f.schema, &mut cache);
+        let variant = f.schema.nodes[any as usize]
+            .variants
+            .iter()
+            .copied()
+            .find(|v| {
+                let n = &f.schema.nodes[*v as usize];
+                n.key.is_empty() && n.kind == kind
+            });
+        f.menu_cache = cache;
+        if let Some(v) = variant {
+            self.push(v, path);
         }
     }
 
@@ -1320,6 +1439,129 @@ impl App {
             ..FormNode::default()
         };
         self.open_field_synth(synth, path, false, None);
+    }
+
+    /// startVariantSearch arms the in-picker search (the "/" key on a oneOf
+    /// picker). The search input follows the schema picker: it starts with
+    /// the selected type's name as a stale query, which the first text edit
+    /// replaces. The menu cursor and the unfiltered list stay put until the
+    /// user edits the query.
+    fn start_variant_search(&mut self) {
+        let Some(st) = self.top().cloned() else {
+            return;
+        };
+        if st.kind != MenuKind::OneOf {
+            return;
+        }
+        let rows = self.menu_rows();
+        let current = rows.get(st.cursor).cloned();
+        let variant = current.as_ref().and_then(|r| r.variant);
+        let name = variant
+            .map(|v| {
+                let f = &self.fs().schema.nodes[v as usize];
+                if !f.title.is_empty() {
+                    f.title.clone()
+                } else {
+                    variant_signature(&self.fs().schema, Some(v))
+                }
+            })
+            .unwrap_or_default();
+        if let Some(t) = self.top_mut() {
+            t.searching = true;
+            t.search_ti.set_value(name);
+            t.search_prefilled = true;
+            t.search_applied = false;
+            t.offset = 0;
+        }
+    }
+
+    /// variantSearchKey consumes keys while the oneOf picker's search input is
+    /// active. The input supports the same editing keys as the schema
+    /// picker; the query only starts searching after its first edit.
+    fn variant_search_key(&mut self, msg: &Msg) -> bool {
+        let (is_oneof, searching) = self
+            .top()
+            .map(|st| (st.kind == MenuKind::OneOf, st.searching))
+            .unwrap_or((false, false));
+        if !is_oneof || !searching {
+            return false;
+        }
+        match msg {
+            Msg::Esc => {
+                if let Some(st) = self.top_mut() {
+                    st.searching = false;
+                    st.search_prefilled = false;
+                    st.search_applied = false;
+                    st.search_ti.set_value("");
+                    st.cursor = 0;
+                    st.offset = 0;
+                }
+                true
+            }
+            Msg::Enter => {
+                let cur = self.top().map(|st| st.cursor).unwrap_or(0);
+                let row = self.menu_rows().get(cur).cloned();
+                if let Some(r) = row {
+                    // no match: stay in the search mode so backspace undoes it
+                    if r.kind != RowKind::NoItems {
+                        if let Some(st) = self.top_mut() {
+                            st.searching = false;
+                            st.search_prefilled = false;
+                            st.search_applied = false;
+                            st.search_ti.set_value("");
+                        }
+                        self.activate(r);
+                    }
+                }
+                true
+            }
+            Msg::Up | Msg::BackTab | Msg::Ctrl('k') => {
+                self.variant_search_move(-1);
+                true
+            }
+            Msg::Down | Msg::Tab | Msg::Ctrl('j') => {
+                self.variant_search_move(1);
+                true
+            }
+            _ => {
+                let Some(key) = msg_key(msg) else {
+                    return true; // search mode swallows unbound keys
+                };
+                let Some(st) = self.top_mut() else {
+                    return true;
+                };
+                let before = st.search_ti.value().to_string();
+                if st.search_prefilled && search_modifies_text(msg) {
+                    // the preset type name behaves like selected text
+                    st.search_prefilled = false;
+                    st.search_ti.set_value("");
+                }
+                st.search_ti.handle_key(key);
+                if st.search_ti.value() != before {
+                    st.search_applied = true;
+                    st.cursor = 0;
+                    st.offset = 0;
+                }
+                true
+            }
+        }
+    }
+
+    fn variant_search_move(&mut self, delta: i64) {
+        let n = self.menu_rows().len();
+        let cur = self.top().map(|st| st.cursor).unwrap_or(0);
+        if let Some(st) = self.top_mut() {
+            st.cursor = wrap_cursor(cur, delta, n);
+        }
+    }
+
+    /// openAnyType pushes the shared arbitrary-JSON type picker at path.
+    fn open_any_type(&mut self, path: Vec<PathSeg>) {
+        let f = self.fs_mut();
+        let mut cache = std::mem::take(&mut f.menu_cache);
+        let node = any_type_menu(&mut f.schema, &mut cache);
+        f.menu_cache = cache;
+        self.push(node, path);
     }
 
     fn toggle_unknown_bool(&mut self, path: &[PathSeg]) {
@@ -1386,7 +1628,6 @@ impl App {
                     cands,
                     sugs: Vec::new(),
                     sug_idx: -1,
-                    one_of: None,
                 }));
                 self.refresh_edit_suggestions();
             }
@@ -1413,6 +1654,11 @@ impl App {
                 } else {
                     self.toggle_bool_synth(&f, &path);
                 }
+            }
+            // a field whose schema has no concrete JSON type edits by its
+            // runtime type; only a null/missing value opens the type picker
+            Kind::Raw if !f.null_only && !f.raw_editor => {
+                self.open_runtime_value(path);
             }
             _ => {
                 self.open_raw_at(fn_id, Some(path));
@@ -1552,7 +1798,14 @@ impl App {
         };
         match items_kind {
             Kind::OneOf => {
-                ins_null(self, splice);
+                // keep a null placeholder even for < Add item >: the type
+                // picker edits this slot, and the inline editor needs a row
+                let n = self.fs_mut().doc.new_null();
+                if splice {
+                    let _ = self.fs_mut().doc.insert(&st.path, idx, n);
+                } else {
+                    let _ = self.fs_mut().doc.set(&ipath, n);
+                }
                 if dynamic_variants(&self.fs().schema, items).is_some() {
                     self.nav_forward();
                     let st2 = self.dynamic_menu(items, ipath);
@@ -1823,6 +2076,14 @@ impl App {
         let Some(st) = self.top().cloned() else {
             return;
         };
+        // the any-type picker's JSON variant edits the existing value raw;
+        // it is not a type switch, so it must not replace the value
+        if let Some(v) = r.variant {
+            if self.fs().schema.nodes[v as usize].raw_editor {
+                self.enter_variant_editor(v, r.path.clone(), Some(st.node));
+                return;
+            }
+        }
         let v = self.doc().get(&r.path);
         let cur = current_variant(&self.fs().schema, st.node, self.doc(), v);
         if cur >= 0 {
@@ -1834,6 +2095,9 @@ impl App {
         }
         if !is_null_opt(self.doc(), v) {
             let (variant, path, one_of) = (r.variant, r.path.clone(), st.node);
+            // the any-type picker replaces a value's type in place: a null
+            // placeholder keeps the object-member order / array slot
+            let keep_slot = self.fs().menu_cache.get(&SynthKey::AnyType) == Some(&st.node);
             self.overlay = Some(Overlay::Confirm(ConfirmState {
                 title: "Replace current value? (y/n)".to_string(),
                 hint: String::new(),
@@ -1847,6 +2111,12 @@ impl App {
                             let f = &mut m.files[fi];
                             let n = copy_from_doc(&mut f.doc, &f.schema.doc, d);
                             let _ = f.doc.set(&path, n);
+                        }
+                        _ if keep_slot || matches!(path.last(), Some(PathSeg::Idx(_))) => {
+                            // keep the slot while the new type's editor
+                            // fills it in
+                            let n = m.fs_mut().doc.new_null();
+                            let _ = m.fs_mut().doc.set(&path, n);
                         }
                         _ => {
                             m.fs_mut().doc.remove(&path);
@@ -1868,8 +2138,40 @@ impl App {
         path: Vec<PathSeg>,
         one_of: Option<FormNodeId>,
     ) {
-        let kind = self.fs().schema.nodes[variant as usize].kind;
+        let (kind, null_only) = {
+            let n = &self.fs().schema.nodes[variant as usize];
+            (n.kind, n.null_only)
+        };
         match kind {
+            // choosing the null type writes JSON null; there is nothing to
+            // edit, so return to the parent menu
+            Kind::Raw if null_only => {
+                let n = self.fs_mut().doc.new_null();
+                let _ = self.fs_mut().doc.set(&path, n);
+                if self.top().map(|st| st.kind) == Some(MenuKind::OneOf)
+                    && self.fs().stack.len() > 1
+                {
+                    self.fs_mut().stack.pop();
+                }
+            }
+            Kind::OneOf => {
+                // a schema-defined type may itself be a variant group
+                if self.top().map(|st| st.kind) == Some(MenuKind::OneOf)
+                    && self.fs().stack.len() > 1
+                {
+                    self.fs_mut().stack.pop();
+                }
+                if dynamic_variants(&self.fs().schema, variant).is_some() {
+                    self.nav_forward();
+                    let st = self.dynamic_menu(variant, path);
+                    self.fs_mut().stack.push(st);
+                } else {
+                    self.push(variant, path);
+                }
+                if let Some(st) = self.top_mut() {
+                    st.one_of = one_of;
+                }
+            }
             Kind::Object | Kind::Map | Kind::Array => {
                 // the variant is chosen: the editor replaces the picker
                 if self.top().map(|st| st.kind) == Some(MenuKind::OneOf)
@@ -1903,9 +2205,6 @@ impl App {
                     self.fs_mut().stack.pop();
                 }
                 self.open_field(variant, path.clone(), false);
-                if let Some(Overlay::Edit(e)) = &mut self.overlay {
-                    e.one_of = one_of;
-                }
             }
         }
     }
@@ -3770,7 +4069,7 @@ impl App {
             return Some(Overlay::Sel(s));
         }
         match msg.key_str().as_str() {
-            "ctrl+t" => {
+            "t" => {
                 if let Some(one_of) = s.one_of {
                     let path = s.path.clone();
                     self.push(one_of, path);
@@ -3798,14 +4097,6 @@ impl App {
     /// keyEdit drives the in-place scalar input (Go keyEdit).
     pub fn key_edit(&mut self, msg: Msg, mut e: EditState) -> Option<Overlay> {
         match msg.key_str().as_str() {
-            "ctrl+t" => {
-                if let Some(one_of) = e.one_of {
-                    let path = e.path.clone();
-                    self.push(one_of, path);
-                    return None;
-                }
-                return Some(Overlay::Edit(e));
-            }
             "enter" => {
                 let node: FormNode = match (&e.fn_, &e.synth) {
                     (Some(_), _) | (_, Some(_)) => {
@@ -3909,19 +4200,19 @@ impl App {
                 }
                 let path = path_for(&s.path, &k);
                 let idx = s.idx;
+                // the key exists from here on: insert a null placeholder so
+                // it keeps the requested position while the type is chosen
+                let n = self.fs_mut().doc.new_null();
+                let _ = self.fs_mut().doc.insert_member(&s.path, &k, idx, n);
                 if node.kind == Kind::Map {
                     // the new value edits against the map's value schema
                     let items = node.items;
                     match items.map(|i| self.fs().schema.nodes[i as usize].kind) {
-                        None => {
-                            self.edit_value_external(path, idx as i64);
-                        }
+                        None => self.open_any_type(path),
                         Some(Kind::Raw) => {
-                            self.edit_value_external(path, idx as i64);
+                            self.open_field(items.expect("checked above"), path, true)
                         }
                         Some(Kind::OneOf) => {
-                            let n = self.fs_mut().doc.new_null();
-                            let _ = self.fs_mut().doc.set(&path, n);
                             let items = items.expect("checked above");
                             if dynamic_variants(&self.fs().schema, items).is_some() {
                                 self.nav_forward();
@@ -3955,14 +4246,13 @@ impl App {
                             let _ = self.fs_mut().doc.set(&path, n);
                         }
                         Some(_) => {
-                            let n = self.fs_mut().doc.new_null();
-                            let _ = self.fs_mut().doc.set(&path, n);
                             self.open_field(items.expect("checked above"), path, true);
                         }
                     }
                     return None;
                 }
-                self.edit_value_external(path, idx as i64); // empty file
+                // schema-less object member: choose the value type first
+                self.open_any_type(path);
                 None
             }
             "esc" => None,
@@ -4512,7 +4802,14 @@ impl App {
     fn menu_title(&self, st: &MenuState) -> (String, String) {
         let node = &self.fs().schema.nodes[st.node as usize];
         if !node.title.is_empty() {
-            return (node.title.clone(), String::new());
+            let summary = if st.kind == MenuKind::OneOf {
+                self.variant_picker_summary(st)
+            } else if st.one_of.is_some() {
+                variant_label(&self.fs().schema, st.node)
+            } else {
+                String::new()
+            };
+            return (node.title.clone(), summary);
         }
         let field = st.one_of.or(st.variant_of);
         let mut title = String::new();
@@ -4529,9 +4826,37 @@ impl App {
         }
         if title.is_empty() {
             // nothing to name it after
-            return (display_title(&self.fs().schema, st.node), String::new());
+            let summary = if st.one_of.is_some() {
+                variant_label(&self.fs().schema, st.node)
+            } else {
+                String::new()
+            };
+            return (display_title(&self.fs().schema, st.node), summary);
         }
-        (title, variant_signature(&self.fs().schema, Some(st.node)))
+        let summary = if st.kind == MenuKind::OneOf {
+            self.variant_picker_summary(st)
+        } else if st.one_of.is_some() {
+            variant_label(&self.fs().schema, st.node)
+        } else {
+            variant_signature(&self.fs().schema, Some(st.node))
+        };
+        (title, summary)
+    }
+
+    /// variantPickerSummary is the bottom `variant:` line of a oneOf type
+    /// picker: the matched variant's type name followed by its signature.
+    /// Other menus keep the node's own signature.
+    fn variant_picker_summary(&self, st: &MenuState) -> String {
+        let node = &self.fs().schema.nodes[st.node as usize];
+        if st.kind != MenuKind::OneOf || node.kind != Kind::OneOf {
+            return variant_signature(&self.fs().schema, Some(st.node));
+        }
+        let val = self.doc().get(&st.path);
+        let idx = current_variant(&self.fs().schema, st.node, self.doc(), val);
+        if idx < 0 {
+            return variant_signature(&self.fs().schema, Some(st.node));
+        }
+        variant_label(&self.fs().schema, node.variants[idx as usize])
     }
 
     /// statusLines renders the session status notices.
@@ -4562,11 +4887,11 @@ impl App {
 
     /// helpLine renders the bottom hint row.
     fn help_line(&self) -> String {
-        if let Some(f) = &self.find {
+        if let Some(f) = &self.fast_move {
             if f.backward {
-                return self.rec_hint("Quick move: type a character to move up · esc cancels");
+                return self.rec_hint("Fast move: type a character to move up · esc cancels");
             }
-            return self.rec_hint("Quick move: type a character to move down · esc cancels");
+            return self.rec_hint("Fast move: type a character to move down · esc cancels");
         }
         if let Some(st) = self.top() {
             if st.visual {
@@ -4718,6 +5043,13 @@ impl App {
                 &format!("variant: {}", summary),
                 self.width.saturating_sub(1),
             );
+        }
+        if st.kind == MenuKind::OneOf && st.searching {
+            summary_lines.push(search_input_line(
+                "search: ",
+                &st.search_ti,
+                self.width.saturating_sub(1),
+            ));
         }
         let status = self.status_lines();
         let mut h = self

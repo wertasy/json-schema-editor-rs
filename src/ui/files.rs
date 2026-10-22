@@ -84,6 +84,10 @@ impl FileState {
             sel: HashSet::new(),
             visual: false,
             vanchor: 0,
+            search_ti: Default::default(),
+            searching: false,
+            search_prefilled: false,
+            search_applied: false,
         }];
         // oneOf root: open on the matched variant
         seed_variant_cursor(&schema, stack.last_mut().expect("root pushed"), &doc);

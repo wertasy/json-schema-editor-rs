@@ -98,13 +98,25 @@ pub struct Inputs {
     pub sel: bool,
     pub help: bool,
     pub file_pick: bool,
+    /// oneOf picker search mode (no overlay, but text input rules)
+    pub variant_search: bool,
+    /// f/F fast move waits for a target character: u/q/@/. are characters
+    pub fast_move: bool,
 }
 
 /// typing reports whether a text input has focus (in-place editor, raw
 /// textarea, search, add-key input, anchor/merge inputs): q/@/. are ordinary
 /// characters there and history keys must not fire.
 pub fn typing(i: &Inputs) -> bool {
-    i.edit || i.text || i.search_active || i.add || i.write || i.anc || i.mrg
+    i.edit
+        || i.text
+        || i.search_active
+        || i.add
+        || i.write
+        || i.anc
+        || i.mrg
+        || i.variant_search
+        || i.fast_move
 }
 
 /// list_mode reports whether the plain menu key table owns the keyboard.
@@ -244,6 +256,10 @@ mod tests {
             sel: Default::default(),
             visual: false,
             vanchor: 0,
+            search_ti: Default::default(),
+            searching: false,
+            search_prefilled: false,
+            search_applied: false,
         }
     }
 
@@ -285,7 +301,15 @@ mod tests {
         assert!(typing(&i));
         assert!(!list_mode(&i));
 
-        for flag in ["edit", "text", "add", "write", "anc", "mrg"] {
+        for flag in [
+            "edit",
+            "text",
+            "add",
+            "write",
+            "anc",
+            "mrg",
+            "variant_search",
+        ] {
             let mut i = Inputs::default();
             match flag {
                 "edit" => i.edit = true,
@@ -294,6 +318,8 @@ mod tests {
                 "write" => i.write = true,
                 "anc" => i.anc = true,
                 "mrg" => i.mrg = true,
+                "variant_search" => i.variant_search = true,
+                "fast_move" => i.fast_move = true,
                 _ => unreachable!(),
             }
             assert!(typing(&i), "{flag} must be typing");
