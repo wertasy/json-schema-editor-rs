@@ -5485,7 +5485,7 @@ impl App {
                 RowKind::Variant => {
                     let title = r
                         .variant
-                        .map(|v| self.fs().schema.nodes[v as usize].title.clone())
+                        .map(|v| display_title(&self.fs().schema, v))
                         .unwrap_or_default();
                     display_width("○ ") + display_width(&title)
                 }
@@ -5621,13 +5621,23 @@ impl App {
                 }
                 let mut l = mark_styled;
                 if let Some(vn) = r.variant {
-                    let title = self.fs().schema.nodes[vn as usize].title.clone();
+                    // untitled variants stand in their structural signature,
+                    // matching the any-type picker's name column instead of
+                    // leaving the title cell blank
+                    let title = display_title(&self.fs().schema, vn);
                     if !title.is_empty() {
                         l += &format!(" {title}");
                     }
                 }
                 left = l;
-                right = style::faint(&variant_signature(&self.fs().schema, r.variant));
+                // a titled variant keeps the signature in the summary
+                // column; the untitled case already shows it as the title
+                right = match r.variant {
+                    Some(vn) if !self.fs().schema.nodes[vn as usize].title.is_empty() => {
+                        style::faint(&variant_signature(&self.fs().schema, r.variant))
+                    }
+                    _ => String::new(),
+                };
                 if mark == "●" {
                     if let Some(v) = self.doc().get(&r.path) {
                         if !is_null_val(self.doc(), v) {

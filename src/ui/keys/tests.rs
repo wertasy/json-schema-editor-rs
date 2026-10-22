@@ -951,6 +951,46 @@ fn add_unknown_key_uses_type_picker() {
 }
 
 #[test]
+fn untitled_schema_variants_render_signature_in_title_column() {
+    // The any-type picker shows each type name in the row's title column;
+    // schema oneOf variants without a title must use their signature there
+    // too instead of leaving an empty, padded title cell.
+    let schema = schema_from_json(
+        r#"{
+          "type": "object",
+          "properties": {
+            "auth": {"oneOf": [
+              {"type": "object", "properties": {"token": {"type": "string"}}},
+              {"type": "object", "properties": {"user": {"type": "string"}},
+               "required": ["user"]}
+            ]}
+          }
+        }"#,
+    );
+    let mut m = app_with(schema, dbuild(|db| db.obj(vec![])), test_opts());
+    m.width = 100;
+    m.height = 24;
+    set_cursor_path(&mut m, &sp(&["auth"]));
+    press(&mut m, &["t"]);
+    assert_eq!(m.top().unwrap().kind, MenuKind::OneOf, "variant picker");
+
+    let view = m.view();
+    let variant_lines: Vec<&str> = view
+        .lines()
+        .filter(|l| l.contains('○') || l.contains('●'))
+        .collect();
+    assert_eq!(variant_lines.len(), 2, "{view}");
+    let ansi = regex::Regex::new("\x1b\\[[0-9;]*m").unwrap();
+    for line in variant_lines {
+        let plain = ansi.replace_all(line, "");
+        assert!(
+            plain.contains("○ {token}") || plain.contains("○ {user*}"),
+            "untitled variant must carry its signature in the title column: {plain:?}"
+        );
+    }
+}
+
+#[test]
 fn schema_typed_field_does_not_switch_type() {
     let mut m = mk_app(test_doc(), test_opts());
     set_cursor_path(&mut m, &sp(&["name"]));
@@ -4681,6 +4721,100 @@ fn one_of_item_add_infer() {
     );
     let r = row_at(&mut m);
     assert_eq!(m.fs().schema.nodes[r.fn_.unwrap() as usize].key, "type");
+}
+
+#[test]
+fn one_of_union_enum_keeps_all_discriminator_options() {
+    // sing-box RuleSet: the inline variant allows enum ["inline", ""] while
+    // local/remote are consts. The merged type picker must offer all of them.
+    let schema = schema_from_json(
+        r#"{
+      "type": "object",
+      "properties": {
+        "route": {"type": "object", "properties": {
+          "rule_set": {"type": "array", "items": {"oneOf": [
+            {"type": "object", "properties": {
+              "type": {"type": "string", "enum": ["inline", ""]},
+              "tag": {"type": "string"},
+              "rules": {"type": "array", "items": {}}},
+             "required": ["tag"]},
+            {"type": "object", "properties": {
+              "type": {"const": "local"},
+              "tag": {"type": "string"},
+              "format": {"type": "string", "enum": ["source", "binary"]},
+              "path": {"type": "string"}},
+             "required": ["type", "tag"]},
+            {"type": "object", "properties": {
+              "type": {"const": "remote"},
+              "tag": {"type": "string"},
+              "format": {"type": "string", "enum": ["source", "binary"]},
+              "url": {"type": "string"}},
+             "required": ["type", "tag"]}
+          ]}}
+        }}
+      }
+    }"#,
+    );
+    let mut m = app_with(schema, dbuild(|db| db.obj(vec![])), test_opts());
+    // route -> rule_set -> < Add item >
+    press(&mut m, &["enter", "enter", "enter"]);
+    assert_eq!(
+        m.top().unwrap().path,
+        vec![ks("route"), ks("rule_set"), PathSeg::Idx(0)]
+    );
+    assert!(m.top().unwrap().variant_of.is_some());
+
+    let type_idx = {
+        let rows = m.menu_rows();
+        let schema = &m.fs().schema;
+        rows.iter()
+            .position(|r| r.fn_.is_some() && schema.nodes[r.fn_.unwrap() as usize].key == "type")
+            .expect("type row")
+    };
+    m.top_mut().unwrap().cursor = type_idx;
+    press(&mut m, &["enter"]);
+    match &m.overlay {
+        Some(Overlay::Sel(s)) => {
+            let labels: Vec<&str> = s.opts.iter().map(|o| o.display.as_str()).collect();
+            assert_eq!(labels, ["inline", "", "local", "remote"]);
+        }
+        _ => panic!("type picker should open"),
+    }
+    if let Some(Overlay::Sel(s)) = &mut m.overlay {
+        s.cursor = 3; // remote
+    }
+    press(&mut m, &["enter"]);
+    assert_eq!(
+        sget(
+            &m.fs().doc,
+            &[ks("route"), ks("rule_set"), PathSeg::Idx(0), ks("type")]
+        ),
+        "remote"
+    );
+    assert!(
+        find_row(&mut m, |r, schema| {
+            r.fn_.is_some() && schema.nodes[r.fn_.unwrap() as usize].key == "url"
+        })
+        .is_some(),
+        "choosing remote must pin the remote variant"
+    );
+    // the pinned variant keeps the union picker so the type stays switchable
+    let type_idx = {
+        let rows = m.menu_rows();
+        let schema = &m.fs().schema;
+        rows.iter()
+            .position(|r| r.fn_.is_some() && schema.nodes[r.fn_.unwrap() as usize].key == "type")
+            .expect("type row")
+    };
+    m.top_mut().unwrap().cursor = type_idx;
+    press(&mut m, &["enter"]);
+    match &m.overlay {
+        Some(Overlay::Sel(s)) => {
+            let labels: Vec<&str> = s.opts.iter().map(|o| o.display.as_str()).collect();
+            assert_eq!(labels, ["inline", "", "local", "remote"]);
+        }
+        _ => panic!("pinned type picker should open"),
+    }
 }
 
 #[test]

@@ -1307,28 +1307,28 @@ pub fn variant_field_defs(
     (order, defs)
 }
 
-/// unionField merges one key's definitions across variants. Const fields
-/// (single-option enums) with differing values become a union enum marked
-/// as a discriminator; otherwise same-kind definitions take the first, and
-/// kind conflicts drop the key (None).
+/// unionField merges one key's definitions across variants. Enum fields with
+/// differing option sets become a union enum marked as a discriminator;
+/// otherwise same-kind definitions take the first, and kind conflicts drop
+/// the key (None). The union covers multi-option enums as well as consts:
+/// sing-box's RuleSet `type` is `enum: ["inline", ""]` in one variant and
+/// `const: "local"` / `const: "remote"` in the others, so all four options
+/// must stay selectable.
 pub fn union_field(
     schema: &mut Schema,
     key: &str,
     ds: &[FormNodeId],
 ) -> Option<(FormNodeId, bool)> {
-    let mut all_const = true;
-    let mut differs = false;
-    for (i, &d) in ds.iter().enumerate() {
-        let dn = &schema.nodes[d as usize];
-        if dn.kind != Kind::Enum || dn.enum_.len() != 1 {
-            all_const = false;
-            break;
-        }
-        if i > 0 && dn.enum_[0].encoded != schema.nodes[ds[0] as usize].enum_[0].encoded {
-            differs = true;
-        }
-    }
-    if all_const && differs {
+    let all_enum = ds
+        .iter()
+        .all(|&d| schema.nodes[d as usize].kind == Kind::Enum);
+    let differs = all_enum
+        && ds.iter().skip(1).any(|&d| {
+            let a = &schema.nodes[ds[0] as usize].enum_;
+            let b = &schema.nodes[d as usize].enum_;
+            a.len() != b.len() || a.iter().zip(b).any(|(x, y)| x.encoded != y.encoded)
+        });
+    if differs {
         let mut union = FormNode {
             kind: Kind::Enum,
             key: key.to_string(),
@@ -1338,11 +1338,13 @@ pub fn union_field(
         union.title = schema.nodes[ds[0] as usize].title.clone();
         let mut seen: HashSet<String> = HashSet::new();
         for &d in ds {
-            let o = schema.nodes[d as usize].enum_[0].clone();
-            if seen.insert(o.encoded.clone()) {
-                union.enum_.push(o);
+            let dn = &schema.nodes[d as usize];
+            for o in &dn.enum_ {
+                if seen.insert(o.encoded.clone()) {
+                    union.enum_.push(o.clone());
+                }
             }
-            union.required = union.required && schema.nodes[d as usize].required;
+            union.required = union.required && dn.required;
         }
         let id = schema.nodes.len() as FormNodeId;
         schema.nodes.push(union);
