@@ -1768,12 +1768,23 @@ pub fn search_index(schema: &mut Schema, doc: &Doc, st: &MenuState) -> Vec<Row> 
                 let val = doc.get(path);
                 let has_val = matches!(val, Some(v) if !is_null(doc, v));
                 let mut variants = schema.nodes[fn_ as usize].variants.clone();
-                if has_val {
-                    let cands = match dynamic_variants(schema, fn_) {
-                        Some(c) => c,
-                        None => schema.nodes[fn_ as usize].variants.clone(),
+                // A dynamic menu (every leaf an object, eventually after
+                // nested oneOf groups) flattens the leaves: the merged menu
+                // indexes those, while a top-level group node has no
+                // children and would make every document key look unknown.
+                if let Some(cands) = dynamic_variants(schema, fn_) {
+                    let matched = if has_val {
+                        match_variant_list(schema, &cands, doc, val)
+                    } else {
+                        Vec::new()
                     };
-                    let matched = match_variant_list(schema, &cands, doc, val);
+                    variants = if matched.len() == 1 {
+                        matched // pinned variant menu
+                    } else {
+                        cands // merged menu
+                    };
+                } else if has_val {
+                    let matched = match_variant_list(schema, &variants, doc, val);
                     if matched.len() == 1 {
                         variants = matched;
                     }

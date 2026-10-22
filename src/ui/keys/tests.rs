@@ -4958,6 +4958,78 @@ fn search_jump_to_array_item_variant_field() {
 }
 
 #[test]
+fn search_jump_to_union_discriminator_field() {
+    // sing-box Rule shape: nested oneOf groups flatten to object leaves.
+    // "sniff" matches two leaves, so the item menu is the merged menu and
+    // the search index must walk the flattened leaves (a top-level group
+    // node has no children and used to leave the key unknown). Every leaf
+    // defines "action" as a different const, so the merged menu synthesizes
+    // a union enum node; the search hit still records the leaf's node. The
+    // jump must land on the key row either way.
+    let schema = schema_from_json(
+        r##"{
+	  "type": "object",
+	  "properties": {
+	    "rules": {"type": "array", "items": {
+	      "oneOf": [
+	        {"oneOf": [
+	          {"type": "object", "properties": {
+	            "action": {"const": "route"},
+	            "outbound": {"type": "string"}}, "required": ["action"]},
+	          {"type": "object", "properties": {
+	            "action": {"const": "sniff"},
+	            "inbound": {"type": "string"}}, "required": ["action"]}
+	        ]},
+	        {"oneOf": [
+	          {"type": "object", "properties": {
+	            "action": {"const": "sniff"},
+	            "protocol": {"type": "string"}}, "required": ["action"]}
+	        ]}
+	      ]
+	    }}
+	  }
+	}"##,
+    );
+    let doc = dbuild(|db| {
+        db.obj(vec![(
+            "rules",
+            db.arr(vec![db.obj(vec![("action", db.s("sniff"))])]),
+        )])
+    });
+    let mut m = app_with(schema, doc, test_opts());
+    press(&mut m, &["/", "a", "c", "t", "i", "o", "n"]);
+    let want = vec![ks("rules"), PathSeg::Idx(0), ks("action")];
+    let hits: Vec<&Row> = search_state(&m)
+        .results
+        .iter()
+        .filter(|r| r.path == want)
+        .collect();
+    assert_eq!(hits.len(), 1, "one search row per key");
+    assert_eq!(
+        hits[0].kind,
+        RowKind::Field,
+        "the key is schema-defined, not an unknown document key"
+    );
+    let idx = search_state(&m)
+        .results
+        .iter()
+        .position(|r| r.path == want)
+        .expect("action search row");
+    if let Some(Overlay::Search(s)) = &mut m.overlay {
+        s.cursor = idx;
+    }
+    press(&mut m, &["enter"]);
+    assert!(m.overlay.is_none());
+    assert_eq!(
+        m.top().unwrap().path,
+        vec![ks("rules"), PathSeg::Idx(0)],
+        "jump opens the array item menu"
+    );
+    let row = row_at(&mut m);
+    assert_eq!(row.path, want, "cursor must land on the key row");
+}
+
+#[test]
 fn search_skips_missing_parent_paths() {
     let src = r#"{
       "type": "object",

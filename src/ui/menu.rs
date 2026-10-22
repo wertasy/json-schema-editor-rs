@@ -1465,14 +1465,23 @@ pub fn cursor_by_path(rows: &[Row], path: &[PathSeg]) -> usize {
 /// same path, or the same variant); None when the target is a container
 /// whose menu we entered.
 pub fn cursor_for_row(rows: &[Row], res: &Row) -> Option<usize> {
-    for (i, r) in rows.iter().enumerate() {
-        if r.kind != RowKind::Variant
-            && res.kind != RowKind::Variant
-            && r.fn_ == res.fn_
-            && r.path == res.path
-        {
-            return Some(i);
+    if res.kind != RowKind::Variant {
+        for (i, r) in rows.iter().enumerate() {
+            if r.kind != RowKind::Variant && r.fn_ == res.fn_ && r.path == res.path {
+                return Some(i);
+            }
         }
+        // Pinned/merged oneOf menus synthesize union nodes for keys the
+        // variants define differently (const discriminators). The search hit
+        // carries the original variant's node, so fall back to the row at
+        // the same path rather than leaving the cursor on row 0.
+        for (i, r) in rows.iter().enumerate() {
+            if r.kind == res.kind && !r.path.is_empty() && r.path == res.path {
+                return Some(i);
+            }
+        }
+    }
+    for (i, r) in rows.iter().enumerate() {
         if r.variant.is_some() && r.variant == res.variant {
             return Some(i);
         }
