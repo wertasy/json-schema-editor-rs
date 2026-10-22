@@ -29,8 +29,8 @@ bin/
 # OS
 .DS_Store
 
-# Local secret-bearing config (sing-box credentials) — never commit
-config.json
+# Local secret-bearing config — never commit
+*.json
 
 
 # Added by cargo
