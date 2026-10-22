@@ -28,11 +28,13 @@ pub fn loc() -> String {
 }
 
 /// Load fetches and parses the catalog at loc — anything fetch::load takes
-/// (https URL or local path), including its 24h cache and offline fallback.
-/// Entries without a URL are skipped; per-version listings are ignored (the
-/// latest URL is the entry's url).
+/// (https URL or local path). HTTP catalogs use stale-while-revalidate: a
+/// cached copy is served immediately even after its TTL and refreshed in the
+/// background, so a restricted network never stalls startup. Entries without
+/// a URL are skipped; per-version listings are ignored (the latest URL is the
+/// entry's url).
 pub fn load(loc: &str) -> Result<Vec<Entry>, String> {
-    let data = fetch::load(loc)?;
+    let data = fetch::load_stale_first(loc)?;
     let w: Wire = serde_json::from_slice(&data).map_err(|e| format!("parse catalog {loc}: {e}"))?;
     Ok(w.schemas
         .into_iter()

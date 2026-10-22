@@ -3,8 +3,8 @@
 //! every cache test holds TEST_LOCK to run serially.
 
 use crate::fetch::{
-    CACHE_DIR_OVERRIDE, CACHE_TTL_SECS, MAX_BYTES, cache_path, load, note, reset_memo,
-    set_cache_dir,
+    CACHE_DIR_OVERRIDE, CACHE_TTL_SECS, MAX_BYTES, cache_path, load, load_stale_first, note,
+    reset_memo, set_cache_dir,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
@@ -158,6 +158,51 @@ fn cache_revalidates() {
     CACHE_TTL_SECS.store(24 * 60 * 60, Ordering::Relaxed);
     load(&url).unwrap();
     assert_eq!(hits.load(Ordering::SeqCst), 2, "304 must refresh the entry");
+    drop(ct);
+}
+
+#[test]
+fn stale_cache_returns_immediately_and_refreshes_async() {
+    let ct = CacheTest::new();
+    let (hits, conds) = (counter(), counter());
+    let url = format!(
+        "{}/catalog.json",
+        schema_server(
+            r#"{"schemas":["new"]}"#,
+            "\"v2\"",
+            hits.clone(),
+            conds.clone()
+        )
+    );
+    seed_cache(
+        &url,
+        br#"{"schemas":["old"]}"#,
+        std::time::Duration::from_secs(2 * 24 * 3600),
+    );
+
+    let started = std::time::Instant::now();
+    let data = load_stale_first(&url).unwrap();
+    assert_eq!(data, br#"{"schemas":["old"]}"#);
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(500),
+        "stale cache must not wait for the origin: {:?}",
+        started.elapsed()
+    );
+
+    // The background revalidation swaps in the new body for later reads.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        if load_stale_first(&url).unwrap() == br#"{"schemas":["new"]}"# {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "background refresh did not land; hits={}",
+            hits.load(Ordering::SeqCst)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
     drop(ct);
 }
 

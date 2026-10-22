@@ -90,7 +90,7 @@ Treat these as public API; tests and docs assert them:
 - CLI: getopt-style parsing (`-sv`, `--schema=v`, clustered flags, options after operands, `--`). Multiple config files open one session; each resolves its own schema. All files load before the UI starts.
 - Exit codes: `0` saved/unchanged, `1` runtime error, `2` usage error, `130` user abort. Exact stdout lines are in `docs/cli.md`.
 - Schema resolution order: `-s` → config pointer → SchemaStore (unique match auto, ambiguous/missing picker) → schema-less editing (`smodel::untyped`; no validation, unknown-key warnings suppressed). `--pick` overrides both and keeps its own failures fatal.
-- Remote cache: 24h fresh, conditional revalidation, 5xx/network fallback, 404 hard error, 429 cooldown. Same cache for the catalog and remote `$ref`s. One fetch per URL per process.
+- Remote cache: 24h fresh, conditional revalidation, 5xx/network fallback, 404 hard error, 429 cooldown. Same cache for the catalog and remote `$ref`s. One fetch per URL per process. The SchemaStore catalog uses stale-while-revalidate (`fetch::load_stale_first`): an expired cache is returned immediately and revalidated on a background thread.
 - Save-time validation is authoritative; `--force` is the only bypass. A schema compile failure disables validation and shows a persistent warning.
 - Saves are atomic (same-directory temp + rename) and preserve the existing file mode, key order, numeric literals, unknown keys, and `$schema`.
 - Do not expand YAML aliases on save; do not drop anchors or `<<`.

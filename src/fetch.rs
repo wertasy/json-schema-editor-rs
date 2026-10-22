@@ -3,7 +3,7 @@
 //!
 //! Rust port of `internal/fetch/fetch.go`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,6 +37,11 @@ struct MemoEntry {
     /// same unreachable/rate-limited URL once per file.
     error: Option<String>,
 }
+
+/// URLs with a stale-while-revalidate refresh in flight, so several session
+/// files or picker opens share one background request.
+static REFRESHING: LazyLock<parking_lot::Mutex<HashSet<String>>> =
+    LazyLock::new(|| parking_lot::Mutex::new(HashSet::new()));
 
 fn memo() -> &'static parking_lot::Mutex<HashMap<String, MemoEntry>> {
     &MEMO
@@ -258,6 +263,77 @@ pub fn load(loc: &str) -> Result<Vec<u8>, String> {
             loc
         };
         std::fs::read(path).map_err(|e| e.to_string())
+    }
+}
+
+/// LoadStaleFirst is the catalog's loader: a cached copy is returned
+/// immediately even after the 24h TTL, and the origin is revalidated in the
+/// background for the next read. Without any cached copy it falls back to the
+/// synchronous [load] (there is nothing to show while the network hangs).
+///
+/// Use this only for data where a slightly old copy is harmless (the
+/// SchemaStore catalog). Schemas themselves keep the normal fresh/ revalidate
+/// / fallback behavior.
+pub fn load_stale_first(loc: &str) -> Result<Vec<u8>, String> {
+    if !is_http(loc) {
+        return load(loc);
+    }
+    if let Some(e) = memo().lock().get(loc) {
+        if let Some(err) = &e.error {
+            return Err(err.clone());
+        }
+        return Ok(e.data.clone());
+    }
+    let (cached, body) = read_cache(loc);
+    let Some(entry) = cached else {
+        return load(loc); // cold cache: the only data must come from the origin
+    };
+    let fresh = SystemTime::now()
+        .duration_since(entry.fetched_at)
+        .map(|age| age.as_secs() < CACHE_TTL_SECS.load(Ordering::Relaxed))
+        .unwrap_or(false);
+    memo().lock().insert(
+        loc.to_string(),
+        MemoEntry {
+            data: body.clone(),
+            note: String::new(),
+            error: None,
+        },
+    );
+    if !fresh {
+        refresh_async(loc);
+    }
+    Ok(body)
+}
+
+/// refreshAsync revalidates loc on a detached thread; the cache and the
+/// process memo are updated when it finishes, so the next catalog read (a
+/// second file, the S picker, or the next run) sees the new copy.
+fn refresh_async(loc: &str) {
+    if !REFRESHING.lock().insert(loc.to_string()) {
+        return;
+    }
+    let url = loc.to_string();
+    let spawned = std::thread::Builder::new()
+        .name("jse-catalog-refresh".to_string())
+        .spawn({
+            let url = url.clone();
+            move || {
+                if let Ok((data, note)) = load_http(&url) {
+                    memo().lock().insert(
+                        url.clone(),
+                        MemoEntry {
+                            data,
+                            note,
+                            error: None,
+                        },
+                    );
+                }
+                REFRESHING.lock().remove(&url);
+            }
+        });
+    if spawned.is_err() {
+        REFRESHING.lock().remove(&url);
     }
 }
 
