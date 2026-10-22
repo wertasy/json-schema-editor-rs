@@ -7567,7 +7567,21 @@ fn write_to_error_is_reported() {
         "enter must close the input even on failure"
     );
     assert!(
-        m.notice.contains("write failed: disk full"),
+        m.notice.contains("Write failed: disk full"),
+        "notice = {}",
+        m.notice
+    );
+}
+
+#[test]
+fn save_error_is_reported_as_write_failure() {
+    let mut opts = test_opts();
+    opts.path = "/origin/f.json".into();
+    opts.save = Some(Arc::new(|_: &Doc| Err("disk full".to_string())));
+    let mut m = mk_app(test_doc(), opts);
+    press(&mut m, &["ctrl+s"]);
+    assert!(
+        m.notice.contains("Write failed: disk full"),
         "notice = {}",
         m.notice
     );

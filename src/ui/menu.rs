@@ -1387,12 +1387,12 @@ impl App {
             let save = match &self.opts().save {
                 Some(s) => s.clone(),
                 None => {
-                    self.notice = "save failed: no save target".to_string();
+                    self.notice = "Write failed: no save target".to_string();
                     return;
                 }
             };
             if let Err(e) = save(&self.doc()) {
-                self.notice = format!("save failed: {}", e);
+                self.notice = format!("Write failed: {}", e);
                 return;
             }
             let f = self.fs_mut();
@@ -1413,12 +1413,12 @@ impl App {
         let write_to = match &self.opts().write_to {
             Some(w) => w.clone(),
             None => {
-                self.notice = "write failed: no write-to target".to_string();
+                self.notice = "Write failed: no write-to target".to_string();
                 return;
             }
         };
         if let Err(e) = write_to(target, &self.doc()) {
-            self.notice = format!("write failed: {}", e);
+            self.notice = format!("Write failed: {}", e);
             return;
         }
         self.notice = format!("Wrote to {}", target);
