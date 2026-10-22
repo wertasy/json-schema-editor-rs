@@ -833,6 +833,82 @@ fn pty_unknown_key_type_picker() {
 }
 
 #[test]
+fn pty_search_jump_into_array_variant() {
+    let dir = mktemp();
+    let schema = dir.path().join("rules.schema.json");
+    let cfg = dir.path().join("config.json");
+    write_file(
+        &schema,
+        r#"{
+          "type": "object",
+          "properties": {
+            "dns": {
+              "type": "object",
+              "properties": {
+                "rules": {
+                  "type": "array",
+                  "items": {
+                    "oneOf": [
+                      {
+                        "title": "Rule0",
+                        "type": "object",
+                        "properties": {
+                          "type": {"type": "string"},
+                          "domain_suffix": {"type": "array", "items": {"type": "string"}},
+                          "server": {"type": "string"}
+                        }
+                      },
+                      {
+                        "title": "Rule1",
+                        "type": "object",
+                        "properties": {
+                          "type": {"type": "string"},
+                          "inbound": {"type": "string"},
+                          "ip_version": {"type": "string"},
+                          "query_type": {"type": "string"},
+                          "domain_suffix": {"type": "array", "items": {"type": "string"}},
+                          "server": {"type": "string"}
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }"#,
+    );
+    write_file(
+        &cfg,
+        r#"{"dns":{"rules":[{"type":"default","server":"other"},{"type":"default","inbound":"any","ip_version":"4","query_type":"A","domain_suffix":["a.com"],"server":"dns-proxy"}]}}"#,
+    );
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+        return;
+    };
+
+    pty.wait_frame("root menu", 0, &["Save and exit"]);
+    pty.send(b"/");
+    pty.wait_frame("search", 0, &["search:"]);
+    pty.send(b"$.dns.rules[1].server");
+    (_, _) = pty.wait_frame(
+        "target search row",
+        0,
+        &["$.dns.rules[1].server  dns-proxy"],
+    );
+    pty.send(b"\r");
+    (_, _) = pty.wait_frame(
+        "array item menu with cursor on server",
+        0,
+        &["$.dns.rules[1]", "> server"],
+    );
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+}
+
+#[test]
 fn pty_quit_save_prompt() {
     let dir = mktemp();
     let schema = dir.path().join("mini.schema.json");

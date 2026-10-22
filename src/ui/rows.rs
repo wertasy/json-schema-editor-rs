@@ -1664,10 +1664,31 @@ pub fn rebuild_stack(schema: &mut Schema, doc: &Doc, path: &[PathSeg]) -> Vec<Me
                         let mut st = state(MenuKind::Object, inode, ipath.clone());
                         st.variant_of = Some(items);
                         stack.push(st);
-                        cur = items;
+                        cur = inode;
                         cur_path = ipath;
                         continue;
                     }
+                    // classic oneOf item: follow the matched leaf variant
+                    // (oneOf variants may themselves be variant groups). A
+                    // leaf variant's row lives in the array Items menu; an
+                    // object variant gets its own editor menu.
+                    let ival = doc.get(&ipath);
+                    if matches!(ival, Some(v) if !is_null(doc, v)) {
+                        if let Some(variant) = matched_leaf_variant(schema, items, doc, ival) {
+                            if menu_leaf(schema, variant) {
+                                return stack;
+                            }
+                            let kind = menu_kind_for(schema, variant);
+                            let mut st = state(kind, variant, ipath.clone());
+                            st.one_of = Some(items);
+                            stack.push(st);
+                            cur = variant;
+                            cur_path = ipath;
+                            continue;
+                        }
+                    }
+                    // unset item: its row is in the array Items menu
+                    return stack;
                 }
                 let kind = menu_kind_for(schema, items);
                 stack.push(state(kind, items, ipath.clone()));
@@ -1705,6 +1726,16 @@ pub fn search_index(schema: &mut Schema, doc: &Doc, st: &MenuState) -> Vec<Row> 
         fn_: FormNodeId,
         path: &[PathSeg],
     ) {
+        // Do not synthesize paths below a container the document does not
+        // actually have (especially array items past the document length).
+        if !path.is_empty() {
+            let Some(n) = doc.get(path) else {
+                return;
+            };
+            if is_null(doc, n) {
+                return;
+            }
+        }
         match schema.nodes[fn_ as usize].kind {
             Kind::Object => {
                 let mut known: HashSet<String> = HashSet::new();
@@ -1729,9 +1760,9 @@ pub fn search_index(schema: &mut Schema, doc: &Doc, st: &MenuState) -> Vec<Row> 
                 unknown_rows(schema, doc, path, &known, seen, out);
             }
             Kind::OneOf => {
-                // first-definition field rows across variants, then the
-                // members no variant defines. The variant rows themselves
-                // are only useful while the value is unset (pick a type).
+                // Index the variant fields, but not one row per variant for
+                // the same key: the key's own row already represents an
+                // unset value, and duplicate type rows only add noise.
                 let val = doc.get(path);
                 let has_val = matches!(val, Some(v) if !is_null(doc, v));
                 let mut variants = schema.nodes[fn_ as usize].variants.clone();
@@ -1747,21 +1778,6 @@ pub fn search_index(schema: &mut Schema, doc: &Doc, st: &MenuState) -> Vec<Row> 
                 }
                 let mut known: HashSet<String> = HashSet::new();
                 for &v in &variants {
-                    if !has_val {
-                        out.push(Row {
-                            kind: RowKind::Variant,
-                            fn_: Some(v),
-                            variant: Some(v),
-                            path: path.to_vec(),
-                            idx: -1,
-                            label: format!(
-                                "{}  {}",
-                                path_string(path),
-                                variant_signature(schema, Some(v))
-                            ),
-                            ..Row::default()
-                        });
-                    }
                     let children = schema.nodes[v as usize].children.clone();
                     for c in children {
                         let key = schema.nodes[c as usize].key.clone();
@@ -1830,9 +1846,9 @@ pub fn search_index(schema: &mut Schema, doc: &Doc, st: &MenuState) -> Vec<Row> 
                 if schema.nodes[items as usize].kind == Kind::Enum {
                     return;
                 }
-                // index every existing item so values are searchable; an
-                // unset/empty array still indexes the item schema once
-                let n = doc_array_len(doc, path).max(1);
+                // only actual items are searchable; schema-only indexes
+                // would create paths whose parent does not exist
+                let n = doc_array_len(doc, path);
                 for i in 0..n {
                     let ipath = path_idx(path, i);
                     out.push(Row {
@@ -4093,8 +4109,20 @@ mod tests {
         // labels are breadcrumb-style paths plus the menu value overview
         assert_eq!(find("Source"), "$.mounts[0].src  /data");
         assert_eq!(find("Server"), "$.server  port=8080 host=0.0.0.0 +1");
-        // variants show their structural overview, never fallback titles
-        assert_eq!(find("Token"), "$.auth  {token*}");
+        // no phantom child rows below an absent oneOf parent
+        assert_eq!(find("Token"), "");
+        assert!(
+            !all.iter()
+                .any(|r| path_eq(&r.path, &[PathSeg::key("auth"), PathSeg::key("token")]))
+        );
+        assert!(
+            all.iter().any(|r| {
+                path_eq(&r.path, &[PathSeg::key("auth")])
+                    && r.kind == RowKind::Field
+                    && r.label.ends_with("—")
+            }),
+            "unset oneOf key row must be searchable"
+        );
         for r in &all {
             assert!(
                 !r.label.contains("variant "),
@@ -4103,7 +4131,7 @@ mod tests {
             );
         }
         // filter by title and key, case-insensitive
-        assert_eq!(filter_search(&ctx, &all, "token", true, None).len(), 2); // variant + field
+        assert_eq!(filter_search(&ctx, &all, "token", true, None).len(), 0); // parent absent
         assert_eq!(filter_search(&ctx, &all, "SRC", true, None).len(), 1); // Source row only
         // fold=false demands the exact case
         assert_eq!(filter_search(&ctx, &all, "SRC", false, None).len(), 0);
@@ -4242,19 +4270,32 @@ mod tests {
 
     #[test]
     fn test_search_index_variant_rows_only_without_value() {
-        let count = |schema: &mut Schema, doc: &Doc| -> usize {
-            search_index(schema, doc, &root_state(schema))
-                .iter()
-                .filter(|r| r.kind == RowKind::Variant && path_eq(&r.path, &[PathSeg::key("auth")]))
-                .count()
+        let key_row = |schema: &mut Schema, doc: &Doc| -> Row {
+            let st = root_state(schema);
+            search_index(schema, doc, &st)
+                .into_iter()
+                .find(|r| {
+                    r.fn_.map(|f| schema.nodes[f as usize].key.as_str()) == Some("auth")
+                        && path_eq(&r.path, &[PathSeg::key("auth")])
+                })
+                .expect("auth key row")
         };
 
-        // Unset oneOf: the variant rows are useful searchable type targets.
+        // Unset oneOf: exactly one key row, no per-variant duplicates.
         let mut fx = Fx::new();
-        assert_eq!(count(&mut fx.schema, &fx.doc), 2, "unset auth variants");
+        let st = root_state(&fx.schema);
+        let all = search_index(&mut fx.schema, &fx.doc, &st);
+        assert!(
+            all.iter()
+                .filter(|r| r.kind == RowKind::Variant && path_eq(&r.path, &[PathSeg::key("auth")]))
+                .count()
+                == 0,
+            "no variant rows for an unset key"
+        );
+        let row = key_row(&mut fx.schema, &fx.doc);
+        assert!(row.label.ends_with("—"), "unset key label: {}", row.label);
 
-        // Set oneOf: the field row already carries the value; the signature
-        // rows would repeat the same path.
+        // Set oneOf: the key row stays searchable, still without duplicates.
         let mut fx2 = Fx::new();
         let tok = fx2.doc.new_str("secret");
         let obj = fx2.doc.new_object();
@@ -4265,20 +4306,17 @@ mod tests {
             });
         }
         fx2.doc.set(&[PathSeg::key("auth")], obj).unwrap();
-        let rst = root_state(&fx2.schema);
-        let all = search_index(&mut fx2.schema, &fx2.doc, &rst);
-        let n = all
-            .iter()
-            .filter(|r| r.kind == RowKind::Variant && path_eq(&r.path, &[PathSeg::key("auth")]))
-            .count();
-        assert_eq!(n, 0, "set auth variants");
+        let st = root_state(&fx2.schema);
+        let all = search_index(&mut fx2.schema, &fx2.doc, &st);
         assert!(
-            all.iter().any(|r| {
-                r.fn_.map(|f| fx2.schema.nodes[f as usize].key.as_str()) == Some("auth")
-                    && path_eq(&r.path, &[PathSeg::key("auth")])
-            }),
-            "the value-bearing auth field row must stay searchable"
+            all.iter()
+                .filter(|r| r.kind == RowKind::Variant && path_eq(&r.path, &[PathSeg::key("auth")]))
+                .count()
+                == 0,
+            "no duplicate variant rows for a set key"
         );
+        let row = key_row(&mut fx2.schema, &fx2.doc);
+        assert_ne!(row.label, "");
     }
 
     #[test]
@@ -4506,10 +4544,7 @@ mod tests {
 
         // the regex targets the same text literal mode matches: title/key
         // plus the row's own scalar value; a full leaf-key match ranks first
-        eq(
-            &matchq(&fx, &all, r"(?i)token"),
-            &["$.auth.token", "$.auth"],
-        ); // field outranks variant row
+        eq(&matchq(&fx, &all, r"(?i)token"), &[]); // parent is absent
         eq(&matchq(&fx, &all, r"\bport\b"), &["$.server.port"]); // $.server's roll-up is no target
         eq(&matchq(&fx, &all, r"0\.0\.0\.0"), &["$.server.host"]);
         // a "$."-prefixed query targets the document path, regex included

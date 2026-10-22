@@ -1262,6 +1262,60 @@ fn unknown_array_add_string_edits_inline() {
 }
 
 #[test]
+fn search_jump_to_variant_key_stays_on_row() {
+    let schema = schema_from_json(
+        r#"{
+          "type": "object",
+          "properties": {
+            "rule": {
+              "oneOf": [
+                {
+                  "title": "DnsRule",
+                  "type": "object",
+                  "properties": {"type": {"type": "string"}}
+                },
+                {"title": "TextRule", "type": "string"}
+              ]
+            }
+          }
+        }"#,
+    );
+    let doc = dbuild(|db| {
+        let rule = db.obj(vec![("type", db.s("dns"))]);
+        db.obj(vec![("rule", rule)])
+    });
+    let mut m = app_with(schema, doc, test_opts());
+    press(&mut m, &["/", "r", "u", "l", "e"]);
+    let idx = search_state(&m)
+        .results
+        .iter()
+        .position(|r| r.kind == RowKind::Field && r.path == vec![ks("rule")])
+        .unwrap_or_else(|| {
+            panic!(
+                "variant key row in results: {:?}",
+                search_state(&m)
+                    .results
+                    .iter()
+                    .map(|r| (r.kind, r.path.clone(), r.label.clone()))
+                    .collect::<Vec<_>>()
+            )
+        });
+    if let Some(Overlay::Search(s)) = &mut m.overlay {
+        s.cursor = idx;
+    }
+    press(&mut m, &["enter"]);
+    assert!(m.overlay.is_none());
+    assert_eq!(
+        m.fs().stack.len(),
+        1,
+        "jump stays in the parent menu, not the old picker"
+    );
+    assert_eq!(m.top().unwrap().kind, MenuKind::Object);
+    assert_eq!(row_at(&mut m).path, vec![ks("rule")]);
+    assert_eq!(row_at(&mut m).kind, RowKind::Drill);
+}
+
+#[test]
 fn unknown_key_scalar_inline_edit() {
     let mut doc = test_doc();
     for (k, v) in [
@@ -4690,6 +4744,241 @@ fn scalar_one_of_schema() -> Schema {
 }
 
 #[test]
+fn search_jump_to_array_item_variant_field() {
+    // sing-box-like dns.rules: an array whose items are classic oneOf
+    // objects, with a scalar fallback so the picker is not a dynamic menu.
+    let mut variants = String::new();
+    for i in 0..6 {
+        if i > 0 {
+            variants.push(',');
+        }
+        variants.push_str(&format!(
+            r#"{{
+              "title": "Rule{i}",
+              "type": "object",
+              "properties": {{
+                "type": {{"type": "string"}},
+                "inbound": {{"type": "string"}},
+                "ip_version": {{"type": "string"}},
+                "domain_suffix": {{"type": "array", "items": {{"type": "string"}}}},
+                "server": {{"type": "string"}}
+              }},
+              "required": ["type", "server"]
+            }}"#
+        ));
+    }
+    let src = format!(
+        r#"{{
+          "type": "object",
+          "properties": {{
+            "dns": {{
+              "type": "object",
+              "properties": {{
+                "rules": {{
+                  "type": "array",
+                  "items": {{ "oneOf": [{variants}] }}
+                }}
+              }}
+            }}
+          }}
+        }}"#
+    );
+    let schema = schema_from_json(&src);
+    let doc = dbuild(|db| {
+        let rule = db.obj(vec![
+            ("type", db.s("default")),
+            ("server", db.s("dns-proxy")),
+            ("domain_suffix", db.arr(vec![db.s("a.com")])),
+        ]);
+        let first = db.obj(vec![("type", db.s("default")), ("server", db.s("other"))]);
+        db.obj(vec![(
+            "dns",
+            db.obj(vec![("rules", db.arr(vec![first, rule]))]),
+        )])
+    });
+    let mut m = app_with(schema, doc, test_opts());
+    press(&mut m, &["/", "d", "n", "s"]);
+    let want = vec![ks("dns"), ks("rules"), PathSeg::Idx(1), ks("server")];
+    let idx = search_state(&m)
+        .results
+        .iter()
+        .position(|r| r.path == want)
+        .expect("rules[1].server search row");
+    if let Some(Overlay::Search(s)) = &mut m.overlay {
+        s.cursor = idx;
+    }
+    press(&mut m, &["enter"]);
+    assert!(m.overlay.is_none());
+    assert_eq!(
+        m.top().unwrap().kind,
+        MenuKind::Object,
+        "jump must open the array item menu, not the variant picker"
+    );
+    assert_eq!(
+        m.top().unwrap().path,
+        vec![ks("dns"), ks("rules"), PathSeg::Idx(1)]
+    );
+    let row = row_at(&mut m);
+    assert_eq!(row.path, want);
+    assert_eq!(row.kind, RowKind::Field);
+}
+
+#[test]
+fn search_skips_missing_parent_paths() {
+    let src = r#"{
+      "type": "object",
+      "properties": {
+        "endpoints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "servers": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "server": {
+                      "oneOf": [
+                        {"type": "string"},
+                        {
+                          "title": "ServerObject",
+                          "type": "object",
+                          "properties": {"addr": {"type": "string"}}
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }"#;
+
+    // servers is absent under endpoints[0]
+    let schema = schema_from_json(src);
+    let doc = dbuild(|db| db.obj(vec![("endpoints", db.arr(vec![db.obj(vec![])]))]));
+    let mut m = app_with(schema, doc, test_opts());
+    press(&mut m, &["/", "s", "e", "r", "v", "e", "r"]);
+    let deep = [
+        ks("endpoints"),
+        PathSeg::Idx(0),
+        ks("servers"),
+        PathSeg::Idx(0),
+        ks("server"),
+    ];
+    assert!(
+        !search_state(&m).results.iter().any(|r| r.path == deep),
+        "do not index below a missing parent object"
+    );
+
+    // the array itself is empty: no endpoints[0] rows at all
+    let schema = schema_from_json(src);
+    let doc = dbuild(|db| db.obj(vec![("endpoints", db.arr(vec![]))]));
+    let mut m = app_with(schema, doc, test_opts());
+    press(&mut m, &["/", "s", "e", "r", "v", "e", "r"]);
+    let prefix = [ks("endpoints"), PathSeg::Idx(0)];
+    assert!(
+        !search_state(&m)
+            .results
+            .iter()
+            .any(|r| r.path.starts_with(&prefix)),
+        "empty arrays must not synthesize item paths"
+    );
+}
+
+#[test]
+fn array_variant_key_search_rows_and_jump() {
+    let src = r#"{
+      "type": "object",
+      "properties": {
+        "dns": {
+          "type": "object",
+          "properties": {
+            "rules": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {
+                    "title": "RuleA",
+                    "type": "object",
+                    "properties": {
+                      "server": {
+                        "oneOf": [
+                          {"title": "ServerName", "type": "string"},
+                          {
+                            "title": "ServerObject",
+                            "type": "object",
+                            "properties": {"addr": {"type": "string"}}
+                          }
+                        ]
+                      }
+                    },
+                    "required": ["server"]
+                  },
+                  {
+                    "title": "RuleB",
+                    "type": "object",
+                    "properties": {"other": {"type": "string"}},
+                    "required": ["other"]
+                  },
+                  {"title": "RuleText", "type": "string"}
+                ]
+              }
+            }
+          }
+        }
+      }
+    }"#;
+    let server_path = vec![ks("dns"), ks("rules"), PathSeg::Idx(0), ks("server")];
+
+    // Unset variant key inside an array item: one search row, ending in "—".
+    let schema = schema_from_json(src);
+    let doc = dbuild(|db| {
+        db.obj(vec![(
+            "dns",
+            db.obj(vec![("rules", db.arr(vec![db.obj(vec![])]))]),
+        )])
+    });
+    let mut m = app_with(schema, doc, test_opts());
+    press(&mut m, &["/", "s", "e", "r", "v", "e", "r"]);
+    let hits: Vec<Row> = search_state(&m)
+        .results
+        .iter()
+        .filter(|r| r.path == server_path)
+        .cloned()
+        .collect();
+    assert_eq!(hits.len(), 1, "one row per unset variant key");
+    assert!(hits[0].label.ends_with("—"), "label = {}", hits[0].label);
+
+    // Set variant key: jumping lands on the key row in the variant editor.
+    let schema = schema_from_json(src);
+    let doc = dbuild(|db| {
+        let rule = db.obj(vec![("server", db.s("addr"))]);
+        db.obj(vec![("dns", db.obj(vec![("rules", db.arr(vec![rule]))]))])
+    });
+    let mut m = app_with(schema, doc, test_opts());
+    press(&mut m, &["/", "s", "e", "r", "v", "e", "r"]);
+    let idx = search_state(&m)
+        .results
+        .iter()
+        .position(|r| r.path == server_path && r.kind == RowKind::Field)
+        .expect("server key row in search results");
+    if let Some(Overlay::Search(s)) = &mut m.overlay {
+        s.cursor = idx;
+    }
+    press(&mut m, &["enter"]);
+    assert!(m.overlay.is_none());
+    assert_eq!(m.top().unwrap().kind, MenuKind::Object);
+    assert!(m.top().unwrap().one_of.is_some());
+    let row = row_at(&mut m);
+    assert_eq!(row.path, server_path);
+    assert_eq!(row.kind, RowKind::Drill);
+}
+
+#[test]
 fn t_on_variant_key_opens_picker() {
     // scalar value: t switches without entering the inline editor
     let schema = scalar_one_of_schema();
@@ -4886,8 +5175,11 @@ fn variant_picker_cursor_on_current_value() {
         test_opts(),
     );
     press(&mut m3, &["/", "c", "i", "d", "r", "enter"]);
-    assert_eq!(m3.top().unwrap().kind, MenuKind::Items);
-    assert!(m3.top().unwrap().one_of.is_some());
+    assert_eq!(
+        m3.top().unwrap().kind,
+        MenuKind::Object,
+        "search jump stays on the variant key row"
+    );
     press(&mut m3, &["t"]);
     assert_eq!(m3.top().unwrap().kind, MenuKind::OneOf);
     assert_eq!(m3.top().unwrap().cursor, 1);

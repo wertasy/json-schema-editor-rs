@@ -3046,9 +3046,36 @@ impl App {
     }
 
     /// jumpToPath rebuilds the navigation stack down to path (search-jump
-    /// semantics).
+    /// semantics). A oneOf key with a known value lands on its row in the
+    /// parent menu instead of rebuilding the old variant picker beneath it.
     pub fn jump_to_path(&mut self, path: &[PathSeg]) {
         self.reveal_hidden_empty(path);
+        if !path.is_empty() {
+            let parent = path[..path.len() - 1].to_vec();
+            let stack = {
+                let f = &mut self.files[self.cur];
+                rebuild_stack(&mut f.schema, &f.doc, &parent)
+            };
+            self.fs_mut().stack = stack;
+            let rows = self.menu_rows();
+            let variant_key = {
+                let f = &self.fs();
+                rows.iter().any(|r| {
+                    r.path == path
+                        && r.fn_.map_or(false, |fn_| {
+                            f.schema.nodes[fn_ as usize].kind == Kind::OneOf
+                        })
+                })
+            };
+            if variant_key {
+                self.clamp_cursor(&rows);
+                if let Some(st) = self.top_mut() {
+                    st.cursor = cursor_by_path(&rows, path);
+                    st.offset = 0;
+                }
+                return;
+            }
+        }
         let stack = {
             let f = &mut self.files[self.cur];
             rebuild_stack(&mut f.schema, &f.doc, path)
@@ -4463,9 +4490,23 @@ impl App {
                 self.fs_mut().jump_origin = None;
                 self.fs_mut().jump_return = 0;
                 self.nav_forward();
+                // A variant key is a row in its parent menu: jumping to it
+                // must stop there, not rebuild the oneOf picker underneath.
+                let jump_path = {
+                    let f = &self.files[self.cur];
+                    match res.fn_ {
+                        Some(fn_)
+                            if f.schema.nodes[fn_ as usize].kind == Kind::OneOf
+                                && matches!(res.kind, RowKind::Field | RowKind::Drill) =>
+                        {
+                            res.path[..res.path.len().saturating_sub(1)].to_vec()
+                        }
+                        _ => res.path.clone(),
+                    }
+                };
                 let stack = {
                     let f = &mut self.files[self.cur];
-                    rebuild_stack(&mut f.schema, &f.doc, &res.path)
+                    rebuild_stack(&mut f.schema, &f.doc, &jump_path)
                 };
                 self.fs_mut().stack = stack;
                 let rows = self.menu_rows();
