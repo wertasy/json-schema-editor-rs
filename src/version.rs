@@ -4,7 +4,10 @@
 
 /// Constants injected by build.rs into $OUT_DIR/version_info.rs: the
 /// ldflags-equivalent version stamp plus the VCS revision and build time
-/// (sentinels "none"/"unknown" when built outside a git checkout).
+/// (sentinels "none"/"unknown" when built outside a git checkout). The
+/// version mirrors Go's build-info derivation: an exact tag, a git
+/// pseudo-version (`v0.3.1-0.<commit time>-<revision>`), or the crate version
+/// outside git, with `+dirty` when the worktree is uncommitted.
 mod meta {
     include!(concat!(env!("OUT_DIR"), "/version_info.rs"));
 }

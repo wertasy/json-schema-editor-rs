@@ -17,6 +17,10 @@ mod catalog_tests;
 mod fetch_tests;
 #[cfg(test)]
 mod validate_tests;
+// Build-time-only helper (included by build.rs); tests live in the file.
+#[cfg(test)]
+#[path = "vcsver.rs"]
+mod vcsver;
 
 use std::io::IsTerminal;
 use std::path::Path;
