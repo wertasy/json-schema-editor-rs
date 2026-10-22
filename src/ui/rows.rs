@@ -1793,26 +1793,35 @@ pub fn search_index(schema: &mut Schema, doc: &Doc, st: &MenuState) -> Vec<Row> 
                 let val = doc.get(path);
                 let has_val = matches!(val, Some(v) if !is_null(doc, v));
                 let mut variants = schema.nodes[fn_ as usize].variants.clone();
+                let mut matched: Vec<FormNodeId> = Vec::new();
+                let mut pinned: Option<FormNodeId> = None;
                 // A dynamic menu (every leaf an object, eventually after
                 // nested oneOf groups) flattens the leaves: the merged menu
                 // indexes those, while a top-level group node has no
                 // children and would make every document key look unknown.
                 if let Some(cands) = dynamic_variants(schema, fn_) {
-                    let matched = if has_val {
-                        match_variant_list(schema, &cands, doc, val)
-                    } else {
-                        Vec::new()
-                    };
-                    variants = if matched.len() == 1 {
-                        matched // pinned variant menu
-                    } else {
-                        cands // merged menu
-                    };
-                } else if has_val {
-                    let matched = match_variant_list(schema, &variants, doc, val);
-                    if matched.len() == 1 {
-                        variants = matched;
+                    if has_val {
+                        matched = match_variant_list(schema, &cands, doc, val);
                     }
+                    if matched.len() == 1 {
+                        pinned = Some(matched[0]); // pinned variant menu
+                    } else {
+                        variants = cands; // merged menu
+                    }
+                } else if has_val {
+                    matched = match_variant_list(schema, &variants, doc, val);
+                    if matched.len() == 1 {
+                        pinned = Some(matched[0]);
+                    }
+                }
+                if let Some(v) = pinned {
+                    // The value fits exactly one variant: walk it as the
+                    // value at this path. An object variant indexes its
+                    // fields; a container variant (anyOf string|array, as in
+                    // sing-box route.rules[].rule_set) indexes its elements
+                    // instead of pretending to have fields of its own.
+                    walk(schema, doc, synth, out, seen, v, path);
+                    return;
                 }
                 let mut known: HashSet<String> = HashSet::new();
                 for &v in &variants {
@@ -1840,6 +1849,17 @@ pub fn search_index(schema: &mut Schema, doc: &Doc, st: &MenuState) -> Vec<Row> 
                     }
                 }
                 unknown_rows(schema, doc, path, &known, seen, out);
+                // Matched variants that are containers have no fields to
+                // union; an array value still has elements. Walk the first
+                // matched array variant (the candidates describe the same
+                // value, so one walk is enough) to keep them searchable.
+                if let Some(v) = matched
+                    .iter()
+                    .copied()
+                    .find(|&v| schema.nodes[v as usize].kind == Kind::Array)
+                {
+                    walk(schema, doc, synth, out, seen, v, path);
+                }
             }
             Kind::Map => {
                 // every document key is a known member; values index
@@ -1877,33 +1897,45 @@ pub fn search_index(schema: &mut Schema, doc: &Doc, st: &MenuState) -> Vec<Row> 
                 }
             }
             Kind::Array => {
-                let items = match schema.nodes[fn_ as usize].items {
-                    Some(items) => items,
-                    None => return,
-                };
-                if schema.nodes[items as usize].kind == Kind::Enum {
-                    return;
-                }
-                // only actual items are searchable; schema-only indexes
-                // would create paths whose parent does not exist
+                let items = schema.nodes[fn_ as usize].items;
+                // Only actual items are searchable; schema-only indexes
+                // would create paths whose parent does not exist. Enum items
+                // are document values too (the toggle menu edits the array,
+                // not the schema), and an item without its own schema —
+                // missing `items`, or a nested array degraded to Raw — is
+                // still a value: index it (and everything below it) raw.
                 let n = doc_array_len(doc, path);
                 for i in 0..n {
                     let ipath = path_idx(path, i);
+                    let (item_fn, raw) = match items {
+                        Some(it) => (it, schema.nodes[it as usize].kind == Kind::Raw),
+                        None => (fallback_raw_id(schema, synth, fn_), true),
+                    };
+                    let kind = if menu_leaf(schema, item_fn) {
+                        RowKind::Field
+                    } else {
+                        RowKind::Drill
+                    };
+                    let overview = if raw {
+                        raw_value_summary(schema, doc, &ipath)
+                    } else {
+                        summary_raw(schema, doc, item_fn, &ipath)
+                    };
                     out.push(Row {
-                        kind: RowKind::Drill,
-                        fn_: Some(items),
+                        kind,
+                        fn_: Some(item_fn),
                         path: ipath.clone(),
                         idx: -1,
-                        label: format!(
-                            "{}  {}",
-                            path_string(&ipath),
-                            summary_raw(schema, doc, items, &ipath)
-                        ),
+                        label: format!("{}  {}", path_string(&ipath), overview),
                         ..Row::default()
                     });
-                    walk(schema, doc, synth, out, seen, items, &ipath);
+                    walk(schema, doc, synth, out, seen, item_fn, &ipath);
                 }
             }
+            // A node the form layer could not model (boolean schema,
+            // recursive $ref, unsupported shape) still has a document value:
+            // index everything below it raw, like an unknown key's value.
+            Kind::Raw => unknown_value_rows(schema, doc, path, doc.get(path), seen, out),
             _ => {}
         }
     }
@@ -4878,5 +4910,270 @@ mod tests {
                 "replace hit {want:?} missing: {hit_paths:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_search_index_container_variant_elements() {
+        // `anyOf: [string, array[string]]` is one value with two shapes: the
+        // matched array variant must be walked as the value itself, so its
+        // elements stay searchable (sing-box route.rules[].rule_set)
+        let schema_src = r#"{
+          "type": "object",
+          "properties": {
+            "rule_set": {"anyOf": [
+              {"type": "string"},
+              {"type": "array", "items": {"type": "string"}}
+            ]}
+          }
+        }"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join("schema.json");
+        std::fs::write(&p, schema_src).expect("schema write");
+        let mut schema = crate::smodel::load(p.to_str().expect("path")).expect("schema load");
+        let doc = dbuild(|db| {
+            db.obj(vec![(
+                "rule_set",
+                db.arr(vec![db.s("ruleset-proxy-ai"), db.s("ruleset-proxy-github")]),
+            )])
+        });
+        let st = root_state(&schema);
+        let all = search_index(&mut schema, &doc, &st);
+        let labels: Vec<&str> = all.iter().map(|r| r.label.as_str()).collect();
+        assert!(
+            labels.contains(&"$.rule_set[0]  ruleset-proxy-ai")
+                && labels.contains(&"$.rule_set[1]  ruleset-proxy-github"),
+            "array variant elements missing: {labels:?}"
+        );
+        let opts = test_opts();
+        let cache = HashMap::new();
+        let ctx = MenuCtx {
+            schema: &schema,
+            doc: &doc,
+            opts: &opts,
+            menu_cache: &cache,
+            hide_empty: false,
+        };
+        assert_eq!(
+            filter_search(&ctx, &all, "ruleset-proxy-github", true, None).len(),
+            1,
+            "the element value must match"
+        );
+    }
+
+    #[test]
+    fn test_search_index_array_elements() {
+        // every document element is searchable, whatever shape its schema
+        // has: enum items, missing items, nested arrays (degraded to Raw) and
+        // plain object items
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join("schema.json");
+        std::fs::write(
+            &p,
+            r#"{
+              "type": "object",
+              "properties": {
+                "levels": {"type": "array", "items": {"type": "string", "enum": ["debug", "info"]}},
+                "free": {"type": "array"},
+                "matrix": {"type": "array", "items": {"type": "array", "items": {"type": "integer"}}},
+                "mounts": {"type": "array", "items": {"type": "object", "properties": {"src": {"type": "string"}}}}
+              }
+            }"#,
+        )
+        .expect("schema write");
+        let mut schema = crate::smodel::load(p.to_str().expect("path")).expect("schema load");
+        let doc = dbuild(|db| {
+            db.obj(vec![
+                ("levels", db.arr(vec![db.s("debug"), db.s("info")])),
+                (
+                    "free",
+                    db.arr(vec![db.s("alpha"), db.obj(vec![("k", db.n("7"))])]),
+                ),
+                ("matrix", db.arr(vec![db.arr(vec![db.n("1"), db.n("2")])])),
+                ("mounts", db.arr(vec![db.obj(vec![("src", db.s("/data"))])])),
+            ])
+        });
+        let st = root_state(&schema);
+        let all = search_index(&mut schema, &doc, &st);
+        let labels: Vec<&str> = all.iter().map(|r| r.label.as_str()).collect();
+
+        // enum items are document values, not schema-only options
+        assert!(
+            labels.contains(&"$.levels[0]  debug") && labels.contains(&"$.levels[1]  info"),
+            "enum array elements missing: {labels:?}"
+        );
+        // no items schema: element rows plus nested values, indexed raw
+        assert!(
+            labels.contains(&"$.free[0]  alpha")
+                && labels.contains(&"$.free[1]  k=7")
+                && labels.contains(&"$.free[1].k  7"),
+            "schema-less array elements missing: {labels:?}"
+        );
+        // nested arrays degrade to Raw; the inner elements stay searchable
+        assert!(
+            labels.contains(&"$.matrix[0]  2 items")
+                && labels.contains(&"$.matrix[0][0]  1")
+                && labels.contains(&"$.matrix[0][1]  2"),
+            "nested array elements missing: {labels:?}"
+        );
+        // object items keep their per-field rows
+        assert!(
+            labels.contains(&"$.mounts[0].src  /data"),
+            "object item fields missing: {labels:?}"
+        );
+
+        // the new rows are ordinary text matches
+        let opts = test_opts();
+        let cache = HashMap::new();
+        let ctx = MenuCtx {
+            schema: &schema,
+            doc: &doc,
+            opts: &opts,
+            menu_cache: &cache,
+            hide_empty: false,
+        };
+        for q in ["info", "alpha", "7", "/data"] {
+            assert!(
+                !filter_search(&ctx, &all, q, true, None).is_empty(),
+                "filter {q:?} found no array element row"
+            );
+        }
+    }
+
+    #[test]
+    fn test_search_index_raw_value_subtrees() {
+        // a node the form layer degrades to Raw is edited as one blob, but
+        // its nested values must still be searchable: object children and
+        // map values include everything below the raw node
+        let mut b = TB::new();
+        let extra = b.id(fnode("extra", "Extra", Kind::Raw));
+        let env = b.id(FormNode {
+            key: "env".into(),
+            title: "Env".into(),
+            kind: Kind::Map,
+            ..FormNode::default()
+        });
+        let root = b.id(FormNode {
+            key: "$".into(),
+            title: "$".into(),
+            kind: Kind::Object,
+            children: vec![extra, env],
+            ..FormNode::default()
+        });
+        b.root = root;
+        let mut schema = b.finish();
+        let doc = dbuild(|db| {
+            db.obj(vec![
+                (
+                    "extra",
+                    db.obj(vec![
+                        ("note", db.s("needle")),
+                        ("items", db.arr(vec![db.obj(vec![("name", db.s("deep"))])])),
+                    ]),
+                ),
+                (
+                    "env",
+                    db.obj(vec![("A", db.obj(vec![("deep", db.s("hidden"))]))]),
+                ),
+            ])
+        });
+        let st = root_state(&schema);
+        let all = search_index(&mut schema, &doc, &st);
+        let labels: Vec<&str> = all.iter().map(|r| r.label.as_str()).collect();
+        assert!(
+            labels.contains(&"$.extra.note  needle")
+                && labels.contains(&"$.extra.items[0].name  deep"),
+            "raw child subtree missing: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"$.env.A.deep  hidden"),
+            "raw map value subtree missing: {labels:?}"
+        );
+        let opts = test_opts();
+        let cache = HashMap::new();
+        let ctx = MenuCtx {
+            schema: &schema,
+            doc: &doc,
+            opts: &opts,
+            menu_cache: &cache,
+            hide_empty: false,
+        };
+        for q in ["needle", "deep", "hidden"] {
+            assert!(
+                !filter_search(&ctx, &all, q, true, None).is_empty(),
+                "filter {q:?} found no raw subtree row"
+            );
+        }
+    }
+
+    #[test]
+    fn test_search_index_recursive_raw_field() {
+        // a recursive $ref degrades the inner field to Raw ("edit as JSON");
+        // values inside that raw subtree must still be searchable
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join("schema.json");
+        std::fs::write(
+            &p,
+            r##"{
+              "type": "object",
+              "properties": {"node": {"$ref": "#/$defs/Node"}},
+              "$defs": {
+                "Node": {
+                  "type": "object",
+                  "properties": {
+                    "name": {"type": "string"},
+                    "child": {"$ref": "#/$defs/Node"}
+                  }
+                }
+              }
+            }"##,
+        )
+        .expect("schema write");
+        let mut schema = crate::smodel::load(p.to_str().expect("path")).expect("schema load");
+        let doc = dbuild(|db| {
+            db.obj(vec![(
+                "node",
+                db.obj(vec![
+                    ("name", db.s("root")),
+                    ("child", db.obj(vec![("name", db.s("needle"))])),
+                ]),
+            )])
+        });
+        let st = root_state(&schema);
+        let all = search_index(&mut schema, &doc, &st);
+        let labels: Vec<&str> = all.iter().map(|r| r.label.as_str()).collect();
+        assert!(
+            labels.contains(&"$.node.child.name  needle"),
+            "recursive raw subtree missing: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn test_search_index_multi_match_array_variants() {
+        // two array variants both match the value (a tie): the union has no
+        // object fields to merge, so the elements must still be indexed
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join("schema.json");
+        std::fs::write(
+            &p,
+            r#"{
+              "type": "object",
+              "properties": {
+                "ids": {"anyOf": [
+                  {"type": "array", "items": {"type": "string"}},
+                  {"type": "array", "items": {"type": "string"}, "minItems": 1}
+                ]}
+              }
+            }"#,
+        )
+        .expect("schema write");
+        let mut schema = crate::smodel::load(p.to_str().expect("path")).expect("schema load");
+        let doc = dbuild(|db| db.obj(vec![("ids", db.arr(vec![db.s("x"), db.s("y")]))]));
+        let st = root_state(&schema);
+        let all = search_index(&mut schema, &doc, &st);
+        let labels: Vec<&str> = all.iter().map(|r| r.label.as_str()).collect();
+        assert!(
+            labels.contains(&"$.ids[0]  x") && labels.contains(&"$.ids[1]  y"),
+            "multi-match array variant elements missing: {labels:?}"
+        );
     }
 }

@@ -22,9 +22,9 @@ use crate::ui::menu::{
     EditState, ErrsState, ExternalEdit, FastMoveState, FilePickState, IssuesState, MergeState, Msg,
     Overlay, RefPickState, SearchState, SelState, TextState, WriteState, anchor_defs,
     anchor_holder, anchor_holder_path, anchor_merge_use_paths, anchor_role, copy_detached_from_doc,
-    copy_from_doc, count_anchor_uses, cursor_by_path, cursor_for_row, cursor_prefix,
-    is_path_prefix, merge_ref_uses, nodes_equal_doc, page_delta, read_clipboard, ref_would_cycle,
-    remap_state_cursor, vertical_delta, write_clipboard,
+    copy_from_doc, count_anchor_uses, cursor_ancestor, cursor_by_path, cursor_for_row,
+    cursor_prefix, is_path_prefix, merge_ref_uses, nodes_equal, nodes_equal_doc, page_delta,
+    read_clipboard, ref_would_cycle, remap_state_cursor, vertical_delta, write_clipboard,
 };
 use crate::ui::rows::{
     SynthKey, any_type_menu, clip_runes, current_variant, display_title, doc_array_len,
@@ -5213,7 +5213,10 @@ impl App {
                 self.fs_mut().stack = stack;
                 let rows = self.menu_rows();
                 self.clamp_cursor(&rows);
-                if let Some(idx) = cursor_for_row(&rows, &res) {
+                let target = cursor_for_row(&rows, &res)
+                    .or_else(|| self.enum_array_cursor(&rows, &res))
+                    .or_else(|| cursor_ancestor(&rows, &res.path));
+                if let Some(idx) = target {
                     if let Some(st) = self.top_mut() {
                         st.cursor = idx;
                         st.offset = 0;
@@ -5238,6 +5241,26 @@ impl App {
         }
         self.refilter(&mut s);
         Some(Overlay::Search(s))
+    }
+
+    /// enum_array_cursor finds the toggle row a search hit points at: an
+    /// enum-array menu has one toggle per schema option, so the document
+    /// element's value picks the row (not the element's index).
+    fn enum_array_cursor(&self, rows: &[Row], res: &Row) -> Option<usize> {
+        let st = self.top()?;
+        if st.kind != MenuKind::EnumArray {
+            return None;
+        }
+        let schema = &self.fs().schema;
+        let items = schema.nodes[st.node as usize].items?;
+        let doc = self.doc();
+        let val = doc.get(&res.path)?;
+        let oi = schema.nodes[items as usize]
+            .enum_
+            .iter()
+            .position(|o| nodes_equal(&schema.doc, Some(o.val), doc, Some(val)))?;
+        rows.iter()
+            .position(|r| r.kind == RowKind::Toggle && r.idx == oi as i64)
     }
 
     /// search_page_size mirrors render_search_body's result area.

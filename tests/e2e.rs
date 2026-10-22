@@ -1434,6 +1434,141 @@ fn pty_search_jump_into_array_variant() {
 }
 
 #[test]
+fn pty_search_enum_array_element_jump() {
+    // enum-array elements are document values: a document search lists them
+    // and lands in the toggle menu on the matching row
+    let dir = mktemp();
+    let schema = dir.path().join("levels.schema.json");
+    let cfg = dir.path().join("levels.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{
+		"levels":{"type":"array","title":"Levels",
+			"items":{"enum":["debug","info","warn"]}}}}"#,
+    );
+    write_file(&cfg, r#"{"levels":["debug","info"]}"#);
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+        return;
+    };
+
+    pty.wait_frame("root menu", 0, &["Save and exit"]);
+    pty.send(b"/");
+    let (_, off) = pty.wait_frame("search", 0, &["search: "]);
+    pty.send(b"info");
+    let (_, off) = pty.wait_frame("enum element hit", off, &["$.levels[1]  info"]);
+    pty.send(b"\r");
+    pty.wait_frame(
+        "toggle menu focused on info",
+        off,
+        &["$.levels", "> [x] info"],
+    );
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+}
+
+#[test]
+fn pty_search_schemaless_array_elements_jump() {
+    // arrays without `items` and nested arrays have no per-element menu; the
+    // elements (and nested values) are still searchable and the jump lands
+    // on the field that owns the raw subtree
+    let dir = mktemp();
+    let schema = dir.path().join("free.schema.json");
+    let cfg = dir.path().join("free.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{
+		"free":{"type":"array","title":"Free"},
+		"matrix":{"type":"array","title":"Matrix",
+			"items":{"type":"array","items":{"type":"integer"}}}}}"#,
+    );
+    write_file(&cfg, r#"{"free":["alpha","beta"],"matrix":[[1,2],[3,4]]}"#);
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+        return;
+    };
+
+    pty.wait_frame("root menu", 0, &["Save and exit"]);
+    pty.send(b"/");
+    let (_, mut off) = pty.wait_frame("search", 0, &["search: "]);
+    pty.send(b"alpha");
+    (_, off) = pty.wait_frame("free element hit", off, &["$.free[0]  alpha"]);
+    pty.send(b"\r");
+    let (_, mut off) = pty.wait_frame("cursor on the free field", off, &["> Free"]);
+
+    pty.send(b"/");
+    (_, off) = pty.wait_frame("second search", off, &["search: "]);
+    pty.send(b"3");
+    (_, off) = pty.wait_frame("nested element hit", off, &["$.matrix[1][0]  3"]);
+    pty.send(b"\r");
+    pty.wait_frame("cursor on the matrix field", off, &["> Matrix"]);
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+}
+
+#[test]
+fn pty_search_array_variant_elements_jump() {
+    // sing-box route.rules[].rule_set: an anyOf string|array field inside a
+    // oneOf item; the array elements must be searchable and jump into the
+    // items menu
+    let dir = mktemp();
+    let schema = dir.path().join("rules.schema.json");
+    let cfg = dir.path().join("config.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{
+		"route":{"type":"object","properties":{
+			"rules":{"type":"array","items":{"oneOf":[
+				{"title":"DefaultRule","type":"object","properties":{
+					"type":{"type":"string","enum":["default"]},
+					"rule_set":{"anyOf":[
+						{"type":"string"},
+						{"type":"array","items":{"type":"string"}}]},
+					"outbound":{"type":"string"}}},
+				{"title":"LogicalRule","type":"object","properties":{
+					"type":{"const":"logical"},
+					"mode":{"type":"string","enum":["and","or"]}}}]}},
+			"rule_set":{"type":"array","items":{"type":"object","properties":{
+				"tag":{"type":"string"}}}}}}}}"#,
+    );
+    write_file(
+        &cfg,
+        r#"{"route":{"rules":[{"type":"default","rule_set":["ruleset-proxy-ai","ruleset-proxy-github"],"outbound":"proxy"}],"rule_set":[{"tag":"ruleset-proxy-ai"}]}}"#,
+    );
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+        return;
+    };
+
+    pty.wait_frame("root menu", 0, &["Save and exit"]);
+    pty.send(b"/");
+    let (_, off) = pty.wait_frame("search", 0, &["search: "]);
+    pty.send(b"ruleset-proxy-ai");
+    let (_, off) = pty.wait_frame(
+        "element and tag hits",
+        off,
+        &[
+            "$.route.rules[0].rule_set[0]  ruleset-proxy-ai",
+            "$.route.rule_set[0].tag  ruleset-proxy-ai",
+        ],
+    );
+    pty.send(b"\r");
+    pty.wait_frame(
+        "rule_set items menu focused on element 0",
+        off,
+        &["$.route.rules[0].rule_set", "> rule_set[0]"],
+    );
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+}
+
+#[test]
 fn pty_quit_save_prompt() {
     let dir = mktemp();
     let schema = dir.path().join("mini.schema.json");

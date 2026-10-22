@@ -1595,6 +1595,28 @@ pub fn cursor_by_path(rows: &[Row], path: &[PathSeg]) -> usize {
     bi
 }
 
+/// cursorAncestor finds the deepest row whose path is a strict prefix of
+/// path: the nearest editable ancestor of a value the menu cannot show as a
+/// row. Used by search jumps into schema-less array items (raw `items`, no
+/// `items` at all), where neither the item nor its subpaths have rows of
+/// their own.
+pub fn cursor_ancestor(rows: &[Row], path: &[PathSeg]) -> Option<usize> {
+    let mut best = 0usize;
+    let mut bi: Option<usize> = None;
+    for (i, r) in rows.iter().enumerate() {
+        if r.path.is_empty()
+            || r.path.len() >= path.len()
+            || !is_path_prefix(&r.path, path)
+            || (bi.is_some() && r.path.len() <= best)
+        {
+            continue;
+        }
+        best = r.path.len();
+        bi = Some(i);
+    }
+    bi
+}
+
 /// cursorForRow finds the row matching a search hit (same schema node at the
 /// same path, or the same variant); None when the target is a container
 /// whose menu we entered.

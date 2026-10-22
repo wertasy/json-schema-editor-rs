@@ -5738,6 +5738,141 @@ fn search_jump_to_array_item_variant_field() {
 }
 
 #[test]
+fn search_jump_to_enum_array_element() {
+    // enum-array elements are document values; the jump lands in the toggle
+    // menu on the row of that value
+    let schema = schema_from_json(
+        r#"{
+          "type": "object",
+          "properties": {
+            "levels": {"type": "array", "items": {"type": "string", "enum": ["debug", "info", "warn"]}}
+          }
+        }"#,
+    );
+    let doc = dbuild(|db| db.obj(vec![("levels", db.arr(vec![db.s("debug"), db.s("info")]))]));
+    let mut m = app_with(schema, doc, test_opts());
+    press(&mut m, &["/", "i", "n", "f", "o"]);
+    let want = vec![ks("levels"), PathSeg::Idx(1)];
+    let idx = search_state(&m)
+        .results
+        .iter()
+        .position(|r| r.path == want)
+        .expect("levels[1] search row");
+    if let Some(Overlay::Search(s)) = &mut m.overlay {
+        s.cursor = idx;
+    }
+    press(&mut m, &["enter"]);
+    assert!(m.overlay.is_none());
+    assert_eq!(m.top().unwrap().kind, MenuKind::EnumArray);
+    assert_eq!(m.top().unwrap().path, vec![ks("levels")]);
+    let row = row_at(&mut m);
+    assert_eq!(row.kind, RowKind::Toggle);
+    assert_eq!(row.idx, 1, "cursor lands on the info toggle");
+}
+
+#[test]
+fn search_jump_to_schemaless_array_element() {
+    // arrays without `items` (and nested arrays degraded to Raw) have no
+    // per-element rows: the jump lands on the nearest editable row — the
+    // array field itself — instead of leaving a stale cursor position
+    let schema = schema_from_json(
+        r#"{
+          "type": "object",
+          "properties": {
+            "free": {"type": "array"},
+            "matrix": {"type": "array", "items": {"type": "array", "items": {"type": "integer"}}}
+          }
+        }"#,
+    );
+    let doc = dbuild(|db| {
+        db.obj(vec![
+            ("free", db.arr(vec![db.s("alpha"), db.s("beta")])),
+            ("matrix", db.arr(vec![db.arr(vec![db.n("1"), db.n("2")])])),
+        ])
+    });
+    let mut m = app_with(schema, doc, test_opts());
+    press(&mut m, &["/", "a", "l", "p", "h", "a"]);
+    let want = vec![ks("free"), PathSeg::Idx(0)];
+    let idx = search_state(&m)
+        .results
+        .iter()
+        .position(|r| r.path == want)
+        .expect("free[0] search row");
+    if let Some(Overlay::Search(s)) = &mut m.overlay {
+        s.cursor = idx;
+    }
+    press(&mut m, &["enter"]);
+    assert!(m.overlay.is_none());
+    assert_eq!(m.top().unwrap().kind, MenuKind::Object);
+    assert_eq!(
+        row_at(&mut m).path,
+        vec![ks("free")],
+        "cursor on the array field"
+    );
+
+    // nested array elements are indexed too; their jump also lands on the
+    // field that owns the raw subtree
+    press(&mut m, &["/", "2"]);
+    let want = vec![ks("matrix"), PathSeg::Idx(0), PathSeg::Idx(1)];
+    let idx = search_state(&m)
+        .results
+        .iter()
+        .position(|r| r.path == want)
+        .expect("matrix[0][1] search row");
+    if let Some(Overlay::Search(s)) = &mut m.overlay {
+        s.cursor = idx;
+    }
+    press(&mut m, &["enter"]);
+    assert!(m.overlay.is_none());
+    assert_eq!(
+        row_at(&mut m).path,
+        vec![ks("matrix")],
+        "cursor on the nested array field"
+    );
+}
+
+#[test]
+fn search_jump_to_array_variant_element() {
+    // anyOf string|array: a document array matches the array variant, so its
+    // elements are indexed and the jump opens the items menu on the element
+    let schema = schema_from_json(
+        r#"{
+          "type": "object",
+          "properties": {
+            "rule_set": {"anyOf": [
+              {"type": "string"},
+              {"type": "array", "items": {"type": "string"}}
+            ]}
+          }
+        }"#,
+    );
+    let doc = dbuild(|db| {
+        db.obj(vec![(
+            "rule_set",
+            db.arr(vec![db.s("ruleset-proxy-ai"), db.s("ruleset-proxy-github")]),
+        )])
+    });
+    let mut m = app_with(schema, doc, test_opts());
+    press(&mut m, &["/", "g", "i", "t", "h", "u", "b"]);
+    let want = vec![ks("rule_set"), PathSeg::Idx(1)];
+    let idx = search_state(&m)
+        .results
+        .iter()
+        .position(|r| r.path == want)
+        .expect("rule_set[1] search row");
+    if let Some(Overlay::Search(s)) = &mut m.overlay {
+        s.cursor = idx;
+    }
+    press(&mut m, &["enter"]);
+    assert!(m.overlay.is_none());
+    assert_eq!(m.top().unwrap().kind, MenuKind::Items);
+    assert_eq!(m.top().unwrap().path, vec![ks("rule_set")]);
+    let row = row_at(&mut m);
+    assert_eq!(row.path, want);
+    assert_eq!(row.kind, RowKind::Field);
+}
+
+#[test]
 fn search_jump_to_union_discriminator_field() {
     // sing-box Rule shape: nested oneOf groups flatten to object leaves.
     // "sniff" matches two leaves, so the item menu is the merged menu and
