@@ -187,6 +187,14 @@ impl App {
             "down" | "j" | "ctrl+j" => {
                 cursor = wrap_cursor(cursor, 1, n);
             }
+            "pgdown" | "ctrl+f" => {
+                let page = self.height.saturating_sub(2).max(1);
+                cursor = (cursor + page).min(n.saturating_sub(1));
+            }
+            "pgup" | "ctrl+b" => {
+                let page = self.height.saturating_sub(2).max(1);
+                cursor = cursor.saturating_sub(page);
+            }
             "enter" => {
                 self.file_pick = None;
                 self.switch_to_file(cursor);

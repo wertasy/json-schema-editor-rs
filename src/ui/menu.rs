@@ -121,6 +121,10 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
         desc: "move (wraps at both ends; ctrl+j/k in search and issues)",
     },
     HelpEntry {
+        keys: "ctrl+f / pgdown, ctrl+b / pgup",
+        desc: "page down / up (menus, list overlays, comment and help pages)",
+    },
+    HelpEntry {
         keys: "n / N / ctrl+j / ctrl+k",
         desc: "next / previous key with a non-null value",
     },
@@ -294,6 +298,8 @@ pub enum Msg {
     Right,
     Home,
     End,
+    PageUp,
+    PageDown,
     Ctrl(char),
     /// bracketed paste text
     Paste(String),
@@ -319,6 +325,8 @@ impl Msg {
             Msg::Right => "right".to_string(),
             Msg::Home => "home".to_string(),
             Msg::End => "end".to_string(),
+            Msg::PageUp => "pgup".to_string(),
+            Msg::PageDown => "pgdown".to_string(),
             Msg::Ctrl(c) => format!("ctrl+{}", c),
             Msg::Paste(_) => String::new(),
         }
@@ -350,6 +358,17 @@ pub fn vertical_delta(msg: &Msg) -> Option<i64> {
         Msg::Down => Some(1),
         Msg::Char('k', false) => Some(-1),
         Msg::Char('j', false) => Some(1),
+        _ => None,
+    }
+}
+
+/// page_delta classifies the keys that move a list cursor or page scroll by
+/// one screenful: ctrl+f/PgDn forward, ctrl+b/PgUp backward. Like
+/// vertical_delta it is side-effect free, so repeats can be coalesced.
+pub fn page_delta(msg: &Msg) -> Option<i64> {
+    match msg {
+        Msg::PageDown | Msg::Ctrl('f') => Some(1),
+        Msg::PageUp | Msg::Ctrl('b') => Some(-1),
         _ => None,
     }
 }
@@ -592,6 +611,8 @@ pub struct App {
     pub fast_move: Option<FastMoveState>,
     /// "?" keyboard-help overlay
     pub help: bool,
+    /// first help row shown by the "?" overlay
+    pub help_scroll: usize,
     /// z filter: hide object keys with no document value
     pub hide_empty: bool,
     /// c: the focused row's description is expanded inline. Any other key
@@ -635,6 +656,7 @@ impl App {
             overlay: None,
             fast_move: None,
             help: false,
+            help_scroll: 0,
             hide_empty: false,
             desc_expanded: false,
             notice: String::new(),
@@ -691,7 +713,9 @@ impl App {
     /// every other key pays. A 20k-row menu made that work dominate the
     /// per-repeat cost while a key was held.
     fn plain_motion(&self, msg: &Msg) -> bool {
-        self.overlay.is_none() && self.list_mode() && vertical_delta(msg).is_some()
+        self.overlay.is_none()
+            && self.list_mode()
+            && (vertical_delta(msg).is_some() || page_delta(msg).is_some())
     }
 
     fn inputs(&self) -> Inputs {
@@ -2023,6 +2047,8 @@ fn key_event_to_msg(key: KeyEvent) -> Option<Msg> {
         KeyCode::Right => Some(Msg::Right),
         KeyCode::Home => Some(Msg::Home),
         KeyCode::End => Some(Msg::End),
+        KeyCode::PageUp => Some(Msg::PageUp),
+        KeyCode::PageDown => Some(Msg::PageDown),
         _ => None,
     }
 }
@@ -2067,11 +2093,11 @@ pub fn run_menu(files: Vec<FileSession>) -> Outcome {
                         i += 1;
                         continue;
                     };
-                    // Consecutive identical vertical keys collapse into a
+                    // Consecutive identical motion keys collapse into a
                     // single move: replaying every repeat rebuilt the whole
                     // row list and repainted the whole menu.
                     let mut n = 1;
-                    if vertical_delta(&msg).is_some() {
+                    if vertical_delta(&msg).is_some() || page_delta(&msg).is_some() {
                         while i + n < events.len() {
                             match &events[i + n] {
                                 Event::Key(k2) if key_event_to_msg(*k2).as_ref() == Some(&msg) => {

@@ -330,6 +330,10 @@ fn key(k: &str) -> Msg {
         "delete" => Msg::Delete,
         "home" => Msg::Home,
         "end" => Msg::End,
+        "pgup" => Msg::PageUp,
+        "pgdown" => Msg::PageDown,
+        "ctrl+f" => Msg::Ctrl('f'),
+        "ctrl+b" => Msg::Ctrl('b'),
         "ctrl+c" => Msg::Ctrl('c'),
         "ctrl+j" => Msg::Ctrl('j'),
         "ctrl+k" => Msg::Ctrl('k'),
@@ -355,7 +359,7 @@ fn press(app: &mut App, keys: &[&str]) {
             "enter" | "esc" | "up" | "down" | "left" | "right" | "space" | "tab" | "shift+tab"
             | "backspace" | "delete" | "home" | "end" | "ctrl+c" | "ctrl+j" | "ctrl+k"
             | "ctrl+s" | "ctrl+r" | "ctrl+o" | "ctrl+i" | "ctrl+u" | "ctrl+n" | "ctrl+p"
-            | "alt+i" | "alt+x" => {
+            | "alt+i" | "alt+x" | "pgup" | "pgdown" | "ctrl+f" | "ctrl+b" => {
                 app.update(key(k));
             }
             _ => {
@@ -1077,6 +1081,31 @@ fn long_comment_opens_a_scrollable_page() {
     );
     assert!(view.contains("c/q/esc close"), "page hint missing:\n{view}");
 
+    // A page key jumps a full screen and clamps at the ends.
+    press(&mut m, &["pgdown"]);
+    match &m.overlay {
+        Some(Overlay::Comment(c)) => {
+            assert_eq!(c.scroll, 19);
+            assert!(m.view().contains("TAILMARK"));
+        }
+        _ => panic!("pgdown closed the comment page"),
+    }
+    press(&mut m, &["ctrl+b"]);
+    match &m.overlay {
+        Some(Overlay::Comment(c)) => assert_eq!(c.scroll, 0),
+        _ => panic!("ctrl+b closed the comment page"),
+    }
+    press(&mut m, &["ctrl+f"]);
+    match &m.overlay {
+        Some(Overlay::Comment(c)) => assert_eq!(c.scroll, 19),
+        _ => panic!("ctrl+f closed the comment page"),
+    }
+    press(&mut m, &["pgup"]);
+    match &m.overlay {
+        Some(Overlay::Comment(c)) => assert_eq!(c.scroll, 0),
+        _ => panic!("pgup closed the comment page"),
+    }
+
     for _ in 0..25 {
         press(&mut m, &["down"]);
     }
@@ -1101,6 +1130,60 @@ fn long_comment_opens_a_scrollable_page() {
     assert!(matches!(m.overlay, Some(Overlay::Comment(_))));
     press(&mut m, &["q"]);
     assert!(m.overlay.is_none(), "q must close the comment page");
+}
+
+#[test]
+fn page_keys_move_the_menu_cursor_one_screen() {
+    let mut props = serde_json::Map::new();
+    for i in 0..30 {
+        props.insert(format!("k{i:02}"), serde_json::json!({"type": "string"}));
+    }
+    let src = serde_json::json!({"type": "object", "properties": props});
+    let schema = schema_from_json(&src.to_string());
+    let mut m = app_with(schema, dbuild(|db| db.obj(vec![])), test_opts());
+    m.width = 80;
+    m.height = 12; // title + breadcrumb + bottom help leave 9 rows
+
+    press(&mut m, &["pgdown"]);
+    assert_eq!(m.top().unwrap().cursor, 9);
+    press(&mut m, &["ctrl+f"]);
+    assert_eq!(m.top().unwrap().cursor, 18);
+    press(&mut m, &["pgdown"]);
+    assert_eq!(m.top().unwrap().cursor, 27);
+    // no wrap at the end: stop on the last row
+    let last = m.menu_rows().len() - 1;
+    press(&mut m, &["pgdown"]);
+    assert_eq!(m.top().unwrap().cursor, last);
+    press(&mut m, &["pgup"]);
+    assert_eq!(m.top().unwrap().cursor, last - 9);
+    press(&mut m, &["ctrl+b"]);
+    assert_eq!(m.top().unwrap().cursor, last - 18);
+    // and no wrap at the top either
+    for _ in 0..3 {
+        press(&mut m, &["pgup"]);
+    }
+    assert_eq!(m.top().unwrap().cursor, 0);
+    // paging is motion only: the document is untouched and no undo step exists
+    assert!(!m.dirty());
+}
+
+#[test]
+fn help_page_scrolls_when_taller_than_the_screen() {
+    let mut m = app_with(test_schema(), test_doc(), test_opts());
+    m.width = 80;
+    m.height = 24;
+    press(&mut m, &["?"]);
+    assert!(m.help);
+    assert!(!m.view().contains("merge keys: merge anchors"));
+
+    press(&mut m, &["pgdown"]);
+    assert_eq!(m.help_scroll, 19, "one full help screen");
+    assert!(m.view().contains("merge keys: merge anchors"));
+
+    press(&mut m, &["pgup"]);
+    assert_eq!(m.help_scroll, 0);
+    press(&mut m, &["q"]);
+    assert!(!m.help, "q must close the help page");
 }
 
 #[test]

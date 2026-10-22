@@ -654,6 +654,13 @@ fn pty_long_comment_page_scrolls_and_closes() {
     pty.send(down.as_bytes());
     pty.wait_frame("scrolled comment page", off, &["COMMENT LINE 36"]);
 
+    // PgDn (CSI 6~) and ctrl+f page forward; ctrl+b and PgUp (CSI 5~) page
+    // back. Four screens run past both ends and clamp there.
+    pty.send(b"\x1b[6~\x1b[6~\x06\x06");
+    let (_, off) = pty.wait_frame("paged to the comment tail", off, &["COMMENT LINE 80"]);
+    pty.send(b"\x02\x02\x1b[5~\x1b[5~");
+    pty.wait_frame("paged back to the top", off, &["COMMENT LINE 01"]);
+
     pty.send(b"c");
     pty.wait_frame("menu after comment page", 0, &["Name", "Save and exit"]);
     pty.send(b"\x03");

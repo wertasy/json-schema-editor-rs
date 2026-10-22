@@ -23,7 +23,7 @@ use crate::ui::menu::{
     Overlay, RefPickState, SearchState, SelState, TextState, WriteState, anchor_defs,
     anchor_holder, anchor_holder_path, anchor_merge_use_paths, anchor_role, copy_detached_from_doc,
     copy_from_doc, count_anchor_uses, cursor_by_path, cursor_for_row, cursor_prefix,
-    is_path_prefix, merge_ref_uses, nodes_equal_doc, read_clipboard, ref_would_cycle,
+    is_path_prefix, merge_ref_uses, nodes_equal_doc, page_delta, read_clipboard, ref_would_cycle,
     remap_state_cursor, vertical_delta, write_clipboard,
 };
 use crate::ui::rows::{
@@ -63,6 +63,14 @@ fn buf_count(buf: &[String]) -> (usize, bool) {
         digits += 1;
     }
     (n, digits > 0)
+}
+
+/// page_cursor moves a list cursor by whole screenfuls, clamped to the first
+/// and last entry. Unlike j/k it does not wrap: a page step that runs past an
+/// end stops there.
+fn page_cursor(cur: usize, delta: i64, page: usize, n: usize) -> usize {
+    let last = n.saturating_sub(1);
+    (cur as i64 + delta * page as i64).clamp(0, last as i64) as usize
 }
 
 /// selKey renders a path as the selection map key; the s:/i: tags keep
@@ -758,12 +766,14 @@ impl App {
             self.update(msg);
             return;
         }
-        let Some(delta) = vertical_delta(&msg) else {
+        let page = page_delta(&msg);
+        let delta = vertical_delta(&msg);
+        if page.is_none() && delta.is_none() {
             for _ in 0..n {
                 self.update(msg.clone());
             }
             return;
-        };
+        }
         // Recording, text inputs and overlays keep one event per press.
         if self.recording || !self.list_mode() || self.overlay.is_some() {
             for _ in 0..n {
@@ -773,7 +783,37 @@ impl App {
         }
         self.notice.clear();
         self.fs_mut().startup.clear();
-        self.move_plain(delta * n as i64);
+        if let Some(page) = page {
+            self.move_page(page * n as i64);
+        } else if let Some(delta) = delta {
+            self.move_plain(delta * n as i64);
+        }
+    }
+
+    /// move_page moves the plain menu cursor one screenful, clamped at the
+    /// first/last row. The visible row count is the same one listView uses.
+    fn move_page(&mut self, delta: i64) {
+        let rows = self.menu_rows();
+        self.move_page_rows(delta, &rows);
+    }
+
+    fn move_page_rows(&mut self, delta: i64, rows: &[Row]) {
+        self.clamp_cursor(rows);
+        if rows.is_empty() {
+            return;
+        }
+        let page = match self.top().cloned() {
+            Some(st) => self.list_page_size(&st, rows),
+            None => return,
+        };
+        let cur = self.top().map(|st| st.cursor).unwrap_or(0);
+        let last = rows.len().saturating_sub(1);
+        let next = (cur as i64 + delta * page as i64).clamp(0, last as i64) as usize;
+        if let Some(st) = self.top_mut() {
+            st.cursor = next;
+        }
+        self.cmd_buf.clear(); // a jump drops a pending count
+        self.visual_sync(rows);
     }
 
     /// move_plain is the plain menu's vertical movement (key_list's j/k and
@@ -791,6 +831,43 @@ impl App {
         }
         self.cmd_buf.clear(); // jump_keys drops a pending count on a plain move
         self.visual_sync(&rows);
+    }
+
+    /// list_page_size is the number of list rows on screen. It mirrors the
+    /// height listView assigns to write_rows so a page move lands exactly one
+    /// visible screen away.
+    fn list_page_size(&self, st: &MenuState, rows: &[Row]) -> usize {
+        let (_title, summary) = self.menu_title(st);
+        let desc = self.focused_desc(st, rows);
+        let width = self.width.saturating_sub(1);
+        let desc_lines = if desc.is_empty() {
+            0
+        } else {
+            let full = wrap_text(&desc, width);
+            if self.desc_expanded {
+                full.len()
+            } else {
+                comment_preview(full, width).len()
+            }
+        };
+        let mut summary_lines = if summary.is_empty() {
+            0
+        } else {
+            wrap_text(&format!("variant: {}", summary), width).len()
+        };
+        if st.kind == MenuKind::OneOf && st.searching {
+            summary_lines += 1;
+        }
+        self.height
+            .saturating_sub(
+                2 + 1
+                    + desc_lines
+                    + summary_lines
+                    + self.status_lines().len()
+                    + usize::from(!self.notice.is_empty())
+                    + usize::from(self.hide_empty),
+            )
+            .max(1)
     }
 
     // --- schema switching (S) ----------------------------------------------
@@ -970,6 +1047,8 @@ impl App {
                 }
                 self.visual_sync(&rows);
             }
+            "pgdown" | "ctrl+f" => self.move_page_rows(1, &rows),
+            "pgup" | "ctrl+b" => self.move_page_rows(-1, &rows),
             "ctrl+j" | "n" => self.move_to_value(&rows, 1),
             "ctrl+k" | "N" => self.move_to_value(&rows, -1),
             "p" => self.paste_clipboard(&r, false),
@@ -1102,7 +1181,10 @@ impl App {
                 }
             }
             "c" => self.toggle_desc(&r, &rows),
-            "?" => self.help = true,
+            "?" => {
+                self.help = true;
+                self.help_scroll = 0;
+            }
             "/" => {
                 if st_kind == Some(MenuKind::OneOf) {
                     self.start_variant_search();
@@ -4166,8 +4248,19 @@ impl App {
 
     /// keyHelp drives the "?" keyboard-help overlay.
     pub fn key_help(&mut self, msg: &Msg) {
-        if matches!(msg.key_str().as_str(), "esc" | "q" | "?") {
-            self.help = false;
+        // title + blank line + bottom hint leave height-3 entry rows.
+        let page = self.height.saturating_sub(3).max(1);
+        let max_scroll = crate::ui::menu::HELP_ENTRIES.len().saturating_sub(page);
+        match msg.key_str().as_str() {
+            "esc" | "q" | "?" => {
+                self.help = false;
+                self.help_scroll = 0;
+            }
+            "up" | "k" => self.help_scroll = self.help_scroll.saturating_sub(1),
+            "down" | "j" => self.help_scroll = (self.help_scroll + 1).min(max_scroll),
+            "pgup" | "ctrl+b" => self.help_scroll = self.help_scroll.saturating_sub(page),
+            "pgdown" | "ctrl+f" => self.help_scroll = (self.help_scroll + page).min(max_scroll),
+            _ => {}
         }
     }
 
@@ -4179,6 +4272,14 @@ impl App {
         match msg.key_str().as_str() {
             "up" | "k" => s.cursor = wrap_cursor(s.cursor, -1, s.lines.len()),
             "down" | "j" => s.cursor = wrap_cursor(s.cursor, 1, s.lines.len()),
+            "pgdown" | "ctrl+f" => {
+                let page = self.height.saturating_sub(3).max(1);
+                s.cursor = page_cursor(s.cursor, 1, page, s.lines.len());
+            }
+            "pgup" | "ctrl+b" => {
+                let page = self.height.saturating_sub(3).max(1);
+                s.cursor = page_cursor(s.cursor, -1, page, s.lines.len());
+            }
             "enter" => {
                 if let Some(Some(path)) = s.paths.get(s.cursor) {
                     let path = path.clone();
@@ -4210,6 +4311,14 @@ impl App {
         match msg.key_str().as_str() {
             "up" | "k" | "ctrl+k" => s.cursor = wrap_cursor(s.cursor, -1, s.items.len()),
             "down" | "j" | "ctrl+j" => s.cursor = wrap_cursor(s.cursor, 1, s.items.len()),
+            "pgdown" | "ctrl+f" => {
+                let page = self.issues_page_size();
+                s.cursor = page_cursor(s.cursor, 1, page, s.items.len());
+            }
+            "pgup" | "ctrl+b" => {
+                let page = self.issues_page_size();
+                s.cursor = page_cursor(s.cursor, -1, page, s.items.len());
+            }
             "enter" => {
                 if let Some(path) = s.items.get(s.cursor).and_then(|it| it.path.clone()) {
                     // closing the list (this park cycle or a later one)
@@ -4234,6 +4343,15 @@ impl App {
         Some(Overlay::Issues(s))
     }
 
+    /// issues_page_size mirrors issues_view's item area.
+    fn issues_page_size(&self) -> usize {
+        let mut height = self.height.saturating_sub(3);
+        if !self.notice.is_empty() {
+            height = height.saturating_sub(1);
+        }
+        height.max(1)
+    }
+
     /// keyRefPick drives the gr picker (Go keyRefPick).
     pub fn key_ref_pick(&mut self, msg: Msg, mut s: RefPickState) -> Option<Overlay> {
         if self.jump_keys(&msg, &mut s.cursor, s.paths.len()) {
@@ -4242,6 +4360,14 @@ impl App {
         match msg.key_str().as_str() {
             "up" | "k" | "ctrl+k" => s.cursor = wrap_cursor(s.cursor, -1, s.paths.len()),
             "down" | "j" | "ctrl+j" => s.cursor = wrap_cursor(s.cursor, 1, s.paths.len()),
+            "pgdown" | "ctrl+f" => {
+                let page = self.height.saturating_sub(2).max(1);
+                s.cursor = page_cursor(s.cursor, 1, page, s.paths.len());
+            }
+            "pgup" | "ctrl+b" => {
+                let page = self.height.saturating_sub(2).max(1);
+                s.cursor = page_cursor(s.cursor, -1, page, s.paths.len());
+            }
             "enter" => {
                 let path = s.paths.get(s.cursor).cloned().unwrap_or_default();
                 self.anchor_jump(path);
@@ -4679,6 +4805,16 @@ impl App {
                 s.cursor = wrap_cursor(s.cursor, 1, s.results.len());
                 return Some(Overlay::Search(s));
             }
+            "pgdown" | "ctrl+f" => {
+                let page = self.search_page_size(&s);
+                s.cursor = page_cursor(s.cursor, 1, page, s.results.len());
+                return Some(Overlay::Search(s));
+            }
+            "pgup" | "ctrl+b" => {
+                let page = self.search_page_size(&s);
+                s.cursor = page_cursor(s.cursor, -1, page, s.results.len());
+                return Some(Overlay::Search(s));
+            }
             "tab" | "shift+tab" => {
                 s.replace = true;
                 s.replace_focused = !s.replace_focused;
@@ -4766,6 +4902,14 @@ impl App {
         }
         self.refilter(&mut s);
         Some(Overlay::Search(s))
+    }
+
+    /// search_page_size mirrors render_search_body's result area.
+    fn search_page_size(&self, s: &SearchState) -> usize {
+        let inputs = if s.replace { 2 } else { 1 };
+        self.height
+            .saturating_sub(2 + inputs + self.status_lines().len() + 1)
+            .max(1)
     }
 
     // --- external $EDITOR ---------------------------------------------------
@@ -5268,7 +5412,11 @@ impl App {
         let mut b = String::new();
         b.push_str(&style::bold("Keyboard help"));
         b.push_str("\n\n");
-        for e in crate::ui::menu::HELP_ENTRIES {
+        let entries = crate::ui::menu::HELP_ENTRIES;
+        let page = self.height.saturating_sub(3).max(1);
+        let max_scroll = entries.len().saturating_sub(page);
+        let off = self.help_scroll.min(max_scroll);
+        for e in entries.iter().skip(off).take(page) {
             let line = if self.width - 1 < crate::ui::menu::HELP_COL_WIDTH + 12 {
                 // narrow terminal: do not waste the row on padding
                 if e.keys.is_empty() {
@@ -5290,7 +5438,11 @@ impl App {
             b.push('\n');
             lines += 1;
         }
-        b.push_str(&self.rec_hint("esc/? close"));
+        b.push_str(&self.rec_hint(if max_scroll > 0 {
+            "j/k or pgup/pgdn scroll · esc/? close"
+        } else {
+            "esc/? close"
+        }));
         b
     }
 
@@ -5527,7 +5679,7 @@ impl App {
         }
         b.push_str(&clip_display(
             &style::help(&format!(
-                "↑/↓ ctrl+j/k · enter jump/replace · tab replace · alt+i {} · alt+x {}",
+                "↑/↓ ctrl+j/k · pgup/pgdn page · enter jump/replace · tab replace · alt+i {} · alt+x {}",
                 case_txt, mode_txt
             )),
             self.width.saturating_sub(1),
@@ -5679,6 +5831,8 @@ impl App {
         match msg.key_str().as_str() {
             "up" | "k" => s.scroll = s.scroll.saturating_sub(1),
             "down" | "j" => s.scroll = (s.scroll + 1).min(max_scroll),
+            "pgdown" | "ctrl+f" => s.scroll = (s.scroll + page).min(max_scroll),
+            "pgup" | "ctrl+b" => s.scroll = s.scroll.saturating_sub(page),
             "c" | "esc" => return None,
             _ => {}
         }
@@ -6338,7 +6492,9 @@ impl App {
             ));
             b.push('\n');
         }
-        b.push_str(&self.rec_hint("↑/↓ or ctrl+j/k move · enter jump to the field · esc close"));
+        b.push_str(
+            &self.rec_hint("↑/↓ or ctrl+j/k move · pgup/pgdn page · enter jump · esc close"),
+        );
         b.push('\n');
         b
     }
@@ -6368,7 +6524,9 @@ impl App {
             b.push_str(&clip_display(&line, self.width.saturating_sub(1)));
             b.push('\n');
         }
-        b.push_str(&self.rec_hint("↑/↓ or ctrl+j/k move · enter jump · esc close"));
+        b.push_str(
+            &self.rec_hint("↑/↓ or ctrl+j/k move · pgup/pgdn page · enter jump · esc close"),
+        );
         b.push('\n');
         b
     }
@@ -6393,9 +6551,9 @@ impl App {
             b.push('\n');
         }
         let hint = if self.opts().force {
-            "enter jump to field · y save anyway · n back"
+            "pgup/pgdn page · enter jump · y save anyway · n back"
         } else {
-            "enter jump to field · fix fields and save again, or rerun with --force"
+            "pgup/pgdn page · enter jump · fix fields and save again, or rerun with --force"
         };
         b.push_str(&clip_display(
             &style::help(hint),
@@ -6432,7 +6590,7 @@ impl App {
             b.push('\n');
             lines += 1;
         }
-        b.push_str(&self.rec_hint("↑/↓ or j/k scroll · c/q/esc close"));
+        b.push_str(&self.rec_hint("j/k · PgUp/PgDn page · c/q/esc close"));
         b
     }
 
@@ -6521,7 +6679,9 @@ impl App {
             b.push_str(&clip_display(&line, self.width.saturating_sub(1)));
             b.push('\n');
         }
-        b.push_str(&self.rec_hint("↑/↓ or ctrl+j/k move · enter switch · esc close"));
+        b.push_str(
+            &self.rec_hint("↑/↓ or ctrl+j/k move · pgup/pgdn page · enter switch · esc close"),
+        );
         b.push('\n');
         b
     }
