@@ -1,19 +1,16 @@
-//! Build metadata injection — the Rust equivalent of Go's `-ldflags -X` plus
-//! `debug.ReadBuildInfo`:
+//! Build metadata injection:
 //!
 //! - `VERSION`: `JSE_VERSION_OVERRIDE` from the environment wins (release
-//!   workflows set it, mirroring the ldflags stamp). Otherwise it follows
-//!   `cmd/go`'s build-info derivation: a tag on HEAD is used verbatim, a
-//!   commit past a tag becomes a Go pseudo-version
-//!   (`v0.3.1-0.<UTC commit time>-<12-char revision>`), and a repository
-//!   without tags yields `v0.0.0-...`. Uncommitted changes append Go's semver
-//!   build metadata `+dirty` (or `.dirty` after `+incompatible`). Outside a
-//!   git checkout the crate version is used, like an installed module version.
+//!   workflows set it). Otherwise the highest reachable semver tag is
+//!   used (canonicalized) (`v0.0.0` when none); commits after the tag keep that version
+//!   because `COMMIT`/`BUILD_DATE` already identify the exact build. Outside
+//!   a git checkout the crate version is used. Uncommitted changes append
+//!   `+dirty` (or `.dirty` after `+incompatible`).
 //! - `COMMIT` / `BUILD_DATE`: `JSE_COMMIT` / `JSE_BUILD_DATE` win (release
 //!   workflows set them); otherwise stamped from the git checkout a VCS build
 //!   is made in (7-char revision, RFC3339 UTC build time); a build without git
-//!   metadata behaves like an installed Go build and reports neither, so
-//!   `--version` reads just `jse v0.1.0` — see version.rs.
+//!   metadata reports neither, so `--version` reads just `jse v0.1.0` — see
+//!   version.rs.
 //!
 //! The values are written to `$OUT_DIR/version_info.rs` and included by
 //! `src/version.rs`.
@@ -47,7 +44,7 @@ fn main() {
                 std::env::var("CARGO_PKG_VERSION").unwrap_or_default()
             )
         });
-        // Go's build-info stamping appends dirty metadata to the VCS version.
+        // A dirty worktree appends semver build metadata.
         if head.is_some() && worktree_dirty() {
             if version.ends_with("+incompatible") {
                 version.push_str(".dirty");
@@ -60,8 +57,7 @@ fn main() {
 
     // A VCS checkout stamps revision and build time; the release workflow
     // stamps both explicitly. Anything else (a release tarball, an installed
-    // crate) reports "none"/"unknown" like Go's `go install pkg@version`
-    // builds do.
+    // crate) reports "none"/"unknown".
     let commit = env_nonempty("JSE_COMMIT")
         .or_else(|| head.as_deref().map(short_revision))
         .unwrap_or_else(|| "none".to_string());
@@ -106,7 +102,7 @@ fn emit_rerun_triggers() {
                 continue;
             }
             println!("cargo:rerun-if-changed={file}");
-            // Untracked files also count as dirty (Go's vcs.modified), and a
+            // Untracked files also count as dirty, and a
             // directory watch catches newly created ones.
             if let Some((dir, _)) = file.split_once('/') {
                 dirs.insert(dir);
@@ -146,31 +142,15 @@ fn short_revision(rev: &str) -> String {
     rev[..7].to_string()
 }
 
-/// `cmd/go`'s build-info version for a commit (see `load/pkg.go` and
-/// `modfetch/coderepo.go`): highest canonical tag on HEAD, else a
-/// pseudo-version based on the highest reachable tag, else `v0.0.0-...`.
+/// Version for a commit: the highest reachable semver tag, canonicalized, or
+/// `v0.0.0` when there is none. Commits after that tag keep its version; the
+/// separately reported commit and build time identify the exact build.
 fn git_version(head: &str) -> Option<String> {
-    let exact = tags(&["tag", "--points-at", head])
-        .into_iter()
-        .filter_map(|tag| {
-            let version = vcsver::Version::parse(&tag)?;
-            version.is_canonical(&tag).then_some(version)
-        })
-        .max_by(|a, b| a.compare(b));
-    if let Some(version) = exact {
-        return Some(version.canonical());
-    }
-
     let base = tags(&["tag", "--merged", head])
         .into_iter()
         .filter_map(|tag| vcsver::Version::parse(&tag))
         .max_by(|a, b| a.compare(b));
-    let timestamp = commit_timestamp(head).map(compact_utc)?;
-    Some(vcsver::pseudo_version(
-        base.as_ref(),
-        &timestamp,
-        &head[..12],
-    ))
+    Some(base.map_or_else(|| "v0.0.0".to_string(), |v| v.canonical()))
 }
 
 fn tags(args: &[&str]) -> Vec<String> {
@@ -185,15 +165,8 @@ fn tags(args: &[&str]) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Committer time of `rev`, the clock Go uses for `vcs.time` and pseudo
-/// versions.
-fn commit_timestamp(rev: &str) -> Option<u64> {
-    let out = git_stdout(&["log", "-1", "--format=%ct", rev])?;
-    String::from_utf8_lossy(&out).trim().parse().ok()
-}
-
-/// Go's `vcs.modified` equivalent: `git status --porcelain` reports tracked
-/// edits, staged changes, and untracked files (ignored files stay out).
+/// `git status --porcelain` reports tracked edits, staged changes, and
+/// untracked files (ignored files stay out).
 fn worktree_dirty() -> bool {
     git_stdout(&["status", "--porcelain"])
         .map(|out| !String::from_utf8_lossy(&out).trim().is_empty())
@@ -207,26 +180,13 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// RFC3339 UTC, Go's vcs.time shape: "2026-10-18T13:18:54Z".
+/// RFC3339 UTC: "2026-10-18T13:18:54Z".
 fn rfc3339_utc(secs: u64) -> String {
     let days = (secs / 86_400) as i64;
     let rem = secs % 86_400;
     let (y, mo, d) = civil_from_days(days);
     format!(
         "{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z",
-        h = rem / 3_600,
-        m = (rem % 3_600) / 60,
-        s = rem % 60,
-    )
-}
-
-/// Go's `PseudoVersionTimestampFormat`: UTC "yyyymmddhhmmss".
-fn compact_utc(secs: u64) -> String {
-    let days = (secs / 86_400) as i64;
-    let rem = secs % 86_400;
-    let (y, mo, d) = civil_from_days(days);
-    format!(
-        "{y:04}{mo:02}{d:02}{h:02}{m:02}{s:02}",
         h = rem / 3_600,
         m = (rem % 3_600) / 60,
         s = rem % 60,

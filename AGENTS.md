@@ -130,7 +130,7 @@ git push origin vX.Y.Z
 
 Do not hand-edit build metadata; `build.rs` and the workflow own it.
 
-Local builds derive `--version` from git the way Go's build info does: an exact canonical semver tag on HEAD, else the pseudo-version `vX.Y.(Z+1)-0.<UTC commit time>-<12-char revision>` based on the highest reachable tag (`v0.0.0-...` when there is none), plus `+dirty` for an uncommitted worktree (untracked files count). `JSE_VERSION_OVERRIDE` wins verbatim. `src/vcsver.rs` mirrors `golang.org/x/mod/semver` + `module.PseudoVersion`; `build.rs` `include!`s it and the crate compiles it under `cfg(test)` for unit tests. Build scripts rerun only for declared paths, so `build.rs` watches tracked files, their top-level directories, `HEAD`, `index`, `refs`, and `packed-refs`.
+Local builds take the highest reachable semver tag (`v0.0.0` when there is none), plus `+dirty` for an uncommitted worktree (untracked files count). Commits after the tag keep its version; `COMMIT` and `BUILD_DATE` identify the exact build. `JSE_VERSION_OVERRIDE` replaces the git-derived version. `src/vcsver.rs` only parses, canonicalizes and orders tags; `build.rs` `include!`s it and the crate compiles it under `cfg(test)` for unit tests. Build scripts rerun only for declared paths, so `build.rs` watches tracked files, their top-level directories, `HEAD`, `index`, `refs`, and `packed-refs`.
 
 ## Documentation rules
 

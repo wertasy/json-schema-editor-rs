@@ -1187,5 +1187,18 @@ mod main_test {
             version::version_line_from("dev", "63d1088", "unknown"),
             "jse dev (commit 63d1088)"
         );
+        // build.rs already produces the short development form.
+        assert_eq!(
+            version::version_line_from("v0.1.1-0", "01554d6", "2026-10-22T12:07:33Z"),
+            "jse v0.1.1-0 (commit 01554d6, built 2026-10-22T12:07:33Z)"
+        );
+        assert_eq!(
+            version::version_line_from("v0.1.1-0+dirty", "01554d6", "2026-10-22T12:07:33Z"),
+            "jse v0.1.1-0+dirty (commit 01554d6, built 2026-10-22T12:07:33Z)"
+        );
+        assert_eq!(
+            version::version_line_from("v1.2.3-rc.1", "none", "unknown"),
+            "jse v1.2.3-rc.1"
+        );
     }
 }

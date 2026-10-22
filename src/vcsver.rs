@@ -1,6 +1,7 @@
-// Go-compatible semantic-version parsing, ordering, and pseudo-versions —
-// the small part of `golang.org/x/mod/semver` + `module.PseudoVersion` that
-// `build.rs` needs to derive `--version` from git tags the way `cmd/go` does.
+// Semantic-version parsing and ordering for git tag selection, plus the
+// simplified development version stamped for commits past a tag. This only
+// needs the tags this repository uses; it does not mirror Go's module
+// versioning.
 //
 // The file is `include!`d by `build.rs` and compiled by the crate only in
 // test builds (`#[cfg(test)] #[path = "vcsver.rs"] mod vcsver;`), so the
@@ -9,30 +10,28 @@
 
 use std::cmp::Ordering;
 
-/// A parsed semantic version. Numeric fields are decimal strings (Go's
-/// semver compares them by length then lexically, so arbitrary precision is
-/// preserved). `pre` keeps its leading `-`, `build` its leading `+`.
+/// A parsed semantic version. Numeric fields are decimal strings so
+/// arbitrary precision is preserved. `pre` keeps its leading `-`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Version {
     major: String,
     minor: String,
     patch: String,
     pre: String,
-    build: String,
 }
 
 impl Version {
-    /// Parse `vMAJOR[.MINOR[.PATCH[-PRERELEASE][+BUILD]]]`, matching
-    /// `golang.org/x/mod/semver` (including the `v1` / `v1.2` shorthands).
+    /// Parse `vMAJOR[.MINOR[.PATCH[-PRERELEASE][+BUILD]]]` (the `v1` / `v1.2`
+    /// shorthands are accepted; build metadata is validated and dropped).
     pub fn parse(v: &str) -> Option<Self> {
         let v = v.strip_prefix('v')?;
         let (major, rest) = parse_int(v)?;
         if rest.is_empty() {
-            return Some(Self::new(major, "0", "0", "", ""));
+            return Some(Self::new(major, "0", "0", ""));
         }
         let (minor, rest) = parse_int(rest.strip_prefix('.')?)?;
         if rest.is_empty() {
-            return Some(Self::new(major, minor, "0", "", ""));
+            return Some(Self::new(major, minor, "0", ""));
         }
         let (patch, mut rest) = parse_int(rest.strip_prefix('.')?)?;
 
@@ -40,23 +39,21 @@ impl Version {
         if rest.starts_with('-') {
             (pre, rest) = parse_prerelease(rest)?;
         }
-        let mut build = "";
         if rest.starts_with('+') {
-            (build, rest) = parse_build(rest)?;
+            (_, rest) = parse_build(rest)?;
         }
         if !rest.is_empty() {
             return None;
         }
-        Some(Self::new(major, minor, patch, pre, build))
+        Some(Self::new(major, minor, patch, pre))
     }
 
-    fn new(major: &str, minor: &str, patch: &str, pre: &str, build: &str) -> Self {
+    fn new(major: &str, minor: &str, patch: &str, pre: &str) -> Self {
         Self {
             major: major.to_string(),
             minor: minor.to_string(),
             patch: patch.to_string(),
             pre: pre.to_string(),
-            build: build.to_string(),
         }
     }
 
@@ -66,12 +63,6 @@ impl Version {
         format!("v{}.{}.{}{}", self.major, self.minor, self.patch, self.pre)
     }
 
-    /// Whether `raw` is already canonical, i.e. usable verbatim as a tag
-    /// version (`semver.Canonical(raw) == raw`).
-    pub fn is_canonical(&self, raw: &str) -> bool {
-        self.canonical() == raw
-    }
-
     /// Semantic-version precedence (`semver.Compare`); build metadata is
     /// ignored.
     pub fn compare(&self, other: &Self) -> Ordering {
@@ -79,30 +70,6 @@ impl Version {
             .then_with(|| compare_int(&self.minor, &other.minor))
             .then_with(|| compare_int(&self.patch, &other.patch))
             .then_with(|| compare_prerelease(&self.pre, &other.pre))
-    }
-}
-
-/// `module.PseudoVersion("", base, t, rev)`: the version Go stamps for a
-/// commit that is not exactly at a tag. `base` is the highest reachable tag
-/// version (with build metadata retained), `timestamp` is the commit's UTC
-/// `yyyymmddhhmmss`, and `rev` is the 12-character revision prefix.
-pub fn pseudo_version(base: Option<&Version>, timestamp: &str, rev: &str) -> String {
-    let Some(base) = base else {
-        return format!("v0.0.0-{timestamp}-{rev}");
-    };
-    let segment = format!("{timestamp}-{rev}");
-    if !base.pre.is_empty() {
-        // vX.Y.Z-pre -> vX.Y.Z-pre.0.<timestamp>-<rev>
-        format!("{}.0.{segment}{}", base.canonical(), base.build)
-    } else {
-        // vX.Y.Z -> vX.Y.(Z+1)-0.<timestamp>-<rev>
-        format!(
-            "v{}.{}.{}-0.{segment}{}",
-            base.major,
-            base.minor,
-            increment_decimal(&base.patch),
-            base.build,
-        )
     }
 }
 
@@ -215,25 +182,6 @@ fn compare_prerelease(x: &str, y: &str) -> Ordering {
     xs.len().cmp(&ys.len())
 }
 
-fn increment_decimal(s: &str) -> String {
-    let mut bytes = s.as_bytes().to_vec();
-    let mut i = bytes.len();
-    loop {
-        if i == 0 {
-            bytes.insert(0, b'1');
-            break;
-        }
-        i -= 1;
-        if bytes[i] == b'9' {
-            bytes[i] = b'0';
-        } else {
-            bytes[i] += 1;
-            break;
-        }
-    }
-    String::from_utf8(bytes).expect("decimal digits stay valid UTF-8")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,15 +191,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_and_canonicalizes_like_go() {
+    fn parses_and_canonicalizes_versions() {
         assert_eq!(parse("v1.2.3").canonical(), "v1.2.3");
-        assert!(parse("v1.2.3").is_canonical("v1.2.3"));
         assert_eq!(parse("v1").canonical(), "v1.0.0");
         assert_eq!(parse("v1.2").canonical(), "v1.2.0");
-        assert!(!parse("v1.2").is_canonical("v1.2"));
         assert_eq!(parse("v1.2.3-rc.1").canonical(), "v1.2.3-rc.1");
         assert_eq!(parse("v1.2.3-rc.1+meta").canonical(), "v1.2.3-rc.1");
-        assert!(!parse("v1.2.3-rc.1+meta").is_canonical("v1.2.3-rc.1+meta"));
 
         for bad in [
             "1.2.3",
@@ -273,7 +218,7 @@ mod tests {
     #[test]
     fn orders_by_semver_precedence() {
         let ordered = [
-            "v0.0.0-20261022081434-ab1b465ca537", // pseudo before any release
+            "v0.0.0-alpha",
             "v0.2.9",
             "v0.3.0-alpha",
             "v0.3.0-alpha.1",
@@ -292,29 +237,5 @@ mod tests {
             parse("v1.2.3+meta").compare(&parse("v1.2.3")),
             Ordering::Equal
         );
-    }
-
-    #[test]
-    fn builds_pseudo_versions_like_go() {
-        let ts = "20261022081434";
-        let rev = "ab1b465ca537";
-        let cases = [
-            (None, "v0.0.0-20261022081434-ab1b465ca537"),
-            (Some("v0.3.0"), "v0.3.1-0.20261022081434-ab1b465ca537"),
-            (
-                Some("v0.3.0-rc.1"),
-                "v0.3.0-rc.1.0.20261022081434-ab1b465ca537",
-            ),
-            (
-                Some("v0.3.0+meta"),
-                "v0.3.1-0.20261022081434-ab1b465ca537+meta",
-            ),
-            (Some("v1.9.9"), "v1.9.10-0.20261022081434-ab1b465ca537"),
-            (Some("v1.99"), "v1.99.1-0.20261022081434-ab1b465ca537"),
-        ];
-        for (base, want) in cases {
-            let base = base.map(parse);
-            assert_eq!(pseudo_version(base.as_ref(), ts, rev), want);
-        }
     }
 }

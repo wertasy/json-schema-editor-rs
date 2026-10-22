@@ -68,11 +68,11 @@ arm64 交叉编译还需 `gcc-aarch64-linux-gnu`，并把 `linker` 设为 `aarch
 jse v0.2.1 (commit 1a2b3c4, built 2026-10-22T09:00:00Z)
 ```
 
-- 版本号优先取环境变量 `JSE_VERSION_OVERRIDE`（原样使用，不追加）。否则按 Go build info 的规则从 git 推导：
-  - HEAD 正好在一个规范的 semver tag 上：用该 tag，例如 `v0.3.0`；
-  - HEAD 在 tag 之后：Go 伪版本 `vX.Y.(Z+1)-0.<UTC 提交时间>-<12 位提交>`，例如 `v0.3.1-0.20261022082051-9256d9aab2f6`；没有可达 tag 时为 `v0.0.0-<UTC 提交时间>-<12 位提交>`；
+- 版本号优先取环境变量 `JSE_VERSION_OVERRIDE`。否则从 git 推导：
+  - 取最高可达的 semver tag，例如 `v0.3.0`；没有可达 tag 时为 `v0.0.0`。
+  - HEAD 在 tag 之后仍沿用该 tag：提交号和构建时间已单独显示，不再构造额外的开发版本号；
   - 不在 git 检出内：用 crate 版本，例如 `v0.1.0`。
-- 工作区有未提交改动（含未跟踪文件，gitignore 的不算）时在版本号后追加 `+dirty`，例如 `jse v0.3.1-0.20261022082051-9256d9aab2f6+dirty`；版本本身以 `+incompatible` 结尾时改用 `.dirty`。
+- 工作区有未提交改动（含未跟踪文件，gitignore 的不算）时在版本号后追加 `+dirty`，例如 `jse v0.3.1-0+dirty (...)`；版本本身以 `+incompatible` 结尾时改用 `.dirty`。
 - 提交号取 `JSE_COMMIT`，否则尝试当前 git HEAD 的前 7 位。
 - 构建时间取 `JSE_BUILD_DATE`（UTC，ISO 8601），否则取本次构建时间。
 - 没有提交/构建信息时省略括号部分，例如本地 `cargo install` 后只显示 `jse v0.1.0`。
