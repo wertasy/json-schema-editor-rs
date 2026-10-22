@@ -810,6 +810,42 @@ fn menu_root_esc_quit() {
 }
 
 #[test]
+fn root_esc_clears_selection_before_quit() {
+    let mut m = mk_app(test_doc(), test_opts());
+    press(&mut m, &["m", "down", "m"]);
+    assert_eq!(m.top().unwrap().sel.len(), 2);
+    m.update(Msg::Esc);
+    assert!(
+        !m.exiting && !m.aborted,
+        "esc must not quit with a selection"
+    );
+    assert!(m.top().unwrap().sel.is_empty(), "esc must clear the marks");
+    assert_eq!(m.notice, "selection cleared");
+    assert!(m.fs().stack.len() == 1);
+
+    // q aliases esc outside inputs
+    press(&mut m, &["m", "q"]);
+    assert!(!m.exiting && !m.aborted && m.top().unwrap().sel.is_empty());
+
+    // without a selection esc keeps its meaning
+    m.update(Msg::Esc);
+    assert!(m.exiting);
+}
+
+#[test]
+fn root_esc_clears_selection_before_save_prompt() {
+    // a dirty root with marks clears them first; the next esc asks to save
+    let mut m = mk_app(test_doc(), test_opts());
+    press(&mut m, &["enter", "ctrl+u", "x", "enter", "m"]);
+    assert!(m.dirty() && !m.top().unwrap().sel.is_empty());
+    m.update(Msg::Esc);
+    assert!(m.overlay.is_none() && !m.exiting && !m.aborted);
+    assert!(m.top().unwrap().sel.is_empty());
+    m.update(Msg::Esc);
+    assert!(matches!(m.overlay, Some(Overlay::Confirm(_))));
+}
+
+#[test]
 fn unknown_key_external_edit() {
     let mut doc = test_doc();
     let extra = doc.new_object();
@@ -5929,6 +5965,94 @@ fn search_state(m: &App) -> &SearchState {
         Some(Overlay::Search(s)) => s,
         _ => panic!("search overlay not open"),
     }
+}
+
+#[test]
+fn array_item_selection_colors_labels_and_deletes_batch() {
+    let doc = dbuild(|db| {
+        db.obj(vec![(
+            "mounts",
+            db.arr(vec![
+                db.obj(vec![("src", db.s("/a")), ("dst", db.s("/1"))]),
+                db.obj(vec![("src", db.s("/b")), ("dst", db.s("/2"))]),
+                db.obj(vec![("src", db.s("/c")), ("dst", db.s("/3"))]),
+            ]),
+        )])
+    });
+    let mut m = items_app(doc);
+    press(&mut m, &["down", "down", "down", "down", "enter"]);
+    assert_eq!(m.top().unwrap().kind, MenuKind::Items);
+    press(&mut m, &["down", "m", "down", "down", "m"]);
+    let st = m.top().unwrap();
+    assert_eq!(st.sel.len(), 2, "first and last items marked");
+    assert!(!st.visual);
+
+    // the "mounts[N]" label is styled like an object key
+    let rows = m.menu_rows();
+    let tw = m.menu_title_col_width(&rows);
+    let off = m.row_line(&rows[1], false, tw);
+    assert!(
+        off.contains(&crate::ui::menu::style::fg9("mounts[0]")),
+        "unfocused marked item must be red: {off:?}"
+    );
+    assert!(
+        off.starts_with(&crate::ui::menu::style::fg9("> ")),
+        "marked item needs the red marker: {off:?}"
+    );
+    let focused = m.row_line(&rows[3], true, tw);
+    assert!(
+        focused.contains(&crate::ui::menu::style::bold(&crate::ui::menu::style::fg9(
+            "mounts[2]"
+        ))),
+        "focused marked item must be bold red: {focused:?}"
+    );
+
+    // batch delete splices from the end: the surviving item is the middle one
+    press(&mut m, &["d"]);
+    assert_eq!(arr_len(&m.fs().doc, &sp(&["mounts"])), 1);
+    assert_eq!(
+        sget(&m.fs().doc, &[ks("mounts"), PathSeg::Idx(0), ks("src")]),
+        "/b"
+    );
+    assert!(m.top().unwrap().sel.is_empty());
+}
+
+#[test]
+fn array_item_visual_select_marks_items() {
+    let mut m = items_app(test_doc());
+    press(&mut m, &["down", "down", "down", "down", "enter"]);
+    press(&mut m, &["down", "v", "down"]);
+    let st = m.top().unwrap();
+    assert!(st.visual);
+    assert_eq!(st.sel.len(), 1, "one item in the visual range");
+    press(&mut m, &["v"]);
+    assert!(m.top().unwrap().visual == false);
+}
+
+#[test]
+fn array_item_selection_copies_values() {
+    let doc = dbuild(|db| {
+        db.obj(vec![(
+            "logging",
+            db.obj(vec![("tags", db.arr(vec![db.s("prod"), db.s("dev")]))]),
+        )])
+    });
+    let mut opts = test_opts();
+    let copies = Arc::new(parking_lot::Mutex::new(String::new()));
+    let sink = copies.clone();
+    opts.copy = Some(Arc::new(move |t: &str| {
+        *sink.lock() = t.to_string();
+        Ok(())
+    }));
+    let mut m = app_with(test_schema(), doc, opts);
+    press(&mut m, &["down", "down", "down", "enter"]); // Logging
+    press(&mut m, &["down", "enter"]); // Tags
+    assert_eq!(m.top().unwrap().kind, MenuKind::Items);
+    press(&mut m, &["down", "m", "down", "m"]);
+    press(&mut m, &["y"]);
+    assert_eq!(*copies.lock(), "prod\ndev");
+    assert_eq!(m.notice, "Copied 2 values");
+    assert!(m.top().unwrap().sel.is_empty());
 }
 
 #[test]

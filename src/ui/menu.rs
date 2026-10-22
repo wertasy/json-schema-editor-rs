@@ -131,7 +131,7 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
     },
     HelpEntry {
         keys: "m",
-        desc: "mark key-value rows: y copies, d deletes the marked ones (m toggles)",
+        desc: "mark key-value rows / array items: y copies, d deletes the marked ones (m toggles)",
     },
     HelpEntry {
         keys: "v",
@@ -179,7 +179,7 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
     },
     HelpEntry {
         keys: "esc / q",
-        desc: "cancel / back — q aliases esc outside inputs; a pending g combo clears first",
+        desc: "cancel / back — q aliases esc outside inputs; a pending g combo clears first, then a root selection",
     },
     HelpEntry {
         keys: "",

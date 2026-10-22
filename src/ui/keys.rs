@@ -82,18 +82,12 @@ fn sel_key(path: &[PathSeg]) -> String {
     b
 }
 
-/// selectableRow reports whether a row can carry a selection mark: the same
-/// key-value rows m accepts (object-menu fields, container rows and
-/// schema-less keys — no array items, no action rows).
+/// selectableRow reports whether a row can carry a selection mark: object
+/// menu key-value rows (fields, container rows, schema-less keys) and array
+/// item rows (their label is "key[N]", as the item has no object key) — no
+/// action or status rows.
 fn selectable_row(r: &Row) -> bool {
-    if !matches!(r.kind, RowKind::Field | RowKind::Drill | RowKind::Unknown) {
-        return false;
-    }
-    match r.path.last() {
-        Some(PathSeg::Idx(_)) => false,
-        Some(_) => true,
-        None => false,
-    }
+    matches!(r.kind, RowKind::Field | RowKind::Drill | RowKind::Unknown) && !r.path.is_empty()
 }
 
 /// findRowKey returns the key a row matches by: the schema key, or the
@@ -698,13 +692,7 @@ impl App {
             "ctrl+k" | "N" => self.move_to_value(&rows, -1),
             "p" => self.paste_clipboard(&r, false),
             "P" => self.paste_clipboard(&r, true),
-            "y" => {
-                if st_kind == Some(MenuKind::Items) {
-                    self.copy_row(&r, false);
-                } else {
-                    self.copy_row_or_selection(&r);
-                }
-            }
+            "y" => self.copy_row_or_selection(&r),
             "Y" => self.copy_row(&r, false),
             "x" => {
                 if st_kind == Some(MenuKind::Items) {
@@ -981,6 +969,16 @@ impl App {
             self.nav_back_step(leaving);
             return;
         }
+        // A live multi-selection is cancelled before the session can be
+        // left: esc/q on the root screen clear the marks first.
+        let selected = self.top().map_or(false, |st| !st.sel.is_empty());
+        if selected {
+            if let Some(st) = self.top_mut() {
+                st.sel.clear();
+            }
+            self.notice = "selection cleared".to_string();
+            return;
+        }
         let dirty = self.dirty_files();
         if dirty.is_empty() {
             self.exiting = true;
@@ -1197,13 +1195,7 @@ impl App {
     /// toggleSelect flips the cursor row's membership in the selection.
     fn toggle_select(&mut self, r: &Row) {
         if !selectable_row(r) {
-            if matches!(r.kind, RowKind::Field | RowKind::Drill) && !r.path.is_empty() {
-                if matches!(r.path.last(), Some(PathSeg::Idx(_))) {
-                    self.notice = "m marks key-value pairs, not array items".to_string();
-                    return;
-                }
-            }
-            self.notice = "m marks key-value rows".to_string();
+            self.notice = "m marks key-value or item rows".to_string();
             return;
         }
         let Some(st) = self.top_mut() else { return };
@@ -1621,7 +1613,7 @@ impl App {
             return;
         }
         let rows = self.menu_rows();
-        let keys: Vec<Vec<PathSeg>> = rows
+        let mut keys: Vec<Vec<PathSeg>> = rows
             .iter()
             .filter(|sel| {
                 self.top()
@@ -1630,6 +1622,12 @@ impl App {
             })
             .map(|sel| sel.path.clone())
             .collect();
+        // array items must go last-to-first: each delete splices the list and
+        // would shift the still-marked higher indexes otherwise
+        keys.sort_by(|a, b| match (a.last(), b.last()) {
+            (Some(PathSeg::Idx(x)), Some(PathSeg::Idx(y))) => y.cmp(x),
+            _ => std::cmp::Ordering::Equal,
+        });
         for p in keys {
             let tmp = Row {
                 path: p,
@@ -2243,6 +2241,21 @@ impl App {
         members
     }
 
+    /// selectionValues collects the marked rows' document values in display
+    /// order — the array-menu counterpart of selectionMembers (array items
+    /// have no object key to copy).
+    fn selection_values(&mut self) -> Vec<NodeId> {
+        let Some(st) = self.top().cloned() else {
+            return Vec::new();
+        };
+        let rows = self.menu_rows_snapshot();
+        let doc = self.doc();
+        rows.iter()
+            .filter(|r| !r.path.is_empty() && st.sel.contains(&sel_key(&r.path)))
+            .filter_map(|r| doc.get(&r.path))
+            .collect()
+    }
+
     /// menuRows for the current (top) state (read-only flows reuse the same
     /// warm cache path as menu_rows).
     fn menu_rows_snapshot(&mut self) -> Vec<Row> {
@@ -2252,8 +2265,31 @@ impl App {
     /// copyRowOrSelection is the y handler (Go copyRowOrSelection).
     fn copy_row_or_selection(&mut self, r: &Row) {
         let has_sel = self.top().map(|st| !st.sel.is_empty()).unwrap_or(false);
+        // array pages copy element values, not key-value pairs
+        let items = self.top().map(|st| st.kind) == Some(MenuKind::Items);
         if !has_sel {
-            self.copy_row(r, true);
+            self.copy_row(r, !items);
+            return;
+        }
+        if items {
+            let values = self.selection_values();
+            if values.is_empty() {
+                self.notice = "no value to copy".to_string();
+                return;
+            }
+            let text = values
+                .iter()
+                .map(|v| self.copy_value_text(*v))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Err(e) = self.write_clipboard_text(&text) {
+                self.notice = format!("copy failed: {e}");
+                return;
+            }
+            self.notice = format!("Copied {} values", values.len());
+            if let Some(st) = self.top_mut() {
+                st.sel.clear();
+            }
             return;
         }
         let members = self.selection_members();
@@ -2295,8 +2331,17 @@ impl App {
     /// cutRowOrSelection is the x/X handler (Go cutRowOrSelection).
     fn cut_row_or_selection(&mut self, r: &Row, pair: bool) {
         let batch = self.top().map(|st| !st.sel.is_empty()).unwrap_or(false);
+        let items = self.top().map(|st| st.kind) == Some(MenuKind::Items);
         let (text, count) = if batch {
-            if pair {
+            if items {
+                let vals = self.selection_values();
+                if vals.is_empty() {
+                    self.notice = "no value to copy".to_string();
+                    return;
+                }
+                let values: Vec<String> = vals.iter().map(|v| self.copy_value_text(*v)).collect();
+                (values.join("\n"), vals.len())
+            } else if pair {
                 let members = self.selection_members();
                 if members.is_empty() {
                     self.notice = "no value to copy".to_string();
