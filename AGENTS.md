@@ -79,6 +79,7 @@ tests/
 - Selection marks are per menu state; array item labels (`key[N]`) are selectable, action rows are not.
 - The root screen is special: `esc`/`q` clears a pending `g` buffer, then a live selection, then exits or prompts to save. `left`/`h` never exits the root.
 - `q` aliases `esc` outside text inputs; inside inputs it is a literal character.
+- The TUI drains a whole terminal input burst and repaints once per burst (`menu.rs::read_event_burst`); runs of identical `j`/`k`/`up`/`down` collapse through `App::update_repeat`/`move_plain`. That fast path must stay side-effect free (no document mutation, history push or menu-stack change); inputs, overlays and macro recording fall back to one update per key. `KeyEventKind::Repeat` acts like a press; only `Release` is ignored.
 
 ## Behavioral contracts
 

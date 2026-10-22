@@ -833,6 +833,40 @@ fn pty_unknown_key_type_picker() {
 }
 
 #[test]
+fn pty_held_move_burst_lands_on_last_key() {
+    // Terminal key repeat arrives as a burst with no frame between keys.
+    // The event loop coalesces a run into one move, but it must land on
+    // exactly the same row as the same number of separate presses.
+    let dir = mktemp();
+    let schema = dir.path().join("wide.schema.json");
+    let cfg = dir.path().join("wide.json");
+    let mut props = serde_json::Map::new();
+    let mut values = serde_json::Map::new();
+    for i in 0..300 {
+        let key = format!("field_{i:03}");
+        props.insert(key.clone(), json!({"type": "string"}));
+        values.insert(key, json!("v"));
+    }
+    write_file(
+        &schema,
+        &json!({"type": "object", "properties": props}).to_string(),
+    );
+    write_file(&cfg, &json!(values).to_string());
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+        return;
+    };
+    pty.wait_frame("wide menu", 0, &["field_000"]);
+    let burst = "j".repeat(120);
+    pty.send(burst.as_bytes());
+    pty.wait_frame("burst lands", 0, &["> field_120"]);
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+}
+
+#[test]
 fn pty_search_jump_into_array_variant() {
     let dir = mktemp();
     let schema = dir.path().join("rules.schema.json");

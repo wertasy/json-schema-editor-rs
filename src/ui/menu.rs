@@ -328,6 +328,21 @@ impl Msg {
     }
 }
 
+/// vertical_delta classifies the keys that move a list cursor one row: the
+/// menu's j/k aliases and the arrow keys. Terminal auto-repeat delivers a
+/// stream of these; the event loop coalesces consecutive identical ones so a
+/// long menu pays for one cursor step (and one repaint) per input burst
+/// instead of one per queued repeat.
+pub fn vertical_delta(msg: &Msg) -> Option<i64> {
+    match msg {
+        Msg::Up => Some(-1),
+        Msg::Down => Some(1),
+        Msg::Char('k', false) => Some(-1),
+        Msg::Char('j', false) => Some(1),
+        _ => None,
+    }
+}
+
 // --- overlay states ----------------------------------------------------------
 
 /// editState is an in-place scalar input on one field row.
@@ -640,6 +655,15 @@ impl App {
     /// listMode reports whether the plain menu key table owns the keyboard.
     pub fn list_mode(&self) -> bool {
         list_mode(&self.inputs())
+    }
+
+    /// plain_motion reports a vertical cursor key in the plain menu. It
+    /// cannot change the document, so dispatch_key skips the undo snapshot,
+    /// the whole-document comparison and the variant/issue refresh that
+    /// every other key pays. A 20k-row menu made that work dominate the
+    /// per-repeat cost while a key was held.
+    fn plain_motion(&self, msg: &Msg) -> bool {
+        self.overlay.is_none() && self.list_mode() && vertical_delta(msg).is_some()
     }
 
     fn inputs(&self) -> Inputs {
@@ -1095,6 +1119,10 @@ impl App {
             self.cmd_buf.clear(); // a history key breaks any pending g combo
             self.refresh_variant_menu();
             self.refresh_issues();
+            return;
+        }
+        if self.plain_motion(&msg) {
+            self.route_key(msg);
             return;
         }
         let pre = self.doc().clone();
@@ -1924,7 +1952,10 @@ pub fn copy_detached_from_doc(doc: &mut Doc, src: &Doc, id: NodeId) -> NodeId {
 // --- terminal plumbing -------------------------------------------------------
 
 fn key_event_to_msg(key: KeyEvent) -> Option<Msg> {
-    if key.kind != KeyEventKind::Press {
+    // Press and terminal auto-repeat both act; only the release is dropped.
+    // Some terminals report repeats as KeyEventKind::Repeat (Windows, kitty
+    // keyboard protocol), others as plain presses.
+    if key.kind == KeyEventKind::Release {
         return None;
     }
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -1977,26 +2008,57 @@ pub fn run_menu(files: Vec<FileSession>) -> Outcome {
     // an idle session burned CPU building every menu row 4x a second
     render(&mut stdout, &mut app);
     loop {
+        // Block for the first event, then drain everything the terminal has
+        // already queued before repainting. A held j/k delivers key repeats
+        // faster than a long menu can repaint; processing one event per frame
+        // left those repeats piled up in the tty buffer, so the cursor kept
+        // moving for seconds after the key was released. One burst = one
+        // coalesced move + one frame.
+        let events = read_event_burst();
         let mut redraw = false;
-        if crossterm::event::poll(std::time::Duration::from_millis(250)).unwrap_or(false) {
-            match crossterm::event::read() {
-                Ok(Event::Key(k)) => {
-                    if let Some(msg) = key_event_to_msg(k) {
-                        app.update(msg);
-                        app.run_pending_editor();
-                        redraw = true;
+        let mut i = 0;
+        while i < events.len() {
+            match &events[i] {
+                Event::Key(k) => {
+                    let Some(msg) = key_event_to_msg(*k) else {
+                        i += 1;
+                        continue;
+                    };
+                    // Consecutive identical vertical keys collapse into a
+                    // single move: replaying every repeat rebuilt the whole
+                    // row list and repainted the whole menu.
+                    let mut n = 1;
+                    if vertical_delta(&msg).is_some() {
+                        while i + n < events.len() {
+                            match &events[i + n] {
+                                Event::Key(k2) if key_event_to_msg(*k2).as_ref() == Some(&msg) => {
+                                    n += 1;
+                                }
+                                _ => break,
+                            }
+                        }
                     }
-                }
-                Ok(Event::Resize(w, h)) => {
-                    app.width = w as usize;
-                    app.height = h as usize;
+                    app.update_repeat(msg, n);
+                    app.run_pending_editor();
                     redraw = true;
+                    i += n;
                 }
-                Ok(Event::Paste(s)) => {
-                    app.update(Msg::Paste(s));
+                Event::Resize(w, h) => {
+                    app.width = *w as usize;
+                    app.height = *h as usize;
                     redraw = true;
+                    i += 1;
                 }
-                _ => {}
+                Event::Paste(s) => {
+                    app.update(Msg::Paste(s.clone()));
+                    app.run_pending_editor();
+                    redraw = true;
+                    i += 1;
+                }
+                _ => i += 1,
+            }
+            if app.aborted || app.exiting {
+                break;
             }
         }
         if redraw {
@@ -2016,6 +2078,29 @@ pub fn run_menu(files: Vec<FileSession>) -> Outcome {
     app.outcome()
 }
 
+/// Upper bound on one drained burst so a flood on stdin cannot starve
+/// rendering indefinitely; held-key repeats arrive far below this.
+const MAX_EVENT_BURST: usize = 4096;
+
+/// read_event_burst blocks for the next event, then collects every event
+/// already buffered by the terminal (or crossterm) without blocking again.
+fn read_event_burst() -> Vec<Event> {
+    let mut events = Vec::new();
+    if !crossterm::event::poll(std::time::Duration::from_millis(250)).unwrap_or(false) {
+        return events;
+    }
+    while events.len() < MAX_EVENT_BURST {
+        match crossterm::event::read() {
+            Ok(e) => events.push(e),
+            Err(_) => break,
+        }
+        if !crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
+            break;
+        }
+    }
+    events
+}
+
 /// render paints one frame: MoveTo(0,0), every view line + clear-to-EOL,
 /// then clear the remaining lines.
 fn render(w: &mut impl std::io::Write, app: &mut App) {
@@ -2026,22 +2111,26 @@ fn render(w: &mut impl std::io::Write, app: &mut App) {
 /// write_frame paints at most `height` lines: a view that outgrows the
 /// terminal (raw editor on a large file) must not flood it line by line.
 fn write_frame(w: &mut impl std::io::Write, view: &str, height: usize) {
-    use crossterm::cursor::MoveTo;
-    use crossterm::style::Print;
-    use crossterm::terminal::{Clear, ClearType};
-    let _ = execute!(w, MoveTo(0, 0));
+    // One buffered write instead of an execute! (and flush) per line: a
+    // repaint of a full-screen menu used to cost 2 syscalls per row, which
+    // is pure latency when key repeats are waiting behind the frame.
+    let mut out = String::with_capacity(view.len() + height * 8);
+    out.push_str("\x1b[1;1H"); // MoveTo(0,0)
     let mut lines = 0;
     for line in view.split('\n') {
         if lines >= height {
             break;
         }
-        let _ = execute!(w, Print(line), Clear(ClearType::UntilNewLine));
+        out.push_str(line);
+        out.push_str("\x1b[K"); // Clear(UntilNewLine)
         if lines + 1 < height {
-            let _ = execute!(w, Print("\r\n"));
+            out.push_str("\r\n");
         }
         lines += 1;
     }
-    let _ = execute!(w, Clear(ClearType::FromCursorDown));
+    out.push_str("\x1b[J"); // Clear(FromCursorDown)
+    let _ = w.write_all(out.as_bytes());
+    let _ = w.flush();
 }
 
 // --- clipboard shell-outs (Go atotto/clipboard fallback) ---------------------
@@ -2140,7 +2229,25 @@ pub fn read_clipboard() -> Result<String, String> {
 
 #[cfg(test)]
 mod frame_tests {
-    use super::write_frame;
+    use super::{key_event_to_msg, write_frame};
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+    #[test]
+    fn auto_repeat_acts_and_release_is_ignored() {
+        let repeat =
+            KeyEvent::new_with_kind(KeyCode::Char('j'), KeyModifiers::NONE, KeyEventKind::Repeat);
+        assert_eq!(
+            key_event_to_msg(repeat),
+            Some(super::Msg::Char('j', false)),
+            "held-key repeat must move the cursor"
+        );
+        let release = KeyEvent::new_with_kind(
+            KeyCode::Char('j'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        );
+        assert_eq!(key_event_to_msg(release), None, "release must not move");
+    }
 
     #[test]
     fn write_frame_stops_at_the_terminal_height() {

@@ -22,7 +22,7 @@ use crate::ui::menu::{
     SelState, TextState, WriteState, anchor_defs, anchor_holder, anchor_holder_path,
     anchor_merge_use_paths, anchor_role, copy_detached_from_doc, copy_from_doc, count_anchor_uses,
     cursor_by_path, cursor_for_row, cursor_prefix, is_path_prefix, merge_ref_uses, nodes_equal_doc,
-    read_clipboard, ref_would_cycle, remap_state_cursor, write_clipboard,
+    read_clipboard, ref_would_cycle, remap_state_cursor, vertical_delta, write_clipboard,
 };
 use crate::ui::rows::{
     SynthKey, any_type_menu, clip_runes, current_variant, display_title, doc_array_len,
@@ -701,6 +701,52 @@ fn ta_view(ta: &TextArea) -> String {
 // App key handling
 
 impl App {
+    // --- input bursts -------------------------------------------------------
+
+    /// update_repeat applies `n` identical keys collected from one terminal
+    /// input burst. Consecutive menu cursor moves collapse into one step;
+    /// everything else (typing, overlays, macro recording) replays the key so
+    /// each press keeps its own semantics.
+    pub fn update_repeat(&mut self, msg: Msg, n: usize) {
+        if n <= 1 {
+            self.update(msg);
+            return;
+        }
+        let Some(delta) = vertical_delta(&msg) else {
+            for _ in 0..n {
+                self.update(msg.clone());
+            }
+            return;
+        };
+        // Recording, text inputs and overlays keep one event per press.
+        if self.recording || !self.list_mode() || self.overlay.is_some() {
+            for _ in 0..n {
+                self.update(msg.clone());
+            }
+            return;
+        }
+        self.notice.clear();
+        self.fs_mut().startup.clear();
+        self.move_plain(delta * n as i64);
+    }
+
+    /// move_plain is the plain menu's vertical movement (key_list's j/k and
+    /// arrow branch) for a whole run of repeats. The row list does not depend
+    /// on the cursor, so one build serves the whole run.
+    fn move_plain(&mut self, delta: i64) {
+        let rows = self.menu_rows();
+        self.clamp_cursor(&rows);
+        if rows.is_empty() {
+            return; // key_list leaves a pending command untouched too
+        }
+        let n = rows.len();
+        if let Some(st) = self.top_mut() {
+            st.cursor = wrap_cursor(st.cursor, delta, n);
+        }
+        self.cmd_buf.clear(); // jump_keys drops a pending count on a plain move
+        self.visual_sync(&rows);
+    }
+
     // --- list mode ---------------------------------------------------------
 
     /// keyList is the plain menu's key table (Go keyList).
@@ -741,14 +787,13 @@ impl App {
                 if let Some(st) = self.top_mut() {
                     st.cursor = wrap_cursor(st.cursor, -1, rows.len());
                 }
-                let rows = self.menu_rows();
+                // A cursor move leaves the row set unchanged: reuse it.
                 self.visual_sync(&rows);
             }
             "down" | "j" => {
                 if let Some(st) = self.top_mut() {
                     st.cursor = wrap_cursor(st.cursor, 1, rows.len());
                 }
-                let rows = self.menu_rows();
                 self.visual_sync(&rows);
             }
             "ctrl+j" | "n" => self.move_to_value(&rows, 1),
@@ -4804,7 +4849,16 @@ impl App {
 
     /// breadcrumb renders the navigation context as a document path.
     fn breadcrumb(&mut self) -> String {
-        let Some(st) = self.top().cloned() else {
+        let st = self.top().cloned();
+        let rows = self.menu_rows_snapshot();
+        self.breadcrumb_with_rows(st.as_ref(), &rows)
+    }
+
+    /// breadcrumb_with_rows is breadcrumb for a caller that already built the
+    /// row list: the merge-key arrow needs the cursor row, and building all
+    /// rows again doubled listView's per-frame cost on a wide menu.
+    fn breadcrumb_with_rows(&mut self, st: Option<&MenuState>, rows: &[Row]) -> String {
+        let Some(st) = st else {
             return "$".to_string();
         };
         let mut crumb = crate::doc::jsondoc::path_string(&st.path);
@@ -4817,18 +4871,16 @@ impl App {
                 }
             }
         }
-        if let Some(anchor) = self.merge_crumb() {
+        if let Some(anchor) = Self::merge_crumb_row(st, rows) {
             crumb += " → ";
             crumb += &crate::doc::jsondoc::path_string(&anchor);
         }
         clip_left(&crumb, self.width)
     }
 
-    /// mergeCrumb returns the anchor path the breadcrumb appends while the
+    /// mergeCrumbRow returns the anchor path the breadcrumb appends while the
     /// cursor rests on a merged key.
-    fn merge_crumb(&mut self) -> Option<Vec<PathSeg>> {
-        let st = self.top()?.clone();
-        let rows = self.menu_rows_snapshot();
+    fn merge_crumb_row(st: &MenuState, rows: &[Row]) -> Option<Vec<PathSeg>> {
         if st.cursor >= rows.len() {
             return None;
         }
@@ -5055,8 +5107,12 @@ impl App {
         }
         b.push_str(&clip_display(&title, self.width.saturating_sub(1)));
         b.push('\n');
+        let rows = self.menu_rows_snapshot();
         b.push_str(&clip_display(
-            &style::faint(&clip_runes(&self.breadcrumb(), self.width)),
+            &style::faint(&clip_runes(
+                &self.breadcrumb_with_rows(Some(&st), &rows),
+                self.width,
+            )),
             self.width.saturating_sub(1),
         ));
         b.push('\n');
@@ -5072,7 +5128,6 @@ impl App {
         if let Some(Overlay::Search(s)) = &self.overlay {
             return self.render_search_body(b, header, s);
         }
-        let rows = self.menu_rows_snapshot();
         let desc = self.focused_desc(&st, &rows);
         let mut desc_lines: Vec<String> = Vec::new();
         if !desc.is_empty() {

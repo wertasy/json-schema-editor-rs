@@ -8346,3 +8346,59 @@ fn json_string_values_open_as_plain_text_too() {
     let m = open_msg_textarea(raw_field_schema(), doc, test_opts().raw);
     assert_eq!(textarea_text(&m), "v");
 }
+
+#[test]
+fn repeated_move_matches_individual_moves_and_wraps() {
+    let mut one = mk_app(test_doc(), test_opts());
+    let mut many = mk_app(test_doc(), test_opts());
+    for _ in 0..9 {
+        one.update(Msg::Char('j', false));
+    }
+    many.update_repeat(Msg::Char('j', false), 9);
+    assert_eq!(one.top().unwrap().cursor, many.top().unwrap().cursor);
+    // a run longer than the row count wraps exactly like separate presses
+    for _ in 0..20 {
+        one.update(Msg::Down);
+    }
+    many.update_repeat(Msg::Down, 20);
+    assert_eq!(one.top().unwrap().cursor, many.top().unwrap().cursor);
+}
+
+#[test]
+fn repeated_move_extends_visual_selection_once() {
+    let mut one = mk_app(test_doc(), test_opts());
+    let mut many = mk_app(test_doc(), test_opts());
+    for app in [&mut one, &mut many] {
+        app.update(Msg::Char('v', false));
+    }
+    for _ in 0..3 {
+        one.update(Msg::Char('j', false));
+    }
+    many.update_repeat(Msg::Char('j', false), 3);
+    assert_eq!(
+        one.top().unwrap().cursor,
+        many.top().unwrap().cursor,
+        "visual range ends on the same row"
+    );
+    assert_eq!(one.top().unwrap().sel, many.top().unwrap().sel);
+}
+
+#[test]
+fn repeated_move_still_records_every_macro_key() {
+    let mut app = mk_app(test_doc(), test_opts());
+    app.update(Msg::Char('@', false));
+    assert!(app.recording);
+    app.update_repeat(Msg::Char('j', false), 3);
+    assert_eq!(app.rec_buf.len(), 3);
+    assert_eq!(app.top().unwrap().cursor, 3);
+}
+
+#[test]
+fn repeated_typing_replays_every_character() {
+    let mut app = mk_app(test_doc(), test_opts());
+    press(&mut app, &["enter"]); // edit the first field
+    app.update(Msg::Ctrl('u'));
+    app.update_repeat(Msg::Char('a', false), 3);
+    press(&mut app, &["enter"]);
+    assert_eq!(str_at(&app.fs().doc, &["name"]), "aaa");
+}

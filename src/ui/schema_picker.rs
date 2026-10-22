@@ -241,6 +241,23 @@ impl PickerModel {
         b
     }
 
+    /// handle_repeat applies a run of identical keys from one input burst.
+    /// Consecutive vertical moves are one cursor step; other keys replay so
+    /// their per-press semantics (text edits, enter, esc) are unchanged.
+    fn handle_repeat(&mut self, key: &PickerKey, n: usize) -> Option<Option<Entry>> {
+        if n > 1 && matches!(key, PickerKey::Up | PickerKey::Down) {
+            let delta = if matches!(key, PickerKey::Up) { -1 } else { 1 };
+            self.cursor = wrap_cursor(self.cursor as i64, delta * n as i64, self.filtered.len());
+            return None;
+        }
+        for _ in 0..n {
+            if let Some(choice) = self.handle(key) {
+                return Some(choice);
+            }
+        }
+        None
+    }
+
     fn handle(&mut self, key: &PickerKey) -> Option<Option<Entry>> {
         match key {
             PickerKey::Esc | PickerKey::CtrlC => return Some(None),
@@ -289,7 +306,7 @@ fn modifies_text(key: &PickerKey) -> bool {
 
 /// The picker's key space: the widget keys plus navigation/commit keys the
 /// widgets enum does not carry.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PickerKey {
     Widget(Key),
     Up,
@@ -337,13 +354,18 @@ fn pick_tui(entries: Vec<Entry>, filename: String, query: &str) -> Option<Entry>
             let _ = out.write_all(b"\x1b[H\x1b[2J");
             let _ = out.write_all(frame(&m.view()).as_bytes());
             let _ = out.flush();
-            // wait for one key event
-            let key: PickerKey = loop {
+            // Block for one key, then drain the rest of the burst. A held
+            // arrow key queues repeats faster than a long catalog repaints;
+            // one frame per burst keeps the cursor from coasting after the
+            // key is released (and collapses consecutive moves to one step).
+            let mut keys: Vec<PickerKey> = Vec::new();
+            loop {
                 if crossterm::event::poll(Duration::from_millis(250)).unwrap_or(false) {
                     match crossterm::event::read() {
                         Ok(crossterm::event::Event::Key(k)) => {
-                            if k.kind == crossterm::event::KeyEventKind::Press {
-                                break to_key(&k);
+                            if k.kind != crossterm::event::KeyEventKind::Release {
+                                keys.push(to_key(&k));
+                                break;
                             }
                         }
                         Ok(crossterm::event::Event::Resize(w, h)) => {
@@ -353,9 +375,35 @@ fn pick_tui(entries: Vec<Entry>, filename: String, query: &str) -> Option<Entry>
                         _ => {}
                     }
                 }
-            };
-            if let Some(choice) = m.handle(&key) {
-                return choice;
+            }
+            while keys.len() < MAX_PICKER_BURST
+                && crossterm::event::poll(Duration::ZERO).unwrap_or(false)
+            {
+                match crossterm::event::read() {
+                    Ok(crossterm::event::Event::Key(k)) => {
+                        if k.kind != crossterm::event::KeyEventKind::Release {
+                            keys.push(to_key(&k));
+                        }
+                    }
+                    Ok(crossterm::event::Event::Resize(w, h)) => {
+                        m.width = w as usize;
+                        m.height = h as usize;
+                    }
+                    _ => {}
+                }
+            }
+            let mut i = 0;
+            while i < keys.len() {
+                let mut n = 1;
+                if matches!(keys[i], PickerKey::Up | PickerKey::Down) {
+                    while i + n < keys.len() && keys[i + n] == keys[i] {
+                        n += 1;
+                    }
+                }
+                if let Some(choice) = m.handle_repeat(&keys[i], n) {
+                    return choice;
+                }
+                i += n;
             }
         }
     })();
@@ -468,6 +516,9 @@ pub fn pick_accessible(entries: &[Entry], opts: &PickOptions) -> Option<Entry> {
 }
 
 use std::time::Duration;
+
+/// Cap one drained picker burst so a flood on stdin cannot starve rendering.
+const MAX_PICKER_BURST: usize = 1024;
 
 #[cfg(test)]
 mod tests {
