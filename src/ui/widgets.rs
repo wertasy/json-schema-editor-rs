@@ -281,6 +281,33 @@ pub enum Key {
     CtrlK,
     CtrlU,
     CtrlW,
+    /// alt+f: end of the current/next word (shell forward-word)
+    WordForward,
+    /// alt+b: start of the current/previous word (shell backward-word)
+    WordBackward,
+}
+
+/// is_word_delim reports whether `c` separates words for alt+f/alt+b motion
+/// and ctrl+w kills: whitespace plus the punctuation common in config/code.
+fn is_word_delim(c: char) -> bool {
+    c.is_whitespace()
+        || matches!(
+            c,
+            ',' | '.'
+                | '+'
+                | '-'
+                | '='
+                | '_'
+                | '/'
+                | '\\'
+                | ':'
+                | '?'
+                | '!'
+                | '$'
+                | '#'
+                | '@'
+                | '*'
+        )
 }
 
 /// TextInput is a one-line editable buffer with a cursor and tab-completion
@@ -406,27 +433,27 @@ impl TextInput {
             .map(|c| self.cursor + c.len_utf8())
     }
 
-    /// deleteWordBackward: bubbles ctrl+w — swallow the whitespace run, then
+    /// deleteWordBackward: bubbles ctrl+w — swallow the delimiter run, then
     /// the word run before the cursor.
     fn delete_word_backward(&mut self) {
         let mut cut = self.cursor;
         while let Some(i) = self.prev_boundary_at(cut) {
-            if !self.value[i..cut].chars().next().unwrap().is_whitespace() {
+            if !is_word_delim(self.value[i..cut].chars().next().unwrap()) {
                 break;
             }
             cut = i;
         }
         while let Some(i) = self.prev_boundary_at(cut) {
-            if self.value[i..cut].chars().next().unwrap().is_whitespace() {
+            if is_word_delim(self.value[i..cut].chars().next().unwrap()) {
                 break;
             }
             cut = i;
         }
-        // bubbles lands back on the whitespace run and steps right once, so
-        // trailing spaces survive a word kill
+        // bubbles lands back on the delimiter run and steps right once, so
+        // trailing delimiters survive a word kill
         if cut > 0 {
             if let Some(c) = self.value[cut..].chars().next() {
-                if c.is_whitespace() {
+                if is_word_delim(c) {
                     cut += c.len_utf8();
                 }
             }
@@ -437,6 +464,43 @@ impl TextInput {
 
     fn prev_boundary_at(&self, pos: usize) -> Option<usize> {
         self.value[..pos].char_indices().next_back().map(|(i, _)| i)
+    }
+
+    /// word_forward moves to the end of the current word, or skips the
+    /// delimiter run and the following word (alt+f).
+    fn word_forward(&mut self) {
+        let mut end = self.cursor;
+        let mut in_word = false;
+        for (i, c) in self.value[self.cursor..].char_indices() {
+            let next = self.cursor + i + c.len_utf8();
+            if is_word_delim(c) {
+                if in_word {
+                    break;
+                }
+            } else {
+                in_word = true;
+            }
+            end = next;
+        }
+        self.cursor = end;
+    }
+
+    /// word_backward moves to the start of the current word, or skips the
+    /// delimiter run and the preceding word (alt+b).
+    fn word_backward(&mut self) {
+        let mut start = self.cursor;
+        let mut in_word = false;
+        for (i, c) in self.value[..self.cursor].char_indices().rev() {
+            if is_word_delim(c) {
+                if in_word {
+                    break;
+                }
+            } else {
+                in_word = true;
+            }
+            start = i;
+        }
+        self.cursor = start;
     }
 
     pub fn handle_key(&mut self, key: Key) {
@@ -476,6 +540,8 @@ impl TextInput {
                 self.cursor = 0;
             }
             Key::CtrlW => self.delete_word_backward(),
+            Key::WordForward => self.word_forward(),
+            Key::WordBackward => self.word_backward(),
             Key::Enter | Key::Up | Key::Down => {}
         }
     }
@@ -607,32 +673,72 @@ impl TextArea {
     fn delete_word_backward(&mut self) {
         let line = &self.lines[self.row];
         let mut cut = self.col;
-        let ws = |pos: usize| -> bool { line[..pos].chars().next_back().unwrap().is_whitespace() };
-        while cut > 0 && ws(cut) {
+        let delim =
+            |pos: usize| -> bool { is_word_delim(line[..pos].chars().next_back().unwrap()) };
+        while cut > 0 && delim(cut) {
             cut = line[..cut]
                 .char_indices()
                 .next_back()
                 .map(|(i, _)| i)
                 .unwrap();
         }
-        while cut > 0 && !ws(cut) {
+        while cut > 0 && !delim(cut) {
             cut = line[..cut]
                 .char_indices()
                 .next_back()
                 .map(|(i, _)| i)
                 .unwrap();
         }
-        // bubbles lands back on the whitespace run and steps right once, so
-        // trailing spaces survive a word kill
+        // bubbles lands back on the delimiter run and steps right once, so
+        // trailing delimiters survive a word kill
         if cut > 0 {
             if let Some(c) = self.lines[self.row][cut..].chars().next() {
-                if c.is_whitespace() {
+                if is_word_delim(c) {
                     cut += c.len_utf8();
                 }
             }
         }
         self.lines[self.row].replace_range(cut..self.col, "");
         self.col = cut;
+    }
+
+    /// word_forward moves to the end of the current/next word on this line
+    /// (alt+f); the cursor stops at the line end.
+    fn word_forward(&mut self) {
+        let line = &self.lines[self.row];
+        let mut end = self.col;
+        let mut in_word = false;
+        for (i, c) in line[self.col..].char_indices() {
+            let next = self.col + i + c.len_utf8();
+            if is_word_delim(c) {
+                if in_word {
+                    break;
+                }
+            } else {
+                in_word = true;
+            }
+            end = next;
+        }
+        self.col = end;
+    }
+
+    /// word_backward moves to the start of the current/previous word on this
+    /// line (alt+b); the cursor stops at the line start.
+    fn word_backward(&mut self) {
+        let line = &self.lines[self.row];
+        let mut start = self.col;
+        let mut in_word = false;
+        for (i, c) in line[..self.col].char_indices().rev() {
+            if is_word_delim(c) {
+                if in_word {
+                    break;
+                }
+            } else {
+                in_word = true;
+            }
+            start = i;
+        }
+        self.col = start;
     }
 
     pub fn handle_key(&mut self, key: Key) {
@@ -698,6 +804,8 @@ impl TextArea {
                 self.col = 0;
             }
             Key::CtrlW => self.delete_word_backward(),
+            Key::WordForward => self.word_forward(),
+            Key::WordBackward => self.word_backward(),
         }
     }
 }
@@ -1144,12 +1252,64 @@ mod tests {
         ti.handle_key(Key::CtrlW);
         assert_eq!(ti.value(), "");
 
+        // punctuation is a delimiter for word kills too
+        let mut ti = TextInput::new();
+        ti.set_value("foo.bar baz");
+        ti.handle_key(Key::CtrlW);
+        assert_eq!(ti.value(), "foo.bar ");
+        ti.handle_key(Key::CtrlW);
+        assert_eq!(ti.value(), "foo.");
+        ti.handle_key(Key::CtrlW);
+        assert_eq!(ti.value(), "");
+
         // edge cases on an empty/zero-length buffer
         let mut ti = TextInput::new();
         ti.handle_key(Key::Backspace);
         ti.handle_key(Key::Delete);
         ti.handle_key(Key::CtrlW);
         assert_eq!(ti.value(), "");
+    }
+
+    #[test]
+    fn text_input_word_motion() {
+        let mut ti = TextInput::new();
+        ti.set_value("one two three");
+        ti.handle_key(Key::WordBackward); // end of "three" -> its start
+        assert_eq!(ti.cursor(), 8);
+        ti.handle_key(Key::WordBackward);
+        assert_eq!(ti.cursor(), 4);
+        ti.handle_key(Key::WordForward); // start of "two" -> its end
+        assert_eq!(ti.cursor(), 7);
+        ti.handle_key(Key::WordForward);
+        assert_eq!(ti.cursor(), 13);
+        ti.handle_key(Key::WordForward); // already at the end
+        assert_eq!(ti.cursor(), 13);
+
+        // whitespace runs and unicode stay on char boundaries
+        let mut ti = TextInput::new();
+        ti.set_value("foo   bar 世界");
+        ti.handle_key(Key::WordBackward);
+        assert_eq!(ti.cursor(), 10);
+        ti.handle_key(Key::WordBackward);
+        assert_eq!(ti.cursor(), 6);
+        ti.handle_key(Key::WordForward);
+        assert_eq!(ti.cursor(), 9);
+        ti.handle_key(Key::WordForward);
+        assert_eq!(ti.cursor(), "foo   bar 世界".chars().count());
+
+        // code punctuation splits words as well
+        let mut ti = TextInput::new();
+        ti.set_value("foo.bar_baz qux");
+        ti.handle_key(Key::WordBackward);
+        assert_eq!(ti.cursor(), 12);
+        ti.handle_key(Key::WordBackward);
+        assert_eq!(ti.cursor(), 8);
+        ti.handle_key(Key::WordBackward);
+        assert_eq!(ti.cursor(), 4);
+        ti.handle_key(Key::WordForward);
+        assert_eq!(ti.cursor(), 7);
+        ti.handle_key(Key::WordForward);
+        assert_eq!(ti.cursor(), 11);
     }
 
     #[test]
@@ -1207,6 +1367,24 @@ mod tests {
         ta.insert_str("cd");
         assert_eq!(ta.value(), "ab\ncd");
         assert_eq!(ta.cursor(), (1, 2));
+    }
+
+    #[test]
+    fn text_area_word_motion_is_line_scoped() {
+        let mut ta = TextArea::new();
+        ta.set_value("one two\nthree four");
+        ta.handle_key(Key::Down);
+        ta.handle_key(Key::End);
+        ta.handle_key(Key::WordBackward);
+        assert_eq!(ta.cursor(), (1, 6));
+        ta.handle_key(Key::WordBackward);
+        assert_eq!(ta.cursor(), (1, 0));
+        ta.handle_key(Key::WordBackward); // stops at the line start
+        assert_eq!(ta.cursor(), (1, 0));
+        ta.handle_key(Key::WordForward);
+        assert_eq!(ta.cursor(), (1, 5));
+        ta.handle_key(Key::WordForward);
+        assert_eq!(ta.cursor(), (1, 10));
     }
 
     #[test]

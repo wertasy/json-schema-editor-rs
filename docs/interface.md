@@ -135,6 +135,7 @@ variant: <变体类型名> <变体签名>  ← oneOf 选择器与变体编辑器
 | `tab` / `ctrl+n` | 下一个补全候选。 |
 | `shift+tab` / `ctrl+p` | 上一个补全候选。 |
 | `←`/`→`/`Home`/`End` | 行内移动。 |
+| `alt+f` / `alt+b` | 下一词尾 / 上一词首；空白及 `,.+-=_/\:?!$#@*` 为分词符。 |
 | `ctrl+a` / `ctrl+e` | 行首 / 行尾。 |
 | `ctrl+k` / `ctrl+u` / `ctrl+w` | 删到行尾 / 删到行首 / 删除前一个词。 |
 | `backspace` / `delete` | 删除字符。 |

@@ -434,6 +434,13 @@ fn to_key(k: &crossterm::event::KeyEvent) -> PickerKey {
         // without these the letters land in the search input.
         KeyCode::Char('j') if k.modifiers == KeyModifiers::CONTROL => PickerKey::Down,
         KeyCode::Char('k') if k.modifiers == KeyModifiers::CONTROL => PickerKey::Up,
+        // shell-style word motion (alt+f/alt+b) in the query input
+        KeyCode::Char('f') if k.modifiers == KeyModifiers::ALT => {
+            PickerKey::Widget(Key::WordForward)
+        }
+        KeyCode::Char('b') if k.modifiers == KeyModifiers::ALT => {
+            PickerKey::Widget(Key::WordBackward)
+        }
         KeyCode::Char(c) => PickerKey::Widget(Key::Char(c)),
         KeyCode::Enter => PickerKey::Enter,
         KeyCode::Backspace => PickerKey::Widget(Key::Backspace),

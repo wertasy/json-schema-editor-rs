@@ -347,6 +347,8 @@ fn key(k: &str) -> Msg {
         "ctrl+p" => Msg::Ctrl('p'),
         "alt+i" => Msg::Char('i', true),
         "alt+x" => Msg::Char('x', true),
+        "alt+f" => Msg::Char('f', true),
+        "alt+b" => Msg::Char('b', true),
         _ => {
             let c = k.chars().next().unwrap_or(' ');
             Msg::Char(c, false)
@@ -360,7 +362,8 @@ fn press(app: &mut App, keys: &[&str]) {
             "enter" | "esc" | "up" | "down" | "left" | "right" | "space" | "tab" | "shift+tab"
             | "backspace" | "delete" | "home" | "end" | "ctrl+c" | "ctrl+j" | "ctrl+k"
             | "ctrl+s" | "ctrl+r" | "ctrl+o" | "ctrl+i" | "ctrl+u" | "ctrl+n" | "ctrl+p"
-            | "alt+i" | "alt+x" | "alt+enter" | "pgup" | "pgdown" | "ctrl+f" | "ctrl+b" => {
+            | "alt+i" | "alt+x" | "alt+f" | "alt+b" | "alt+enter" | "pgup" | "pgdown"
+            | "ctrl+f" | "ctrl+b" => {
                 app.update(key(k));
             }
             _ => {
@@ -8829,6 +8832,23 @@ fn search_replace_caret_follows_focused_input() {
         !row(&view, "replace:").contains("\x1b[7m"),
         "replace row has a caret:\n{view}"
     );
+}
+
+#[test]
+fn search_input_alt_word_motion() {
+    let mut m = items_app(test_doc());
+    press(&mut m, &["/"]);
+    press(&mut m, &["o", "n", "e", "space", "t", "w", "o"]);
+    press(&mut m, &["alt+b", "alt+b"]);
+    press(&mut m, &["alt+f"]);
+    press(&mut m, &["X"]);
+    assert_eq!(search_state(&m).ti.value(), "oneX two");
+    press(&mut m, &["alt+f"]);
+    press(&mut m, &["Z"]);
+    assert_eq!(search_state(&m).ti.value(), "oneX twoZ");
+    press(&mut m, &["alt+b"]);
+    press(&mut m, &["Y"]);
+    assert_eq!(search_state(&m).ti.value(), "oneX YtwoZ");
 }
 
 #[test]

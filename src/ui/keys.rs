@@ -703,6 +703,9 @@ fn paste_has_key(members: &[Member], key: &str) -> bool {
 pub(crate) fn msg_key(msg: &Msg) -> Option<Key> {
     Some(match msg {
         Msg::Char(c, false) => Key::Char(*c),
+        // shell-style word motion inside every text input
+        Msg::Char('f', true) | Msg::Char('F', true) => Key::WordForward,
+        Msg::Char('b', true) | Msg::Char('B', true) => Key::WordBackward,
         Msg::Enter => Key::Enter,
         Msg::Backspace => Key::Backspace,
         Msg::Delete => Key::Delete,

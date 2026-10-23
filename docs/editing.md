@@ -19,7 +19,7 @@
 
 - `enter` 应用，`esc` 取消。
 - `tab`/`ctrl+n`、`shift+tab`/`ctrl+p` 循环补全候选。
-- 普通行内移动/删除键可用；`ctrl+a`/`ctrl+e` 行首/行尾，`ctrl+k`/`ctrl+u`/`ctrl+w` 删除。
+- 普通行内移动/删除键可用；`alt+f`/`alt+b` 按词前后移动（空白及 `,.+-=_/\:?!$#@*` 分词），`ctrl+a`/`ctrl+e` 行首/行尾，`ctrl+k`/`ctrl+u`/`ctrl+w` 删除。
 
 ### 文本自动补全
 
@@ -81,7 +81,7 @@
 - 无值（缺失或显式 null）时才主动打开类型选择器：JSON 内建类型 `String`、`Number`、`Boolean`、`Object`、`Array`、`Null`，以及 schema 顶层 `$defs` / `definitions` 中定义的命名类型（按定义顺序排在 `Null` 之后、`JSON` 之前）。
 - `t` 可在已有值上显式打开同一个类型选择器，用于主动切换类型；切换前确认 `Replace current value? (y/n)`。
 - 选中 schema 定义的类型会使用该定义的真实表单：对象按 `properties` 下钻、枚举进入选择器、数组进入条目菜单、`oneOf` 定义进入其变体选择器；定义若降级为 raw（例如递归或不可达 `$ref`）则不会列入。
-- 类型较多时在变体/类型选择器内按 `/` 进入搜索模式。搜索栏与 `Select a schema` 一致：查询从空开始、块状光标，支持 `←`/`→`/`Home`/`End`、`backspace`/`delete`、`ctrl+a/e/k/u/w` 编辑；`tab`/`shift+tab` 与 `ctrl+j`/`ctrl+k` 移动结果。光标保持当前行（打开选择器时即当前变体）；键入即实时收窄列表（匹配标题、键与结构签名）。`enter` 选中，`esc` 清除搜索并把光标恢复到打开搜索时的行；搜索模式中的 `u` 是普通字符，不会触发撤销，也不会打开字段搜索 overlay。
+- 类型较多时在变体/类型选择器内按 `/` 进入搜索模式。搜索栏与 `Select a schema` 一致：查询从空开始、块状光标，支持 `←`/`→`/`Home`/`End`、`alt+f`/`alt+b` 按词移动、`backspace`/`delete`、`ctrl+a/e/k/u/w` 编辑；`tab`/`shift+tab` 与 `ctrl+j`/`ctrl+k` 移动结果。光标保持当前行（打开选择器时即当前变体）；键入即实时收窄列表（匹配标题、键与结构签名）。`enter` 选中，`esc` 清除搜索并把光标恢复到打开搜索时的行；搜索模式中的 `u` 是普通字符，不会触发撤销，也不会打开字段搜索 overlay。
 - 选择器内 `String`/`Number` 就地输入，`Boolean` 直接切换，`Object`/`Array` 进入可直接增删键/条目的子菜单，`Null` 写入 `null`；`JSON` 打开内置 raw 文本区，已有值按当前文件格式预填（显式按 `e` 仍可外编）。
 - `d` 删除。
 - `a`/`A` 新增的键没有值，因此先选类型；键以 `null` 占位并保留插入位置，取消类型选择后可用 `d` 删除。
