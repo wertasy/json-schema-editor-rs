@@ -6802,6 +6802,121 @@ fn issues_live_refresh() {
 }
 
 #[test]
+fn enum_variant_add_returns_to_parent_menu() {
+    let schema = schema_from_json(
+        r#"{
+          "type": "object",
+          "properties": {
+            "rules": {"type": "array", "items": {"oneOf": [
+              {"type": "string", "title": "Name", "enum": ["a", "b"]},
+              {"type": "object", "title": "Body",
+               "properties": {"x": {"type": "string"}}}
+            ]}}
+          }
+        }"#,
+    );
+    let mut m = app_with(
+        schema,
+        dbuild(|db| db.obj(vec![("rules", db.arr(vec![]))])),
+        test_opts(),
+    );
+    press(&mut m, &["enter"]); // rules items menu
+    assert_eq!(m.fs().stack.len(), 2);
+    press(&mut m, &["enter"]); // < Add item > opens the variant picker
+    assert_eq!(m.top().unwrap().kind, MenuKind::OneOf);
+    assert_eq!(m.fs().stack.len(), 3);
+    let rows = m.menu_rows();
+    let pos = rows
+        .iter()
+        .position(|r| {
+            r.variant.map_or(false, |v| {
+                m.fs().schema.nodes[v as usize].kind == Kind::Enum
+            })
+        })
+        .expect("enum variant row");
+    m.top_mut().unwrap().cursor = pos;
+    press(&mut m, &["enter"]); // choose the enum variant
+    assert!(matches!(m.overlay, Some(Overlay::Sel(_))));
+    press(&mut m, &["enter"]); // choose its first option
+    assert!(m.overlay.is_none());
+    assert_eq!(
+        m.top().unwrap().kind,
+        MenuKind::Items,
+        "enum selection must return to the array menu"
+    );
+    assert_eq!(m.fs().stack.len(), 2);
+    assert_eq!(sget(&m.fs().doc, &[ks("rules"), PathSeg::Idx(0)]), "a");
+
+    // a boolean variant has no editor either: it must also leave the picker
+    let bool_schema = schema_from_json(
+        r#"{
+          "type": "object",
+          "properties": {
+            "flags": {"type": "array", "items": {"oneOf": [
+              {"type": "boolean", "title": "Flag"},
+              {"type": "string", "title": "Name"}
+            ]}}
+          }
+        }"#,
+    );
+    let mut bm = app_with(
+        bool_schema,
+        dbuild(|db| db.obj(vec![("flags", db.arr(vec![]))])),
+        test_opts(),
+    );
+    press(&mut bm, &["enter", "enter"]); // items -> < Add item >
+    assert_eq!(bm.top().unwrap().kind, MenuKind::OneOf);
+    let pos = bm
+        .menu_rows()
+        .iter()
+        .position(|r| {
+            r.variant.map_or(false, |v| {
+                bm.fs().schema.nodes[v as usize].kind == Kind::Boolean
+            })
+        })
+        .expect("boolean variant row");
+    bm.top_mut().unwrap().cursor = pos;
+    press(&mut bm, &["enter"]);
+    assert!(bm.overlay.is_none());
+    assert_eq!(bm.top().unwrap().kind, MenuKind::Items);
+    assert_eq!(bm.fs().stack.len(), 2);
+    assert_eq!(
+        bm.fs()
+            .doc
+            .value(bm.fs().doc.get(&[ks("flags"), PathSeg::Idx(0)]).unwrap()),
+        &Value::Bool(true)
+    );
+
+    // same for a typed map's < Add key >
+    let map_schema = schema_from_json(
+        r#"{
+          "type": "object",
+          "additionalProperties": {"oneOf": [
+            {"type": "string", "title": "Name", "enum": ["a", "b"]},
+            {"type": "integer", "title": "Count"}
+          ]}
+        }"#,
+    );
+    let mut mm = app_with(map_schema, dbuild(|db| db.obj(vec![])), test_opts());
+    press(&mut mm, &["a", "k", "enter"]);
+    assert_eq!(mm.top().unwrap().kind, MenuKind::OneOf);
+    let rows = mm.menu_rows();
+    let pos = rows
+        .iter()
+        .position(|r| {
+            r.variant.map_or(false, |v| {
+                mm.fs().schema.nodes[v as usize].kind == Kind::Enum
+            })
+        })
+        .expect("enum variant row");
+    mm.top_mut().unwrap().cursor = pos;
+    press(&mut mm, &["enter", "enter"]);
+    assert!(mm.overlay.is_none());
+    assert_eq!(mm.fs().stack.len(), 1, "back to the map menu");
+    assert_eq!(str_at(&mm.fs().doc, &["k"]), "a");
+}
+
+#[test]
 fn one_of_item_drill_existing() {
     let (schema, one_of, _) = infer_schema();
     let doc = dbuild(|db| {

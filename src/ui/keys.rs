@@ -2501,25 +2501,21 @@ impl App {
             let n = &self.fs().schema.nodes[variant as usize];
             (n.kind, n.null_only)
         };
+        // Every variant editor replaces the picker it was chosen from, so the
+        // picker never lingers above the parent menu. A root oneOf picker has
+        // no parent and stays.
+        if self.top().map(|st| st.kind) == Some(MenuKind::OneOf) && self.fs().stack.len() > 1 {
+            self.fs_mut().stack.pop();
+        }
         match kind {
             // choosing the null type writes JSON null; there is nothing to
             // edit, so return to the parent menu
             Kind::Raw if null_only => {
                 let n = self.fs_mut().doc.new_null();
                 let _ = self.fs_mut().doc.set(&path, n);
-                if self.top().map(|st| st.kind) == Some(MenuKind::OneOf)
-                    && self.fs().stack.len() > 1
-                {
-                    self.fs_mut().stack.pop();
-                }
             }
             Kind::OneOf => {
                 // a schema-defined type may itself be a variant group
-                if self.top().map(|st| st.kind) == Some(MenuKind::OneOf)
-                    && self.fs().stack.len() > 1
-                {
-                    self.fs_mut().stack.pop();
-                }
                 if dynamic_variants(&self.fs().schema, variant).is_some() {
                     self.nav_forward();
                     let st = self.dynamic_menu(variant, path);
@@ -2532,12 +2528,6 @@ impl App {
                 }
             }
             Kind::Object | Kind::Map | Kind::Array => {
-                // the variant is chosen: the editor replaces the picker
-                if self.top().map(|st| st.kind) == Some(MenuKind::OneOf)
-                    && self.fs().stack.len() > 1
-                {
-                    self.fs_mut().stack.pop();
-                }
                 self.push(variant, path);
                 if let Some(st) = self.top_mut() {
                     st.one_of = one_of;
@@ -2560,12 +2550,7 @@ impl App {
                 }));
             }
             _ => {
-                // scalar / raw: leave the picker and edit at the field row
-                if self.top().map(|st| st.kind) == Some(MenuKind::OneOf)
-                    && self.fs().stack.len() > 1
-                {
-                    self.fs_mut().stack.pop();
-                }
+                // scalar / raw: edit at the field row in the parent menu
                 self.open_field(variant, path.clone(), false);
             }
         }
