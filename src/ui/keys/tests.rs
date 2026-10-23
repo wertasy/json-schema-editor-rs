@@ -7965,6 +7965,53 @@ fn array_item_selection_colors_labels_and_deletes_batch() {
 }
 
 #[test]
+fn nested_esc_clears_array_selection_before_back() {
+    let doc = dbuild(|db| {
+        db.obj(vec![(
+            "mounts",
+            db.arr(vec![
+                db.obj(vec![("src", db.s("/a")), ("dst", db.s("/1"))]),
+                db.obj(vec![("src", db.s("/b")), ("dst", db.s("/2"))]),
+            ]),
+        )])
+    });
+    let mut m = items_app(doc);
+    press(&mut m, &["down", "down", "down", "down", "enter"]);
+    assert_eq!(m.fs().stack.len(), 2);
+    press(&mut m, &["down", "m", "down", "m"]); // row 0 is < Add item >
+    assert_eq!(m.top().unwrap().sel.len(), 2);
+
+    m.update(Msg::Esc);
+    assert_eq!(
+        m.fs().stack.len(),
+        2,
+        "esc must clear the marks, not leave the array menu"
+    );
+    assert!(m.top().unwrap().sel.is_empty());
+    assert_eq!(m.notice, "selection cleared");
+
+    // the next esc navigates back
+    m.update(Msg::Esc);
+    assert_eq!(m.fs().stack.len(), 1);
+
+    // q aliases esc outside inputs
+    press(&mut m, &["enter", "down", "m"]);
+    assert_eq!(m.top().unwrap().sel.len(), 1);
+    press(&mut m, &["q"]);
+    assert_eq!(m.fs().stack.len(), 2);
+    assert!(m.top().unwrap().sel.is_empty());
+
+    // a visual selection is cancelled in one esc as well
+    press(&mut m, &["down", "v", "down"]);
+    assert!(m.top().unwrap().visual);
+    assert!(!m.top().unwrap().sel.is_empty());
+    m.update(Msg::Esc);
+    assert_eq!(m.fs().stack.len(), 2);
+    assert!(!m.top().unwrap().visual);
+    assert!(m.top().unwrap().sel.is_empty());
+}
+
+#[test]
 fn array_item_visual_select_marks_items() {
     let mut m = items_app(test_doc());
     press(&mut m, &["down", "down", "down", "down", "enter"]);

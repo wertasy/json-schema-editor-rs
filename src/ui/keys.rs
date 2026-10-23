@@ -1178,12 +1178,22 @@ impl App {
                 }
             }
             "esc" => {
-                let visual = self.top().map(|st| st.visual).unwrap_or(false);
-                if visual {
+                // esc/q cancels a live multi-selection at any menu depth
+                // before it navigates: marks and visual select both count.
+                let (visual, selected) = self
+                    .top()
+                    .map_or((false, false), |st| (st.visual, !st.sel.is_empty()));
+                if visual || selected {
                     if let Some(st) = self.top_mut() {
                         st.visual = false;
+                        st.sel.clear();
                     }
-                    self.notice = "visual select off".to_string();
+                    self.notice = if visual {
+                        "visual select off"
+                    } else {
+                        "selection cleared"
+                    }
+                    .to_string();
                 } else {
                     self.back();
                 }
@@ -1431,16 +1441,6 @@ impl App {
                 st.visual = false; // navigation ends a visual select
             }
             self.nav_back_step(leaving);
-            return;
-        }
-        // A live multi-selection is cancelled before the session can be
-        // left: esc/q on the root screen clear the marks first.
-        let selected = self.top().map_or(false, |st| !st.sel.is_empty());
-        if selected {
-            if let Some(st) = self.top_mut() {
-                st.sel.clear();
-            }
-            self.notice = "selection cleared".to_string();
             return;
         }
         let dirty = self.dirty_files();
