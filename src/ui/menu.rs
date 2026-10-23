@@ -84,7 +84,7 @@ pub mod style {
         render("38;5;215", s)
     }
     pub fn val_default(s: &str) -> String {
-        render("38;5;253", s)
+        render("38;5;245", s)
     }
     pub fn diff(s: &str) -> String {
         render("1;38;5;204", s)
