@@ -118,7 +118,7 @@ cargo run -- -s examples/server.schema.json examples/server.config.json
 cargo build --release --target x86_64-unknown-linux-musl   # 静态发布构建
 ```
 
-代码结构、模块边界、测试约定与修改规则见 [AGENTS.md](AGENTS.md)。发布由 `.github/workflows/release.yml` 完成：推送 `v*` 标签即构建六个平台目标并创建 GitHub Release。
+代码结构、模块边界、测试约定与修改规则见 [AGENTS.md](AGENTS.md)。发布由 `.github/workflows/release.yml` 完成：推送 `v*` 标签即构建六个平台目标、创建 GitHub Release，并发布 crate 到 crates.io。
 
 ## 许可证
 

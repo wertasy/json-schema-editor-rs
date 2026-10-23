@@ -121,7 +121,9 @@ To add a format:
 
 ## Release
 
-`.github/workflows/release.yml` builds Linux musl (amd64/arm64), macOS and Windows (amd64/arm64) on `v*` tags, injects `JSE_VERSION_OVERRIDE`/`JSE_COMMIT`/`JSE_BUILD_DATE`, packages binary + README + docs + LICENSE, writes `checksums.txt`, and creates the GitHub Release.
+`.github/workflows/release.yml` builds Linux musl (amd64/arm64), macOS and Windows (amd64/arm64) on `v*` tags, injects `JSE_VERSION_OVERRIDE`/`JSE_COMMIT`/`JSE_BUILD_DATE`, packages binary + README + docs + LICENSE, writes `checksums.txt`, creates the GitHub Release, and then publishes the crate to crates.io. The publish job uses the `CARGO_REGISTRY_TOKEN` repository secret, verifies that the tag matches the `Cargo.toml` version, and skips publishing when that version already exists on crates.io.
+
+A release bumps the version in `Cargo.toml`, `Cargo.lock`, and the version examples in `docs/install.md` before tagging:
 
 ```sh
 git tag -a vX.Y.Z -m "jse vX.Y.Z"
