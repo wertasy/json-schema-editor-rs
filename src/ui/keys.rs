@@ -6570,7 +6570,20 @@ impl App {
             RowKind::Add | RowKind::Save | RowKind::Raw | RowKind::Remove | RowKind::Expand => {
                 left = style::accent(&r.label);
             }
-            RowKind::NoItems => left = style::faint(&r.label),
+            RowKind::NoItems => {
+                // An empty object menu's "< Add Key >" is an action row and
+                // carries the accent color; the oneOf/enum-array placeholders
+                // are informational and stay faint.
+                let placeholder = matches!(
+                    st.map(|s| s.kind),
+                    Some(MenuKind::OneOf) | Some(MenuKind::EnumArray)
+                );
+                left = if placeholder {
+                    style::faint(&r.label)
+                } else {
+                    style::accent(&r.label)
+                };
+            }
             RowKind::Unknown => {
                 let title = r.label.clone();
                 left = if sel && cursor {
@@ -6630,7 +6643,7 @@ impl App {
             prefix = style::fg9("> "); // selected rows carry a red > marker
         }
         let mut line = format!("{prefix}{content}");
-        if r.kind == RowKind::Unknown && !self.fs().schema.schema_less {
+        if r.kind == RowKind::Unknown && !r.in_schema && !self.fs().schema.schema_less {
             line += &format!(" {}", style::faint("(not in schema)"));
         }
         if self.drill_marker(r) {
@@ -6639,7 +6652,7 @@ impl App {
         if matches!(r.kind, RowKind::Field | RowKind::Drill | RowKind::Unknown) {
             if self.has_err(&r.path) {
                 line += &format!(" {}", style::fg1(ERR));
-            } else if (r.kind == RowKind::Unknown && !self.fs().schema.schema_less)
+            } else if (r.kind == RowKind::Unknown && !r.in_schema && !self.fs().schema.schema_less)
                 || self.has_warn(&r.path)
             {
                 line += &format!(" {}", style::fg3(WARN));

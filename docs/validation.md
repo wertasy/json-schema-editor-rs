@@ -16,7 +16,7 @@ jse 把表单当作编辑辅助，把 **JSON Schema 校验**当作权威判定�
 | 模式映射 | `patternProperties`（单个模式 + `additionalProperties: false`） | 同映射，但 `a` 新增键必须匹配该正则 |
 | 数组 | `items` `minItems` `maxItems` | 枚举 items → 多选；标量 → 逐条输入；对象 → 逐条表单 |
 | 组合 | `oneOf` / `anyOf` | 变体选择后进入子编辑器；开放字符串 + 字符串枚举合并为文本输入并给补全 |
-| 组合 | `allOf` | 浅合并（properties 拼接、required 并集、约束取更严者）；其中 `oneOf`/`anyOf` 按分配律展开 |
+| 组合 | `allOf` | 约束取交集：同名 `properties`/`items`/`additionalProperties`/`patternProperties` 递归合并（两侧 `$ref` 都生效），`required` 并集，数值、长度、数组/对象数量边界取更严者；其中 `oneOf`/`anyOf` 按分配律展开 |
 | 引用 | `$ref` | 本地指针与远端 ref；缓存 + 环保护，深度上限 32 |
 
 其他关键字不参与表单生成，但保存时仍会校验。
@@ -26,7 +26,9 @@ jse 把表单当作编辑辅助，把 **JSON Schema 校验**当作权威判定�
 - 不可达 `$ref`、数组套数组、未知类型、schema 深度超过 32 层、递归 `$ref`：有值时按运行时类型直接编辑；无值/null 时使用类型选择器（String/Number/Boolean/Object/Array/Null、schema `$defs`/`definitions` 命名类型、JSON），选 `JSON` 时渲染为 raw 文本区，提交时只做语法校验，语义交给保存期校验。
 - schema 编译失败（非法 schema、远端 ref 不可达等）：**停用保存期校验**，根屏状态行提示 `<warn> schema compile failed, save-time validation disabled: ...`。此时保存不再有 schema 兜底。
 - 加载的配置已有校验问题：不阻止编辑，根菜单首行显示问题计数。加载时的错误只用于展示；每次文档修改后会重新校验并刷新。
-- 明确不做：`format` 的表单校验、数组重排序 UI、`if-then-else`/`not` 的表单化、多模式 `patternProperties`、远端配置路径。
+- 明确不做：`format` 的表单校验、数组重排序 UI、`if-then-else`/`not` 的表单化、多模式 `patternProperties` 的映射式编辑、远端配置路径。
+- 多模式 `patternProperties` 虽不生成映射表单，但匹配任一模式的键按 schema 已知处理：不标记 `(not in schema)`，也不产生未知键警告；键和值仍按运行时形状编辑，正则与值 schema 在保存时校验。
+- 表单无法表达的交集约束（多个 `pattern`、`not`、`if`/`then`/`else`、多个 `format`、多模式 `patternProperties` 等）不会丢弃：它们保留在原始 schema 中，编辑期间可能允许输入中间值，但保存时仍由 `jsonschema` 全部校验；`--force` 是唯一绕过方式。
 
 ## 问题列表
 

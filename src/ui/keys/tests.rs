@@ -9408,3 +9408,109 @@ fn repeated_typing_replays_every_character() {
     press(&mut app, &["enter"]);
     assert_eq!(str_at(&app.fs().doc, &["name"]), "aaa");
 }
+
+#[test]
+fn empty_object_menu_add_key_is_accented() {
+    let schema = schema_from_json(
+        r#"{
+          "type": "object",
+          "properties": {"empty": {"type": "object", "properties": {}}}
+        }"#,
+    );
+    let doc = dbuild(|db| db.obj(vec![("empty", db.obj(vec![]))]));
+    let mut m = app_with(schema, doc, test_opts());
+    set_cursor_path(&mut m, &sp(&["empty"]));
+    press(&mut m, &["enter"]);
+    let rows = m.menu_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].kind, RowKind::NoItems);
+    assert_eq!(rows[0].label, "< Add Key >");
+    let line = m.row_line(&rows[0], false, 40);
+    assert!(
+        line.contains(&style::accent("< Add Key >")),
+        "< Add Key > is an action row and must use the accent color: {line:?}"
+    );
+}
+
+#[test]
+fn empty_oneof_search_placeholder_stays_faint() {
+    let schema = schema_from_json(
+        r#"{
+          "type": "object",
+          "properties": {"value": {"oneOf": [{"title": "Server", "type": "object"}]}}
+        }"#,
+    );
+    let doc = dbuild(|db| db.obj(vec![("value", db.s("x"))]));
+    let mut m = app_with(schema, doc, test_opts());
+    press(&mut m, &["t"]);
+    press(&mut m, &["/", "z"]);
+    let rows = m.menu_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].kind, RowKind::NoItems);
+    let line = m.row_line(&rows[0], false, 40);
+    assert!(
+        line.contains(&style::faint(&rows[0].label)),
+        "a no-match placeholder is informational and must stay faint: {line:?}"
+    );
+}
+
+#[test]
+fn multi_pattern_keys_are_not_unknown() {
+    let schema = schema_from_json(
+        r##"{
+          "type": "object",
+          "properties": {
+            "jobs": {
+              "type": "object",
+              "patternProperties": {
+                "^a": {"type": "string"},
+                "^b": {"type": "integer"}
+              },
+              "additionalProperties": false
+            }
+          }
+        }"##,
+    );
+    let doc = dbuild(|db| {
+        db.obj(vec![(
+            "jobs",
+            db.obj(vec![
+                ("a1", db.s("x")),
+                ("b1", db.n("2")),
+                ("c1", db.b(true)),
+            ]),
+        )])
+    });
+    let mut m = app_with(schema, doc, test_opts());
+    set_cursor_path(&mut m, &sp(&["jobs"]));
+    press(&mut m, &["enter"]);
+    let rows = m.menu_rows();
+    let row = |key: &str| {
+        rows.iter()
+            .find(|r| r.path == vec![PathSeg::key("jobs"), PathSeg::key(key)])
+            .unwrap_or_else(|| panic!("{key} row missing"))
+    };
+    assert!(row("a1").in_schema, "pattern ^a defines a1");
+    assert!(row("b1").in_schema, "pattern ^b defines b1");
+    assert!(!row("c1").in_schema, "c1 matches no pattern");
+    assert!(
+        !m.row_line(row("a1"), false, 40).contains("(not in schema)"),
+        "pattern-defined key must not be marked unknown"
+    );
+    assert!(
+        m.row_line(row("c1"), false, 40).contains("(not in schema)"),
+        "a key outside every pattern stays unknown"
+    );
+
+    let issues = crate::ui::rows::unknown_key_issues(&m.fs().schema, &m.fs().doc);
+    assert!(
+        issues
+            .iter()
+            .all(|i| !i.msg.contains("a1") && !i.msg.contains("b1")),
+        "pattern matches must not produce unknown-key warnings: {issues:?}"
+    );
+    assert!(
+        issues.iter().any(|i| i.msg.contains("c1")),
+        "nonmatching key must still warn: {issues:?}"
+    );
+}

@@ -115,6 +115,9 @@ pub struct FormNode {
     pub tag_ref: String,
     /// Map: document keys must match this regexp (patternProperties)
     pub key_pattern: String,
+    /// Object fallback: patternProperties regexps whose matches are schema
+    /// keys even though the form cannot map them to typed fields
+    pub key_patterns: Vec<String>,
 }
 
 /// Arena index into [`Schema::nodes`].
@@ -636,6 +639,17 @@ impl Parser {
                 f.kind = Kind::Object;
                 f.children = self.build_children(n, ctx, depth);
             }
+            if f.kind == Kind::Object {
+                if let Some(pp) = field(&self.doc, n, "patternProperties") {
+                    if let Value::Object(pms) = self.doc.value(pp) {
+                        for pm in pms {
+                            if regex::Regex::new(&pm.key).is_ok() {
+                                f.key_patterns.push(pm.key.clone());
+                            }
+                        }
+                    }
+                }
+            }
         } else if t == "array" || has_items {
             f.kind = Kind::Array;
             if let Some(items) = field(&self.doc, n, "items") {
@@ -885,10 +899,16 @@ impl Parser {
                             },
                             None => Vec::new(),
                         };
-                        if let Value::Object(pms) = self.doc.value(m.val) {
+                        if let Value::Object(pms) = self.doc.value(m.val).clone() {
                             for pm in pms {
                                 if let Some(i) = base.iter().position(|b| b.key == pm.key) {
-                                    base[i].val = pm.val; // later wins
+                                    // allOf intersects: a later part refines
+                                    // the property, it does not replace it
+                                    // (Cargo's DetailedDependency marks
+                                    // version/path/git/workspace with `true`,
+                                    // which must keep the real schema).
+                                    base[i].val =
+                                        self.intersect_schema(base[i].val, pm.val, depth + 1);
                                 } else {
                                     base.push(pm.clone());
                                 }
@@ -925,8 +945,44 @@ impl Parser {
                         });
                         member_set(&mut members, "required", nid);
                     }
+                    "additionalProperties" | "items" | "contains" | "propertyNames" => {
+                        let old = member_index(&members, &m.key).map(|i| members[i].val);
+                        match old {
+                            None => member_set(&mut members, &m.key, m.val),
+                            Some(old) => {
+                                let merged = self.intersect_schema(old, m.val, depth + 1);
+                                member_set(&mut members, &m.key, merged);
+                            }
+                        }
+                    }
+                    "patternProperties" => {
+                        let mut base: Vec<Member> =
+                            match member_index(&members, "patternProperties") {
+                                Some(i) => match self.doc.value(members[i].val) {
+                                    Value::Object(b) => b.clone(),
+                                    _ => Vec::new(),
+                                },
+                                None => Vec::new(),
+                            };
+                        if let Value::Object(pms) = self.doc.value(m.val).clone() {
+                            for pm in pms {
+                                if let Some(i) = base.iter().position(|b| b.key == pm.key) {
+                                    base[i].val =
+                                        self.intersect_schema(base[i].val, pm.val, depth + 1);
+                                } else {
+                                    base.push(pm.clone());
+                                }
+                            }
+                        }
+                        let nid = self.doc.push(NodeData {
+                            value: Value::Object(base),
+                            ..NodeData::default()
+                        });
+                        member_set(&mut members, "patternProperties", nid);
+                    }
                     "minimum" | "minLength" | "exclusiveMinimum" | "maximum" | "maxLength"
-                    | "exclusiveMaximum" => {
+                    | "exclusiveMaximum" | "minItems" | "maxItems" | "minProperties"
+                    | "maxProperties" => {
                         let old = member_index(&members, &m.key).map(|i| members[i].val);
                         if let Some(merged) = self.stricter_num(old, m.val, &m.key) {
                             member_set(&mut members, &m.key, merged);
@@ -1048,19 +1104,11 @@ impl Parser {
             return Some(old);
         }
         match key {
-            "minimum" | "minLength" | "exclusiveMinimum" => {
-                if cv > ov {
-                    Some(cur)
-                } else {
-                    Some(old)
-                }
+            "minimum" | "minLength" | "exclusiveMinimum" | "minItems" | "minProperties" => {
+                if cv > ov { Some(cur) } else { Some(old) }
             }
-            "maximum" | "maxLength" | "exclusiveMaximum" => {
-                if cv < ov {
-                    Some(cur)
-                } else {
-                    Some(old)
-                }
+            "maximum" | "maxLength" | "exclusiveMaximum" | "maxItems" | "maxProperties" => {
+                if cv < ov { Some(cur) } else { Some(old) }
             }
             _ => Some(old),
         }
@@ -1100,6 +1148,54 @@ impl Parser {
 
     /// Reports whether n shapes an object value the way build's object
     /// branch does: declared properties or an object type entry.
+    /// Reports whether a schema node constrains nothing: boolean `true` or
+    /// an empty object.
+    fn unconstrained(&self, n: NodeId) -> bool {
+        match self.doc.value(n) {
+            Value::Bool(b) => *b,
+            Value::Object(ms) => ms.is_empty(),
+            _ => false,
+        }
+    }
+
+    /// Intersects two property/value schemas for an allOf merge: `true`/`{}`
+    /// are neutral, `false` absorbs, and two object schemas merge recursively
+    /// so later parts add constraints instead of dropping earlier ones.
+    /// Shapes the form layer does not model (tuple `items` arrays, invalid
+    /// nodes) keep the first part, matching the old shallow behavior.
+    fn intersect_schema(&mut self, old: NodeId, new: NodeId, depth: usize) -> NodeId {
+        if self.unconstrained(new) {
+            return old;
+        }
+        if self.unconstrained(old) {
+            return new;
+        }
+        let old_false = matches!(self.doc.value(old), Value::Bool(false));
+        let new_false = matches!(self.doc.value(new), Value::Bool(false));
+        if old_false || new_false {
+            return if old_false { old } else { new };
+        }
+        let both_objects = matches!(self.doc.value(old), Value::Object(_))
+            && matches!(self.doc.value(new), Value::Object(_));
+        if both_objects && depth <= MAX_DEPTH {
+            // Keep the pair as allOf so build() (which has the $ref context)
+            // resolves refs on both sides before merging. Merging here would
+            // let the first $ref win and silently drop the second schema.
+            let arr = self.doc.push(NodeData {
+                value: Value::Array(vec![old, new]),
+                ..NodeData::default()
+            });
+            return self.doc.push(NodeData {
+                value: Value::Object(vec![Member {
+                    key: "allOf".into(),
+                    val: arr,
+                }]),
+                ..NodeData::default()
+            });
+        }
+        old
+    }
+
     fn objectish(&self, n: NodeId) -> bool {
         if !matches!(self.doc.value(n), Value::Object(_)) {
             return false;
@@ -2125,6 +2221,154 @@ mod tests {
         );
     }
 
+    // Cargo.toml's DetailedDependency allOf marks version/path/git/workspace
+    // required with a `true` property schema. Those unconstrained branch
+    // members must not overwrite the real property schemas from the base:
+    // otherwise version degrades to raw JSON ("edit as JSON").
+    #[test]
+    fn test_all_of_distribution_keeps_property_schema() {
+        let s = must_load(
+            r##"{
+  "type": "object",
+  "properties": {
+    "dependencies": {
+      "type": "object",
+      "additionalProperties": {
+        "anyOf": [
+          {"type": "string"},
+          {"$ref": "#/$defs/Detailed"}
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "Detailed": {
+      "type": "object",
+      "properties": {
+        "version": {"type": "string"},
+        "path": {"type": "string"},
+        "git": {"type": "string"},
+        "workspace": {"type": "boolean"}
+      },
+      "allOf": [{"anyOf": [
+        {"properties": {"version": true}, "required": ["version"]},
+        {"properties": {"path": true}, "required": ["path"]},
+        {"properties": {"git": true}, "required": ["git"]},
+        {"properties": {"workspace": true}, "required": ["workspace"]}
+      ]}]
+    }
+  }
+}"##,
+        );
+        let deps = child(&s, s.root, "dependencies");
+        let items = s.nodes[deps as usize].items.expect("map items");
+        let detailed = s.nodes[items as usize].variants[1];
+        assert_eq!(
+            kind_of(&s, detailed),
+            Kind::OneOf,
+            "allOf anyOf must distribute"
+        );
+        let mut version_required = 0;
+        for &v in &s.nodes[detailed as usize].variants {
+            let version = find_child(&s, v, "version").expect("version field");
+            let vf = &s.nodes[version as usize];
+            assert_eq!(vf.kind, Kind::Scalar, "version schema lost");
+            assert_eq!(vf.json_type, "string");
+            if vf.required {
+                version_required += 1;
+            }
+            assert_eq!(
+                kind_of(&s, find_child(&s, v, "workspace").unwrap()),
+                Kind::Boolean
+            );
+        }
+        assert_eq!(version_required, 1, "only the version branch requires it");
+    }
+
+    // allOf intersects constraints; a later part must never drop an earlier
+    // part's type. Covers nested properties, items, additionalProperties,
+    // patternProperties and array bounds.
+    #[test]
+    fn test_all_of_intersects_constraints() {
+        let s = must_load(
+            r##"{
+  "type": "object",
+  "properties": {
+    "obj": {"allOf": [
+      {"type": "object", "properties": {"a": {"type": "string", "minLength": 1}}},
+      {"properties": {"a": {"minLength": 3}}}
+    ]},
+    "arr": {"allOf": [
+      {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "maxItems": 9},
+      {"items": {"minLength": 3}, "minItems": 2, "maxItems": 5}
+    ]},
+    "extra": {"allOf": [
+      {"type": "object", "additionalProperties": true},
+      {"additionalProperties": {"type": "string"}}
+    ]},
+    "pat": {"allOf": [
+      {"type": "object", "patternProperties": {"^a": {"type": "string"}}, "additionalProperties": false},
+      {"patternProperties": {"^a": {"minLength": 2}}}
+    ]}
+  }
+}"##,
+        );
+        let obj = child(&s, s.root, "obj");
+        let a = find_child(&s, obj, "a").expect("obj.a");
+        assert_eq!(kind_of(&s, a), Kind::Scalar);
+        assert_eq!(s.nodes[a as usize].json_type, "string", "type kept");
+        assert_eq!(s.nodes[a as usize].min_len, Some(3), "stricter minLength");
+
+        let arr = child(&s, s.root, "arr");
+        let af = &s.nodes[arr as usize];
+        assert_eq!(af.kind, Kind::Array);
+        assert_eq!((af.min_items, af.max_items), (2, 5), "stricter bounds");
+        let ai = af.items.expect("arr items");
+        assert_eq!(kind_of(&s, ai), Kind::Scalar);
+        assert_eq!(s.nodes[ai as usize].json_type, "string", "items type kept");
+        assert_eq!(s.nodes[ai as usize].min_len, Some(3), "items minLength");
+
+        let extra = child(&s, s.root, "extra");
+        assert_eq!(kind_of(&s, extra), Kind::Map, "additionalProperties schema");
+        let ei = s.nodes[extra as usize].items.expect("extra items");
+        assert_eq!(kind_of(&s, ei), Kind::Scalar, "not raw");
+        assert_eq!(s.nodes[ei as usize].json_type, "string");
+
+        let pat = child(&s, s.root, "pat");
+        assert_eq!(kind_of(&s, pat), Kind::Map, "pattern map");
+        let pi = s.nodes[pat as usize].items.expect("pat items");
+        assert_eq!(s.nodes[pi as usize].json_type, "string");
+        assert_eq!(s.nodes[pi as usize].min_len, Some(2));
+    }
+
+    // Two parts constraining the same property through $refs must both
+    // apply. Merging eagerly would keep the first $ref and drop the second.
+    #[test]
+    fn test_all_of_property_refs_intersect() {
+        let s = must_load(
+            r##"{
+  "type": "object",
+  "properties": {
+    "obj": {"allOf": [
+      {"type": "object", "properties": {"p": {"$ref": "#/$defs/A"}}},
+      {"properties": {"p": {"$ref": "#/$defs/B"}}}
+    ]}
+  },
+  "$defs": {
+    "A": {"type": "object", "properties": {"a": {"type": "string"}}},
+    "B": {"type": "object", "properties": {"b": {"type": "integer"}}, "required": ["b"]}
+  }
+}"##,
+        );
+        let obj = child(&s, s.root, "obj");
+        let p = find_child(&s, obj, "p").expect("obj.p");
+        assert_eq!(kind_of(&s, p), Kind::Object);
+        assert!(find_child(&s, p, "a").is_some(), "first $ref lost");
+        let b = find_child(&s, p, "b").expect("second $ref lost");
+        assert_eq!(kind_of(&s, b), Kind::Scalar);
+        assert!(s.nodes[b as usize].required, "second $ref required lost");
+    }
+
     // A scalar combo against an object rest cannot distribute: the combo
     // stays a plain member and build drops it, exactly as before.
     #[test]
@@ -2371,6 +2615,11 @@ mod tests {
             j2f.kind,
             j2f.children.len(),
             j2f.key_pattern
+        );
+        assert_eq!(
+            j2f.key_patterns,
+            ["^a", "^b"],
+            "two patterns stay known-key matchers"
         );
 
         // A schema-valued additionalProperties still wins (existing map

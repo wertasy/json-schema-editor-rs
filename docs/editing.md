@@ -71,7 +71,7 @@
 - `items` 是「全对象 oneOf」的数组：`< Add item >` 进入并集字段菜单，按已填字段（如判别 `const`）自动识别变体；改判别键即可切换。经 `<<` 合并来的键同样参与识别。
 - 普通 oneOf 变体选择器与任意类型选择器共用同一个搜索栏组件（`/` 进入、`search:` 状态行、相同编辑/移动键），但列表只包含该 oneOf 自己的变体，不会混入 JSON 内建类型或 `$defs` 类型。
 - 选择器底部的 `variant:` 显示当前匹配变体：有类型名时显示 `variant: DnsRule {type, inbound, ip_version, query_type, +51}`，无类型名时只显示结构签名。
-- `allOf` 浅合并（properties 拼接、required 并集、约束取更严者）；其中的 `oneOf`/`anyOf` 按分配律展开为嵌套变体。
+- `allOf` 按约束交集合并：同名 `properties`、`items`、`additionalProperties`、`patternProperties` 递归合并（两侧 `$ref` 都生效），`required` 取并集，数值/长度/数组与对象数量边界取更严者；其中的 `oneOf`/`anyOf` 按分配律展开为嵌套变体。
 
 ### schema 未定义的键
 
@@ -85,7 +85,7 @@
 - 选择器内 `String`/`Number` 就地输入，`Boolean` 直接切换，`Object`/`Array` 进入可直接增删键/条目的子菜单，`Null` 写入 `null`；`JSON` 打开内置 raw 文本区，已有值按当前文件格式预填（显式按 `e` 仍可外编）。
 - `d` 删除。
 - `a`/`A` 新增的键没有值，因此先选类型；键以 `null` 占位并保留插入位置，取消类型选择后可用 `d` 删除。
-- 同时作为编辑器级警告进入问题列表（`unknown key ... not in the schema`），不阻断保存；顶层 `$schema`（编辑器自动写回的指向）不警告。
+- 同时作为编辑器级警告进入问题列表（`unknown key ... not in the schema`），不阻断保存；顶层 `$schema`（编辑器自动写回的指向）不警告。匹配 `patternProperties` 任一模式的键属于 schema 已知键，不会显示该标记或警告（多模式 `patternProperties` 不生成映射表单，仍按运行时形状编辑）。
 - schema 明确定义类型的字段不显示此选择器：`enter` 始终按 schema 类型编辑。
 - 如果 `additionalProperties: false` 已产生校验错误，不重复列出未知键警告。
 

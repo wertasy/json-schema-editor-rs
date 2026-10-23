@@ -326,6 +326,7 @@ pub fn menu_rows_for(
                                         idx: -1,
                                         path: path_for(&st.path, &mem.key),
                                         label: mem.key.clone(),
+                                        in_schema: pattern_defined(schema, st.node, &mem.key),
                                         ..Row::default()
                                     });
                                 }
@@ -680,6 +681,7 @@ fn merged_row(
                 idx: -1,
                 path: mk.path.clone(),
                 label: mk.key.clone(),
+                in_schema: pattern_defined(schema, st.node, &mk.key),
                 ..Row::default()
             },
             Some(f) if menu_leaf(schema, f) => Row {
@@ -950,13 +952,30 @@ pub fn clip_runes(s: &str, max: usize) -> String {
 
 /// VariantSignature renders the structural signature shown on oneOf variant
 /// rows and search hits: "{a, b*}" for objects, type names for scalars,
-/// "a |b |c" option lists for enums, "yes/no", "list of <sig>" and "json".
+/// "a |b |c" option lists for enums, "yes/no", "list of <sig>" and "json" for
+/// unconstrained values. A nested oneOf (an allOf-distributed detail branch)
+/// stands in its variants' signatures, deduped.
 pub fn variant_signature(schema: &Schema, fn_: Option<FormNodeId>) -> String {
+    variant_signature_seen(schema, fn_, &mut Vec::new())
+}
+
+/// The recursion carries the ancestor containers because synthesized menus
+/// can point back into themselves (the any-type picker's array items are the
+/// picker itself); a cycle reads as an unconstrained value.
+fn variant_signature_seen(
+    schema: &Schema,
+    fn_: Option<FormNodeId>,
+    seen: &mut Vec<FormNodeId>,
+) -> String {
     let Some(fn_) = fn_ else {
         return "json".to_string();
     };
+    if seen.contains(&fn_) {
+        return "json".to_string();
+    }
+    seen.push(fn_);
     let f = &schema.nodes[fn_ as usize];
-    match f.kind {
+    let out = match f.kind {
         Kind::Object => {
             let mut names: Vec<String> = Vec::with_capacity(f.children.len());
             for c in &f.children {
@@ -971,12 +990,12 @@ pub fn variant_signature(schema: &Schema, fn_: Option<FormNodeId>) -> String {
                 names.push(n);
             }
             if names.is_empty() {
-                return "{}".to_string();
+                "{}".to_string()
+            } else if names.len() > 4 {
+                format!("{{{}, +{}}}", names[..4].join(", "), names.len() - 4)
+            } else {
+                format!("{{{}}}", names.join(", "))
             }
-            if names.len() > 4 {
-                return format!("{{{}, +{}}}", names[..4].join(", "), names.len() - 4);
-            }
-            format!("{{{}}}", names.join(", "))
         }
         Kind::Scalar => {
             if f.json_type.is_empty() {
@@ -988,18 +1007,44 @@ pub fn variant_signature(schema: &Schema, fn_: Option<FormNodeId>) -> String {
         Kind::Enum => {
             let ds: Vec<String> = f.enum_.iter().map(|o| o.display.clone()).collect();
             if ds.is_empty() {
-                return "enum".to_string();
+                "enum".to_string()
+            } else if ds.len() > 3 {
+                format!("{} …", ds[..3].join(" |"))
+            } else {
+                ds.join(" |")
             }
-            if ds.len() > 3 {
-                return format!("{} …", ds[..3].join(" |"));
-            }
-            ds.join(" |")
         }
         Kind::Boolean => "yes/no".to_string(),
         Kind::Array => match f.items {
             None => "list of json".to_string(),
-            Some(items) => format!("list of {}", variant_signature(schema, Some(items))),
+            Some(items) => format!(
+                "list of {}",
+                variant_signature_seen(schema, Some(items), seen)
+            ),
         },
+        Kind::OneOf => {
+            let mut sigs: Vec<String> = Vec::new();
+            let mut cyclic = false;
+            for &v in &f.variants {
+                if seen.contains(&v) {
+                    cyclic = true;
+                    break;
+                }
+                let sig = variant_signature_seen(schema, Some(v), seen);
+                if !sigs.contains(&sig) {
+                    sigs.push(sig);
+                }
+            }
+            if cyclic {
+                "json".to_string()
+            } else if sigs.is_empty() {
+                "json".to_string()
+            } else if sigs.len() > 3 {
+                format!("{} …", sigs[..3].join(" | "))
+            } else {
+                sigs.join(" | ")
+            }
+        }
         Kind::Raw => {
             if f.null_only {
                 "null".to_string()
@@ -1008,7 +1053,9 @@ pub fn variant_signature(schema: &Schema, fn_: Option<FormNodeId>) -> String {
             }
         }
         _ => "json".to_string(),
-    }
+    };
+    seen.pop();
+    out
 }
 
 /// currentVariant returns the index of the first variant the value at path
@@ -1891,7 +1938,8 @@ pub fn search_index(schema: &mut Schema, doc: &Doc, st: &MenuState) -> Vec<Row> 
                     });
                     walk(schema, doc, synth, out, seen, c, &cpath);
                 }
-                unknown_rows(schema, doc, path, &known, seen, out);
+                let patterns = schema.nodes[fn_ as usize].key_patterns.clone();
+                unknown_rows(schema, doc, path, &known, &patterns, seen, out);
             }
             Kind::OneOf => {
                 // Index the variant fields, but not one row per variant for
@@ -1931,7 +1979,13 @@ pub fn search_index(schema: &mut Schema, doc: &Doc, st: &MenuState) -> Vec<Row> 
                     return;
                 }
                 let mut known: HashSet<String> = HashSet::new();
+                let mut patterns: Vec<String> = Vec::new();
                 for &v in &variants {
+                    for p in &schema.nodes[v as usize].key_patterns {
+                        if !patterns.contains(p) {
+                            patterns.push(p.clone());
+                        }
+                    }
                     let children = schema.nodes[v as usize].children.clone();
                     for c in children {
                         let key = schema.nodes[c as usize].key.clone();
@@ -1955,7 +2009,7 @@ pub fn search_index(schema: &mut Schema, doc: &Doc, st: &MenuState) -> Vec<Row> 
                         walk(schema, doc, synth, out, seen, c, &cpath);
                     }
                 }
-                unknown_rows(schema, doc, path, &known, seen, out);
+                unknown_rows(schema, doc, path, &known, &patterns, seen, out);
                 // Matched variants that are containers have no fields to
                 // union; an array value still has elements. Walk the first
                 // matched array variant (the candidates describe the same
@@ -2042,7 +2096,7 @@ pub fn search_index(schema: &mut Schema, doc: &Doc, st: &MenuState) -> Vec<Row> 
             // A node the form layer could not model (boolean schema,
             // recursive $ref, unsupported shape) still has a document value:
             // index everything below it raw, like an unknown key's value.
-            Kind::Raw => unknown_value_rows(schema, doc, path, doc.get(path), seen, out),
+            Kind::Raw => unknown_value_rows(schema, doc, path, doc.get(path), false, seen, out),
             _ => {}
         }
     }
@@ -2055,6 +2109,7 @@ fn unknown_rows(
     doc: &Doc,
     path: &[PathSeg],
     known: &HashSet<String>,
+    patterns: &[String],
     seen: &mut HashSet<String>,
     out: &mut Vec<Row>,
 ) {
@@ -2076,10 +2131,28 @@ fn unknown_rows(
         let k = path_string(&p);
         if !seen.contains(&k) {
             seen.insert(k);
-            out.push(unknown_row(schema, doc, &p));
-            unknown_value_rows(schema, doc, &p, Some(mem.val), seen, out);
+            let in_schema = key_matches_patterns(&mem.key, patterns);
+            let mut row = unknown_row(schema, doc, &p);
+            row.in_schema = in_schema;
+            out.push(row);
+            unknown_value_rows(schema, doc, &p, Some(mem.val), in_schema, seen, out);
         }
     }
+}
+
+/// patternDefined reports whether key matches a patternProperties regexp of
+/// an object fallback node, making it schema-defined even though the form
+/// cannot map it to a typed field.
+fn pattern_defined(schema: &Schema, fn_: FormNodeId, key: &str) -> bool {
+    key_matches_patterns(key, &schema.nodes[fn_ as usize].key_patterns)
+}
+
+fn key_matches_patterns(key: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|p| {
+        regex::Regex::new(p)
+            .map(|re| re.is_match(key))
+            .unwrap_or(false)
+    })
 }
 
 /// unknownRow builds one schema-less index row.
@@ -2099,6 +2172,7 @@ fn unknown_value_rows(
     doc: &Doc,
     path: &[PathSeg],
     v: Option<NodeId>,
+    in_schema: bool,
     seen: &mut HashSet<String>,
     out: &mut Vec<Row>,
 ) {
@@ -2115,8 +2189,10 @@ fn unknown_value_rows(
                 let k = path_string(&p);
                 if !seen.contains(&k) {
                     seen.insert(k);
-                    out.push(unknown_row(schema, doc, &p));
-                    unknown_value_rows(schema, doc, &p, Some(mem.val), seen, out);
+                    let mut row = unknown_row(schema, doc, &p);
+                    row.in_schema = in_schema;
+                    out.push(row);
+                    unknown_value_rows(schema, doc, &p, Some(mem.val), in_schema, seen, out);
                 }
             }
         }
@@ -2126,8 +2202,10 @@ fn unknown_value_rows(
                 let k = path_string(&p);
                 if !seen.contains(&k) {
                     seen.insert(k);
-                    out.push(unknown_row(schema, doc, &p));
-                    unknown_value_rows(schema, doc, &p, Some(item), seen, out);
+                    let mut row = unknown_row(schema, doc, &p);
+                    row.in_schema = in_schema;
+                    out.push(row);
+                    unknown_value_rows(schema, doc, &p, Some(item), in_schema, seen, out);
                 }
             }
         }
@@ -2198,6 +2276,7 @@ pub fn unknown_key_issues(schema: &Schema, doc: &Doc) -> Vec<Issue> {
         out: &mut Vec<Issue>,
         val: NodeId,
         known: &HashSet<String>,
+        patterns: &[String],
         path: &[PathSeg],
     ) {
         let members = match doc.value(val) {
@@ -2211,11 +2290,20 @@ pub fn unknown_key_issues(schema: &Schema, doc: &Doc) -> Vec<Issue> {
             if path.is_empty() && mem.key == "$schema" {
                 continue; // the editor's own schema pointer
             }
-            if !known.contains(&mem.key) {
-                emit(out, path, &mem.key);
-                set_warn(out.last_mut().unwrap());
+            if known.contains(&mem.key) || key_matches(&mem.key, patterns) {
+                continue;
             }
+            emit(out, path, &mem.key);
+            set_warn(out.last_mut().unwrap());
         }
+    }
+
+    fn key_matches(key: &str, patterns: &[String]) -> bool {
+        patterns.iter().any(|p| {
+            regex::Regex::new(p)
+                .map(|re| re.is_match(key))
+                .unwrap_or(false)
+        })
     }
 
     fn walk(
@@ -2243,7 +2331,8 @@ pub fn unknown_key_issues(schema: &Schema, doc: &Doc) -> Vec<Issue> {
                         );
                     }
                 }
-                unknown_of(doc, out, val, &known, path);
+                let patterns = schema.nodes[fn_ as usize].key_patterns.clone();
+                unknown_of(doc, out, val, &known, &patterns, path);
             }
             Kind::OneOf => {
                 let variants = schema.nodes[fn_ as usize].variants.clone();
@@ -2260,7 +2349,13 @@ pub fn unknown_key_issues(schema: &Schema, doc: &Doc) -> Vec<Issue> {
                     None => variants,
                 };
                 let mut known: HashSet<String> = HashSet::new();
+                let mut patterns: Vec<String> = Vec::new();
                 for &v in &variants {
+                    for p in &schema.nodes[v as usize].key_patterns {
+                        if !patterns.contains(p) {
+                            patterns.push(p.clone());
+                        }
+                    }
                     let children = schema.nodes[v as usize].children.clone();
                     for c in children {
                         let key = schema.nodes[c as usize].key.clone();
@@ -2273,7 +2368,7 @@ pub fn unknown_key_issues(schema: &Schema, doc: &Doc) -> Vec<Issue> {
                         }
                     }
                 }
-                unknown_of(doc, out, val, &known, path);
+                unknown_of(doc, out, val, &known, &patterns, path);
             }
             Kind::Map => {
                 // every document key is defined by the map's additionalProperties
@@ -2343,10 +2438,16 @@ fn row_search_text_raw(schema: &Schema, doc: &Doc, r: &Row) -> Option<String> {
         }
         return Some(unknown_match_text(r, row_scalar_value_raw(schema, doc, r)));
     };
-    let mut text = format!(
-        "{} {}",
-        schema.nodes[f as usize].title, schema.nodes[f as usize].key
-    );
+    let node = &schema.nodes[f as usize];
+    let mut text = format!("{} {}", node.title, node.key);
+    // Map rows (additionalProperties/patternProperties) edit against the
+    // value schema, whose key is the map's key, not the document member's.
+    // The member key is the row's identity, so it must be searchable.
+    if let Some(PathSeg::Key(k)) = r.path.last() {
+        if *k != node.key {
+            text += &format!(" {k}");
+        }
+    }
     if row_scalar_value_raw(schema, doc, r) {
         let s = summary_raw(schema, doc, f, &r.path);
         if s != "—" {
@@ -2646,10 +2747,13 @@ fn row_fallback_text_raw(schema: &Schema, doc: &Doc, r: &Row) -> Option<String> 
         }
         return Some(key);
     };
-    let mut text = format!(
-        "{} {}",
-        schema.nodes[f as usize].title, schema.nodes[f as usize].key
-    );
+    let node = &schema.nodes[f as usize];
+    let mut text = format!("{} {}", node.title, node.key);
+    if let Some(PathSeg::Key(k)) = r.path.last() {
+        if *k != node.key {
+            text += &format!(" {k}");
+        }
+    }
     if let Some(s) = row_raw_scalar_raw(schema, doc, r) {
         text += &format!(" {s}");
     }
@@ -4020,6 +4124,40 @@ mod tests {
             }),
             "{type, mode*}",
         ));
+        // a nested oneOf (allOf-distributed detail branch in Cargo.toml)
+        // stands in its variants' signatures, not "json"; identical object
+        // leaves (has version / path / git / workspace) dedupe to one
+        let v1 = b.id(scalar("version", "", "string"));
+        let o1 = b.id(FormNode {
+            key: "".into(),
+            kind: Kind::Object,
+            children: vec![v1],
+            ..FormNode::default()
+        });
+        let v2 = b.id(scalar("version", "", "string"));
+        let o2 = b.id(FormNode {
+            key: "".into(),
+            kind: Kind::Object,
+            children: vec![v2],
+            ..FormNode::default()
+        });
+        let detailed = b.id(FormNode {
+            key: "".into(),
+            kind: Kind::OneOf,
+            variants: vec![o1, o2],
+            ..FormNode::default()
+        });
+        cases.push((detailed, "{version}"));
+        let s1 = b.id(scalar("", "", "string"));
+        let s2 = b.id(scalar("", "", "integer"));
+        let distinct = b.id(FormNode {
+            key: "".into(),
+            kind: Kind::OneOf,
+            variants: vec![s1, s2],
+            ..FormNode::default()
+        });
+        cases.push((distinct, "string | integer"));
+
         let schema = b.finish();
         for (f, want) in cases {
             assert_eq!(
@@ -5324,5 +5462,110 @@ mod tests {
         assert_eq!(stx.len(), 3);
         assert_eq!(stx[2].kind, MenuKind::Object);
         assert_eq!(stx[2].path, vec![PathSeg::key("arr"), PathSeg::Idx(0)]);
+    }
+
+    /// Map rows edit against the value schema, so the schema node's key is
+    /// the map's own key ("dependencies"), not the document member's. The
+    /// member key must still be searchable (Cargo.toml `ratatui`).
+    #[test]
+    fn test_search_map_member_key() {
+        let mut schema = must_schema(
+            r#"{
+              "type": "object",
+              "properties": {
+                "dependencies": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "oneOf": [
+                      {"type": "string"},
+                      {"type": "object", "properties": {"version": {"type": "string"}}}
+                    ]
+                  }
+                }
+              }
+            }"#,
+        );
+        let doc = dbuild(|db| {
+            db.obj(vec![(
+                "dependencies",
+                db.obj(vec![("ratatui", db.s("=0.30.2"))]),
+            )])
+        });
+        let rst = root_state(&schema);
+        let all = search_index(&mut schema, &doc, &rst);
+        let ctx = MenuCtx {
+            schema: &schema,
+            doc: &doc,
+            opts: &test_opts(),
+            menu_cache: &HashMap::new(),
+            hide_empty: false,
+        };
+        let hits = filter_search(&ctx, &all, "ratatui", true, None);
+        assert_eq!(
+            hits.iter().map(|r| r.label.clone()).collect::<Vec<_>>(),
+            ["$.dependencies.ratatui  =0.30.2"],
+            "map member key must be a text-search target"
+        );
+        assert_eq!(
+            filter_search(&ctx, &all, "RATATUI", false, None).len(),
+            0,
+            "case-sensitive search must not match a differently cased key"
+        );
+    }
+
+    #[test]
+    fn test_search_multi_pattern_keys_in_schema() {
+        let schema = must_schema(
+            r##"{
+              "type": "object",
+              "properties": {
+                "jobs": {
+                  "type": "object",
+                  "patternProperties": {
+                    "^a": {"type": "string"},
+                    "^b": {"type": "integer"}
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }"##,
+        );
+        let doc = dbuild(|db| {
+            db.obj(vec![(
+                "jobs",
+                db.obj(vec![
+                    ("a1", db.obj(vec![("nested", db.s("x"))])),
+                    ("b1", db.n("2")),
+                    ("c1", db.b(true)),
+                ]),
+            )])
+        });
+        let jobs = child_of(&schema, schema.root, "jobs");
+        let mut schema = schema;
+        let st = st(MenuKind::Object, jobs, vec![PathSeg::key("jobs")]);
+        let all = search_index(&mut schema, &doc, &st);
+        let find = |key: &str| {
+            all.iter()
+                .find(|r| r.path == vec![PathSeg::key("jobs"), PathSeg::key(key)])
+                .unwrap_or_else(|| panic!("{key} search row missing"))
+        };
+        assert!(find("a1").in_schema);
+        assert!(find("b1").in_schema);
+        assert!(!find("c1").in_schema);
+        let nested = all
+            .iter()
+            .find(|r| {
+                r.path
+                    == vec![
+                        PathSeg::key("jobs"),
+                        PathSeg::key("a1"),
+                        PathSeg::key("nested"),
+                    ]
+            })
+            .expect("nested row");
+        assert!(
+            nested.in_schema,
+            "rows below a pattern-defined key inherit its schema standing"
+        );
     }
 }

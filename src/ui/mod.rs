@@ -198,6 +198,8 @@ pub struct Row {
     pub variant: Option<FormNodeId>,
     pub label: String,
     pub merged: String,
+    /// Unknown row that the schema still defines via patternProperties
+    pub in_schema: bool,
 }
 
 /// menuState is one level of the navigation stack; cursor/offset are
