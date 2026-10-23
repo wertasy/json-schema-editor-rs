@@ -307,6 +307,8 @@ fn test_opts() -> Options {
         copy: None,
         paste: None,
         replace_schema_location: None,
+        comment_at: None,
+        set_comment: None,
         status: String::new(),
         startup_notice: String::new(),
         load_errors: vec![],
@@ -339,12 +341,13 @@ fn key(k: &str) -> Msg {
         "ctrl+k" => Msg::Ctrl('k'),
         "ctrl+s" => Msg::Ctrl('s'),
         "ctrl+r" => Msg::Ctrl('r'),
-        "alt+enter" => Msg::AltEnter,
         "ctrl+o" => Msg::Ctrl('o'),
         "ctrl+i" => Msg::Ctrl('i'),
         "ctrl+u" => Msg::Ctrl('u'),
         "ctrl+n" => Msg::Ctrl('n'),
         "ctrl+p" => Msg::Ctrl('p'),
+        "ctrl+a" => Msg::Ctrl('a'),
+        "ctrl+w" => Msg::Ctrl('w'),
         "alt+i" => Msg::Char('i', true),
         "alt+x" => Msg::Char('x', true),
         "alt+f" => Msg::Char('f', true),
@@ -362,7 +365,7 @@ fn press(app: &mut App, keys: &[&str]) {
             "enter" | "esc" | "up" | "down" | "left" | "right" | "space" | "tab" | "shift+tab"
             | "backspace" | "delete" | "home" | "end" | "ctrl+c" | "ctrl+j" | "ctrl+k"
             | "ctrl+s" | "ctrl+r" | "ctrl+o" | "ctrl+i" | "ctrl+u" | "ctrl+n" | "ctrl+p"
-            | "alt+i" | "alt+x" | "alt+f" | "alt+b" | "alt+enter" | "pgup" | "pgdown"
+            | "ctrl+a" | "ctrl+w" | "alt+i" | "alt+x" | "alt+f" | "alt+b" | "pgup" | "pgdown"
             | "ctrl+f" | "ctrl+b" => {
                 app.update(key(k));
             }
@@ -1462,14 +1465,14 @@ fn comment_preview_is_capped_and_c_expands_it() {
     set_cursor_path(&mut m, &sp(&["name"]));
 
     let view = m.view();
-    assert!(view.contains("L1"), "{view}");
+    assert!(view.contains("L1") && view.contains("L2"), "{view}");
     assert!(
-        view.contains("..."),
+        view.contains("…"),
         "collapsed preview must mark the cut:\n{view}"
     );
     assert!(
-        !view.contains("TAILMARK"),
-        "preview leaked the tail:\n{view}"
+        !view.contains("L3") && !view.contains("TAILMARK"),
+        "collapsed block must stop at two lines:\n{view}"
     );
 
     press(&mut m, &["c"]);
@@ -1496,6 +1499,238 @@ fn comment_preview_is_capped_and_c_expands_it() {
     assert!(
         !view.contains("TAILMARK"),
         "collapsed view still expanded:\n{view}"
+    );
+}
+
+#[test]
+fn document_comment_and_schema_help_render_together_and_c_edits_comment() {
+    let schema = schema_from_json(
+        r#"{"type":"object","properties":{"port":{"type":"number","description":"schema port help"}}}"#,
+    );
+    let doc = dbuild(|db| db.obj(vec![("port", db.n("8080"))]));
+    let meta = Arc::new(parking_lot::Mutex::new(crate::doc::Meta::default()));
+    {
+        let mut g = meta.lock();
+        g.set_comment_text(&sp(&["port"]), "port doc note", "//");
+    }
+    let mut opts = test_opts();
+    opts.comment_at = Some({
+        let m = Arc::clone(&meta);
+        Arc::new(move |p: &[PathSeg]| m.lock().comment_text(p))
+    });
+    opts.set_comment = Some({
+        let m = Arc::clone(&meta);
+        Arc::new(move |p: &[PathSeg], t: &str| m.lock().set_comment_text(p, t, "//"))
+    });
+    let mut m = app_with(schema, doc, opts);
+    m.width = 90;
+    m.height = 24;
+    set_cursor_path(&mut m, &sp(&["port"]));
+
+    // both sources, no labels, distinct colors
+    let view = m.view();
+    assert!(
+        view.contains("schema port help") && view.contains("port doc note"),
+        "{view}"
+    );
+    assert!(
+        !view.contains("schema:") && !view.contains("comment:"),
+        "source labels must be gone:\n{view}"
+    );
+    assert!(
+        view.contains("\x1b[38;5;141m") && view.contains("\x1b[38;5;117m"),
+        "schema and comment must use different colors:\n{view}"
+    );
+
+    // C edits the document comment directly, pre-filled with its text
+    press(&mut m, &["C"]);
+    match &mut m.overlay {
+        Some(Overlay::CommentEdit(s)) => {
+            assert_eq!(s.ta.value(), "port doc note");
+            s.ta.set_value("edited note");
+        }
+        _ => panic!("C must open the comment editor"),
+    }
+    assert!(
+        m.view().contains("\x1b[7me\x1b[0m"),
+        "the comment editor must draw the cursor cell"
+    );
+    press(&mut m, &["ctrl+s"]);
+    assert!(m.overlay.is_none());
+    assert_eq!(
+        meta.lock().comment_text(&sp(&["port"])).as_deref(),
+        Some("edited note")
+    );
+    assert!(m.view().contains("edited note"));
+}
+
+#[test]
+fn text_area_view_draws_the_cursor() {
+    let mut ta = TextArea::new();
+    ta.set_width(10);
+    ta.set_height(3);
+    ta.set_value("ab\ncd");
+    let view = ta_view(&ta);
+    assert!(
+        view.contains("\x1b[7ma\x1b[0mb"),
+        "cursor cell missing at the start: {view:?}"
+    );
+    ta.handle_key(Key::End);
+    let view = ta_view(&ta);
+    assert!(
+        view.contains("ab\x1b[7m \x1b[0m"),
+        "cursor at end of line must use an inverted space: {view:?}"
+    );
+    // A long line scrolls horizontally to keep the cursor visible.
+    ta.set_width(4);
+    ta.set_value("abcdef");
+    ta.handle_key(Key::End);
+    let view = ta_view(&ta);
+    assert!(view.contains('\x1b'), "{view:?}");
+    assert!(view.contains("def"), "{view:?}");
+}
+
+#[test]
+fn c_adds_and_removes_a_document_comment() {
+    let schema = schema_from_json(r#"{"type":"object","properties":{"port":{"type":"number"}}}"#);
+    let doc = dbuild(|db| db.obj(vec![("port", db.n("8080"))]));
+    let meta = Arc::new(parking_lot::Mutex::new(crate::doc::Meta::default()));
+    let mut opts = test_opts();
+    opts.comment_at = Some({
+        let m = Arc::clone(&meta);
+        Arc::new(move |p: &[PathSeg]| m.lock().comment_text(p))
+    });
+    opts.set_comment = Some({
+        let m = Arc::clone(&meta);
+        Arc::new(move |p: &[PathSeg], t: &str| m.lock().set_comment_text(p, t, "//"))
+    });
+    let mut m = app_with(schema, doc, opts);
+    set_cursor_path(&mut m, &sp(&["port"]));
+
+    press(&mut m, &["C"]);
+    match &mut m.overlay {
+        Some(Overlay::CommentEdit(s)) => {
+            assert_eq!(s.ta.value(), "");
+            s.ta.set_value("new note");
+        }
+        _ => panic!("C must open the comment editor"),
+    }
+    press(&mut m, &["ctrl+s"]);
+    assert_eq!(
+        meta.lock().comment_text(&sp(&["port"])).as_deref(),
+        Some("new note")
+    );
+
+    press(&mut m, &["C"]);
+    match &mut m.overlay {
+        Some(Overlay::CommentEdit(s)) => s.ta.set_value(""),
+        _ => panic!("C must reopen the comment editor"),
+    }
+    press(&mut m, &["ctrl+s"]);
+    assert!(meta.lock().comment_text(&sp(&["port"])).is_none());
+}
+
+#[test]
+fn numeric_quick_keys_leave_unrepresentable_literals_alone() {
+    let schema = schema_from_json(r#"{"type":"object","properties":{"x":{"type":"number"}}}"#);
+    let doc = dbuild(|db| db.obj(vec![("x", db.n("1e400"))]));
+    let mut m = app_with(schema, doc, test_opts());
+    set_cursor_path(&mut m, &sp(&["x"]));
+    press(&mut m, &["+"]);
+    assert_eq!(num_at(&m.fs().doc, &["x"]), "1e400");
+    press(&mut m, &["-"]);
+    assert_eq!(num_at(&m.fs().doc, &["x"]), "1e400");
+}
+
+#[test]
+fn comment_edit_requires_a_document_value() {
+    let schema = schema_from_json(
+        r#"{"type":"object","properties":{
+          "port":{"type":"number"},
+          "missing":{"type":"number"}
+        }}"#,
+    );
+    let doc = dbuild(|db| db.obj(vec![("port", db.n("8080"))]));
+    let mut m = app_with(schema, doc, test_opts());
+    set_cursor_path(&mut m, &sp(&["missing"]));
+    press(&mut m, &["C"]);
+    assert!(m.overlay.is_none(), "absent keys must not open the editor");
+    assert!(m.notice.contains("no value"), "notice = {}", m.notice);
+    assert!(!m.dirty());
+}
+
+#[test]
+fn applying_an_unchanged_comment_keeps_metadata_and_dirty_state() {
+    let schema = schema_from_json(r#"{"type":"object","properties":{"port":{"type":"number"}}}"#);
+    let doc = dbuild(|db| db.obj(vec![("port", db.n("8080"))]));
+    let meta = Arc::new(parking_lot::Mutex::new(crate::doc::Meta::default()));
+    {
+        let mut g = meta.lock();
+        let mut cs = crate::doc::CommentSet::default();
+        cs.head = "/* keep me */".into();
+        g.comments.insert(sp(&["port"]), cs);
+    }
+    let before = meta.lock().comments.clone();
+    let mut opts = test_opts();
+    opts.comment_at = Some({
+        let m = Arc::clone(&meta);
+        Arc::new(move |p: &[PathSeg]| m.lock().comment_text(p))
+    });
+    opts.set_comment = Some({
+        let m = Arc::clone(&meta);
+        Arc::new(move |p: &[PathSeg], t: &str| m.lock().set_comment_text(p, t, "//"))
+    });
+    let mut m = app_with(schema, doc, opts);
+    set_cursor_path(&mut m, &sp(&["port"]));
+    press(&mut m, &["C"]);
+    assert!(matches!(m.overlay, Some(Overlay::CommentEdit(_))));
+    press(&mut m, &["ctrl+s"]);
+    assert!(m.overlay.is_none());
+    assert_eq!(meta.lock().comments, before, "no-op apply rewrote metadata");
+    assert!(!m.dirty());
+}
+
+#[test]
+fn both_description_sources_fold_independently_at_two_lines() {
+    let schema = schema_from_json(
+        r#"{"type":"object","properties":{"port":{"type":"number","description":"S1\nS2\nS3"}}}"#,
+    );
+    let doc = dbuild(|db| db.obj(vec![("port", db.n("8080"))]));
+    let meta = Arc::new(parking_lot::Mutex::new(crate::doc::Meta::default()));
+    {
+        let mut g = meta.lock();
+        g.set_comment_text(&sp(&["port"]), "C1\nC2\nC3", "//");
+    }
+    let mut opts = test_opts();
+    opts.comment_at = Some({
+        let m = Arc::clone(&meta);
+        Arc::new(move |p: &[PathSeg]| m.lock().comment_text(p))
+    });
+    let mut m = app_with(schema, doc, opts);
+    m.width = 60;
+    m.height = 24;
+    set_cursor_path(&mut m, &sp(&["port"]));
+
+    let view = m.view();
+    assert!(
+        view.contains("S1") && view.contains("S2") && view.contains("C1") && view.contains("C2"),
+        "{view}"
+    );
+    assert!(
+        !view.contains("S3") && !view.contains("C3"),
+        "each source must fold at two lines:\n{view}"
+    );
+    assert_eq!(view.matches('…').count(), 2, "{view}");
+    assert!(
+        view.contains(" \x1b[38;5;39m…"),
+        "the fold marker must use the accent color:\n{view}"
+    );
+
+    press(&mut m, &["c"]);
+    let view = m.view();
+    assert!(
+        view.contains("S3") && view.contains("C3"),
+        "expansion must show both full blocks:\n{view}"
     );
 }
 
@@ -1585,6 +1820,127 @@ fn long_comment_opens_a_scrollable_page() {
 }
 
 #[test]
+fn numeric_quick_keys_step_seed_and_preserve_precision() {
+    let schema = schema_from_json(
+        r#"{"type":"object","properties":{
+          "count":{"type":"integer"},
+          "ratio":{"type":"number"},
+          "big":{"type":"integer"},
+          "name":{"type":"string"}
+        }}"#,
+    );
+    let doc = dbuild(|db| {
+        db.obj(vec![
+            ("count", db.n("5")),
+            ("ratio", db.n("1.5")),
+            ("big", db.n("9007199254740993")),
+            ("name", db.s("x")),
+            ("extra", db.n("10")),
+        ])
+    });
+    let mut m = app_with(schema, doc, test_opts());
+    m.width = 80;
+    m.height = 24;
+
+    set_cursor_path(&mut m, &sp(&["count"]));
+    press(&mut m, &["-"]);
+    assert_eq!(num_at(&m.fs().doc, &["count"]), "4");
+    press(&mut m, &["="]);
+    assert_eq!(num_at(&m.fs().doc, &["count"]), "5");
+    press(&mut m, &["+"]);
+    assert_eq!(num_at(&m.fs().doc, &["count"]), "6");
+    // one key = one undo step
+    press(&mut m, &["u"]);
+    assert_eq!(num_at(&m.fs().doc, &["count"]), "5");
+
+    // integer precision is exact, not an f64 round trip
+    set_cursor_path(&mut m, &sp(&["big"]));
+    press(&mut m, &["+"]);
+    assert_eq!(num_at(&m.fs().doc, &["big"]), "9007199254740994");
+    press(&mut m, &["-"]);
+    assert_eq!(num_at(&m.fs().doc, &["big"]), "9007199254740993");
+
+    // fractional values keep their fraction
+    set_cursor_path(&mut m, &sp(&["ratio"]));
+    press(&mut m, &["+"]);
+    assert_eq!(num_at(&m.fs().doc, &["ratio"]), "2.5");
+
+    // no value: - seeds -1, = seeds 1
+    set_cursor_path(&mut m, &sp(&["ratio"]));
+    press(&mut m, &["d"]);
+    assert_eq!(num_at(&m.fs().doc, &["ratio"]), "<missing>");
+    set_cursor_path(&mut m, &sp(&["ratio"]));
+    press(&mut m, &["-"]);
+    assert_eq!(num_at(&m.fs().doc, &["ratio"]), "-1");
+    press(&mut m, &["+"]);
+    assert_eq!(num_at(&m.fs().doc, &["ratio"]), "0");
+    press(&mut m, &["d"]);
+    set_cursor_path(&mut m, &sp(&["ratio"]));
+    press(&mut m, &["="]);
+    assert_eq!(num_at(&m.fs().doc, &["ratio"]), "1");
+
+    // non-numeric rows ignore the keys
+    set_cursor_path(&mut m, &sp(&["name"]));
+    press(&mut m, &["-", "=", "+"]);
+    assert_eq!(str_at(&m.fs().doc, &["name"]), "x");
+
+    // a number the schema does not define works by its runtime value
+    set_cursor_path(&mut m, &sp(&["extra"]));
+    press(&mut m, &["-"]);
+    assert_eq!(num_at(&m.fs().doc, &["extra"]), "9");
+    press(&mut m, &["+"]);
+    assert_eq!(num_at(&m.fs().doc, &["extra"]), "10");
+}
+
+#[test]
+fn numeric_quick_keys_work_on_array_items() {
+    let schema = schema_from_json(
+        r#"{"type":"object","properties":{
+          "nums":{"type":"array","items":{"type":"number"}}
+        }}"#,
+    );
+    let doc = dbuild(|db| db.obj(vec![("nums", db.arr(vec![db.n("1"), db.n("2.5")]))]));
+    let mut m = app_with(schema, doc, test_opts());
+    set_cursor_path(&mut m, &sp(&["nums"]));
+    press(&mut m, &["enter"]);
+    // array menu: < Add item >, then item 0, item 1
+    press(&mut m, &["j", "-"]);
+    assert_eq!(nget(&m.fs().doc, &[ks("nums"), PathSeg::Idx(0)]), "0");
+    press(&mut m, &["j", "+"]);
+    assert_eq!(nget(&m.fs().doc, &[ks("nums"), PathSeg::Idx(1)]), "3.5");
+    // schema-less root array: item rows are raw-typed but hold runtime numbers
+    let doc = dbuild(|db| db.arr(vec![db.n("7")]));
+    let schema = crate::smodel::untyped(&doc);
+    let mut m = app_with(schema, doc, test_opts());
+    press(&mut m, &["j", "-"]);
+    assert_eq!(nget(&m.fs().doc, &[PathSeg::Idx(0)]), "6");
+
+    // schema-less nested array: the unknown key drills into a generic array
+    let doc = dbuild(|db| db.obj(vec![("nums", db.arr(vec![db.n("11")]))]));
+    let schema = crate::smodel::untyped(&doc);
+    let mut m = app_with(schema, doc, test_opts());
+    set_cursor_path(&mut m, &sp(&["nums"]));
+    press(&mut m, &["enter"]);
+    press(&mut m, &["j", "-"]);
+    assert_eq!(nget(&m.fs().doc, &[ks("nums"), PathSeg::Idx(0)]), "10");
+}
+
+#[test]
+fn numeric_quick_keys_work_without_a_schema() {
+    let doc = dbuild(|db| db.obj(vec![("n", db.n("7")), ("s", db.s("x"))]));
+    let schema = crate::smodel::untyped(&doc);
+    let mut m = app_with(schema, doc, test_opts());
+    set_cursor_path(&mut m, &sp(&["n"]));
+    press(&mut m, &["-"]);
+    assert_eq!(num_at(&m.fs().doc, &["n"]), "6");
+    press(&mut m, &["="]);
+    assert_eq!(num_at(&m.fs().doc, &["n"]), "7");
+    set_cursor_path(&mut m, &sp(&["s"]));
+    press(&mut m, &["-"]);
+    assert_eq!(str_at(&m.fs().doc, &["s"]), "x");
+}
+
+#[test]
 fn page_keys_move_the_menu_cursor_one_screen() {
     let mut props = serde_json::Map::new();
     for i in 0..30 {
@@ -1629,7 +1985,7 @@ fn help_page_scrolls_when_taller_than_the_screen() {
     assert!(!m.view().contains("merge keys: merge anchors"));
 
     press(&mut m, &["pgdown"]);
-    assert_eq!(m.help_scroll, 19, "one full help screen");
+    assert_eq!(m.help_scroll, 21, "one full help screen");
     assert!(m.view().contains("merge keys: merge anchors"));
 
     press(&mut m, &["pgup"]);
@@ -8839,7 +9195,7 @@ fn menu_search_replace() {
         "/mnt"
     );
 
-    // alt+enter replaces every hit in scope; numbers stay untouched
+    // ctrl+a replaces every hit in scope; numbers stay untouched
     let doc2 = dbuild(|db| {
         db.obj(vec![
             ("name", db.s("alpha")),
@@ -8856,18 +9212,7 @@ fn menu_search_replace() {
     press(
         &mut m2,
         &[
-            "r",
-            "a",
-            "l",
-            "p",
-            "h",
-            "a",
-            "tab",
-            "b",
-            "e",
-            "t",
-            "a",
-            "alt+enter",
+            "r", "a", "l", "p", "h", "a", "tab", "b", "e", "t", "a", "ctrl+a",
         ],
     );
     assert_eq!(str_at(&m2.fs().doc, &["name"]), "beta");
@@ -8891,7 +9236,7 @@ fn menu_search_replace() {
     assert_eq!(search_state(&m3).results.len(), 2);
     press(&mut m3, &["alt+i"]);
     assert_eq!(search_state(&m3).results.len(), 0);
-    press(&mut m3, &["enter", "alt+enter"]);
+    press(&mut m3, &["enter", "ctrl+a"]);
     assert_eq!(str_at(&m3.fs().doc, &["name"]), "alpha");
     press(&mut m3, &["alt+i"]);
     assert_eq!(search_state(&m3).results.len(), 2);
@@ -8908,18 +9253,7 @@ fn menu_search_replace() {
     press(
         &mut m6,
         &[
-            "r",
-            "s",
-            "a",
-            "m",
-            "e",
-            "tab",
-            "o",
-            "t",
-            "h",
-            "e",
-            "r",
-            "alt+enter",
+            "r", "s", "a", "m", "e", "tab", "o", "t", "h", "e", "r", "ctrl+a",
         ],
     );
     assert_eq!(str_at(&m6.fs().doc, &["server", "host"]), "other");
@@ -9022,11 +9356,11 @@ fn search_help_lists_only_the_active_mode() {
     let view = m.view();
     assert!(view.contains("tab replace"), "search help:\n{view}");
     assert!(view.contains("esc close"), "search help:\n{view}");
-    assert!(!view.contains("alt+enter"), "search help:\n{view}");
+    assert!(!view.contains("ctrl+a"), "search help:\n{view}");
 
     press(&mut m, &["tab"]);
     let view = m.view();
-    assert!(view.contains("alt+enter all"), "replace help:\n{view}");
+    assert!(view.contains("ctrl+a all"), "replace help:\n{view}");
     assert!(view.contains("tab focus"), "replace help:\n{view}");
     assert!(!view.contains("tab replace"), "replace help:\n{view}");
     assert!(!view.contains("esc close"), "replace help:\n{view}");
@@ -9035,7 +9369,7 @@ fn search_help_lists_only_the_active_mode() {
     press(&mut m, &["esc"]);
     let view = m.view();
     assert!(view.contains("tab replace"), "search help:\n{view}");
-    assert!(!view.contains("alt+enter"), "search help:\n{view}");
+    assert!(!view.contains("ctrl+a"), "search help:\n{view}");
 }
 
 #[test]
@@ -9125,7 +9459,7 @@ fn search_replace_unknown_key() {
     );
     press(&mut m, &["tab"]);
     press(&mut m, &["g", "o", "o", "d", "b", "y", "e"]);
-    press(&mut m, &["alt+enter"]);
+    press(&mut m, &["ctrl+a"]);
     assert_eq!(str_at(&m.fs().doc, &["comment"]), "goodbye world");
     assert!(
         m.notice.contains("replaced 1 occurrence"),
@@ -9444,10 +9778,16 @@ fn raw_textarea_view_is_windowed() {
             .collect::<Vec<_>>()
             .join("\n"),
     );
+    let plain = |s: &str| {
+        regex::Regex::new("\x1b\\[[0-9;]*m")
+            .unwrap()
+            .replace_all(s, "")
+            .to_string()
+    };
     let v = crate::ui::keys::ta_view(&ta);
     let lines: Vec<&str> = v.split('\n').collect();
     assert_eq!(lines.len(), 5, "only the viewport is rendered: {lines:?}");
-    assert_eq!(lines[0], "line-0");
+    assert_eq!(plain(lines[0]), "line-0");
     // the page follows the cursor row: after 20 newlines it rests on line 0's
     // row (line 20 of the buffer) and the old page top is gone
     for _ in 0..20 {
@@ -9457,7 +9797,8 @@ fn raw_textarea_view_is_windowed() {
     let page: Vec<&str> = v.split('\n').collect();
     assert_eq!(page.len(), 5);
     assert_eq!(
-        page[4], "line-0",
+        plain(page[4]),
+        "line-0",
         "cursor row is the last visible line: {page:?}"
     );
     assert!(
@@ -9470,7 +9811,7 @@ fn raw_textarea_view_is_windowed() {
     ta.set_height(3);
     ta.set_value(&"x".repeat(100));
     let v = crate::ui::keys::ta_view(&ta);
-    assert_eq!(v.chars().count(), 10);
+    assert_eq!(plain(&v).chars().count(), 10);
 }
 
 // --- YAML string values edit as plain text --------------------------------

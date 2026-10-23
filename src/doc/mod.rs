@@ -48,6 +48,194 @@ impl Meta {
     pub fn has_comments(&self) -> bool {
         !self.comments.is_empty() || !self.tail.is_empty()
     }
+
+    /// comment_text returns the document comment attached to `path` as plain
+    /// text (markers stripped, schema directives dropped), or None when the
+    /// member has no comment. Only the member's own slots are read: the
+    /// comments inside a container value (`foot`) belong to its children.
+    pub fn comment_text(&self, path: &[PathSeg]) -> Option<String> {
+        let cs = self.comments.get(path)?;
+        let mut parts: Vec<String> = Vec::new();
+        for raw in [&cs.key_head, &cs.head, &cs.key_line, &cs.line, &cs.key_foot] {
+            let text = clean_comment(raw);
+            if !text.is_empty() && !parts.contains(&text) {
+                parts.push(text);
+            }
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n"))
+        }
+    }
+
+    /// set_comment_text replaces the member comment at `path` with `text`
+    /// (plain text; `prefix` is the format's line-comment marker). An empty
+    /// text removes the comment. Existing schema-directive lines are kept,
+    /// and the comments inside a container value are untouched.
+    pub fn set_comment_text(&mut self, path: &[PathSeg], text: &str, prefix: &str) {
+        let mut cs = self.comments.get(path).cloned().unwrap_or_default();
+        let slots = [&cs.key_head, &cs.head, &cs.key_line, &cs.line, &cs.key_foot];
+        let target = slots.iter().position(|s| !s.is_empty()).unwrap_or(
+            if matches!(path.last(), Some(PathSeg::Key(_))) {
+                0
+            } else {
+                1
+            },
+        );
+        let mut dirs: [String; 5] = std::array::from_fn(|_| String::new());
+        for (i, slot) in [
+            &mut cs.key_head,
+            &mut cs.head,
+            &mut cs.key_line,
+            &mut cs.line,
+            &mut cs.key_foot,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            dirs[i] = take_directives(slot);
+        }
+        let body = format_comment(text, prefix);
+        let mut merged: [String; 5] = std::array::from_fn(|i| {
+            let dir = std::mem::take(&mut dirs[i]);
+            if i != target {
+                return dir;
+            }
+            match (dir.is_empty(), body.is_empty()) {
+                (true, true) => String::new(),
+                (false, true) => dir,
+                (true, false) => body.clone(),
+                (false, false) => format!("{dir}\n{body}"),
+            }
+        });
+        cs.key_head = std::mem::take(&mut merged[0]);
+        cs.head = std::mem::take(&mut merged[1]);
+        cs.key_line = std::mem::take(&mut merged[2]);
+        cs.line = std::mem::take(&mut merged[3]);
+        cs.key_foot = std::mem::take(&mut merged[4]);
+        if cs == CommentSet::default() {
+            self.comments.remove(path);
+        } else {
+            self.comments.insert(path.to_vec(), cs);
+        }
+    }
+}
+
+/// is_directive_line reports the schema-location comments the loader writes
+/// (`# yaml-language-server: $schema=…`, `#:schema …`); they are metadata,
+/// not user comments, so the description panel hides them.
+fn is_directive_line(line: &str) -> bool {
+    let t = line.trim();
+    if let Some(rest) = t.strip_prefix("//") {
+        // JSONC has no directive form; only the YAML header can appear here
+        // when a comment was merged into a JSONC slot.
+        return is_yaml_directive(rest.trim_start());
+    }
+    if let Some(rest) = t.strip_prefix("#:schema") {
+        // TOML's Taplo convention: exactly `#:schema` (no space after #).
+        let rest = rest.trim_start();
+        let rest = rest.strip_prefix('=').map(str::trim_start).unwrap_or(rest);
+        return !rest.is_empty();
+    }
+    if let Some(rest) = t.strip_prefix('#') {
+        return is_yaml_directive(rest.trim_start());
+    }
+    false
+}
+
+/// is_yaml_directive recognizes `yaml-language-server: $schema=<loc>`.
+fn is_yaml_directive(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("yaml-language-server:") else {
+        return false;
+    };
+    let Some(loc) = rest.trim_start().strip_prefix("$schema=") else {
+        return false;
+    };
+    !loc.trim().is_empty()
+}
+
+/// take_directives removes schema-directive lines from a slot, returning
+/// them joined for re-insertion at the same place.
+fn take_directives(slot: &mut String) -> String {
+    if slot.is_empty() {
+        return String::new();
+    }
+    let kept: Vec<String> = slot
+        .split('\n')
+        .filter(|l| is_directive_line(l))
+        .map(str::to_string)
+        .collect();
+    if kept.is_empty() {
+        return String::new();
+    }
+    slot.clear();
+    kept.join("\n")
+}
+
+/// clean_comment strips comment markers and surrounding whitespace from a
+/// recorded comment slot. Blank lines inside the comment are kept.
+fn clean_comment(raw: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for line in raw.split('\n') {
+        let mut t = line.trim();
+        if is_directive_line(t) {
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("//") {
+            t = rest.trim_start();
+        } else if let Some(rest) = t.strip_prefix("/**") {
+            t = rest.trim_start();
+            if let Some(r) = t.strip_suffix("*/") {
+                t = r.trim_end();
+            }
+        } else if let Some(rest) = t.strip_prefix("/*") {
+            t = rest.trim_start();
+            if let Some(r) = t.strip_suffix("*/") {
+                t = r.trim_end();
+            }
+        } else if let Some(rest) = t.strip_prefix('*') {
+            let rest = rest.trim_start();
+            if rest == "/" {
+                t = "";
+            } else {
+                t = rest;
+                if let Some(r) = t.strip_suffix("*/") {
+                    t = r.trim_end();
+                }
+            }
+        } else if let Some(rest) = t.strip_prefix('#') {
+            t = rest.trim_start();
+        }
+        lines.push(t.to_string());
+    }
+    while lines.first().is_some_and(|l| l.is_empty()) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+/// format_comment renders plain text as a comment block using `prefix`.
+fn format_comment(text: &str, prefix: &str) -> String {
+    let text = text.trim_matches(['\n', '\r']);
+    if text.trim().is_empty() {
+        return String::new();
+    }
+    text.split('\n')
+        .map(|line| {
+            let line = line.trim_end();
+            if line.trim().is_empty() {
+                prefix.to_string()
+            } else {
+                let line = line.trim_start();
+                format!("{prefix} {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// pathKey encodes a document path as a unique map key, mirroring Go's
@@ -571,5 +759,112 @@ mod tests {
             r#"["a","b",3]"#
         );
         assert_eq!(path_key(&[Key("a\"b".into())]), r#"["a\"b"]"#);
+    }
+
+    #[test]
+    fn comment_text_strips_markers_and_joins_slots() {
+        let src =
+            "// header\n{\n  // port note\n  \"port\": 8080, // inline\n  \"name\": \"x\"\n}\n";
+        let p = codec_for("a.json").parse(src).unwrap();
+        assert_eq!(
+            p.meta.comment_text(&[Key("port".into())]).as_deref(),
+            Some("port note\ninline")
+        );
+        assert!(p.meta.comment_text(&[Key("name".into())]).is_none());
+        // block comments and array item comments
+        let p = codec_for("a.json")
+            .parse("[\n  /* item\n   * note */\n  1\n]\n")
+            .unwrap();
+        assert_eq!(
+            p.meta.comment_text(&[Idx(0)]).as_deref(),
+            Some("item\nnote")
+        );
+    }
+
+    #[test]
+    fn set_comment_text_rewrites_the_member_comment() {
+        let src = "{\n  // old note\n  \"port\": 8080 // inline\n}\n";
+        let (doc, mut meta) = {
+            let p = codec_for("a.json").parse(src).unwrap();
+            (p.doc, p.meta)
+        };
+        meta.set_comment_text(&[Key("port".into())], "new note\nline 2", "//");
+        assert_eq!(
+            meta.comment_text(&[Key("port".into())]).as_deref(),
+            Some("new note\nline 2")
+        );
+        let out = codec_for("a.json").write(&doc, &meta).unwrap();
+        assert!(
+            out.contains("// new note") && out.contains("// line 2") && !out.contains("old note"),
+            "{out}"
+        );
+        meta.set_comment_text(&[Key("port".into())], "", "//");
+        assert!(meta.comment_text(&[Key("port".into())]).is_none());
+    }
+
+    #[test]
+    fn comment_edit_keeps_schema_directives() {
+        let src = "# yaml-language-server: $schema=s.json\n# header\nname: demo\n";
+        let (doc, mut meta) = {
+            let p = codec_for("a.yaml").parse(src).unwrap();
+            (p.doc, p.meta)
+        };
+        assert_eq!(meta.comment_text(&[]).as_deref(), Some("header"));
+        meta.set_comment_text(&[], "edited", "#");
+        let head = &meta.comments[&Vec::new()].head;
+        assert!(
+            head.contains("# yaml-language-server: $schema=s.json") && head.contains("# edited"),
+            "{head}"
+        );
+        assert_eq!(meta.comment_text(&[]).as_deref(), Some("edited"));
+        let out = codec_for("a.yaml").write(&doc, &meta).unwrap();
+        assert!(
+            out.contains("# yaml-language-server: $schema=s.json") && out.contains("# edited"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn comment_text_round_trip_keeps_leading_markers() {
+        let mut meta = Meta::default();
+        let path = [Key("port".into())];
+        meta.set_comment_text(&path, "//TODO", "//");
+        let text = meta.comment_text(&path).unwrap();
+        assert_eq!(text, "//TODO");
+        meta.set_comment_text(&path, &text, "//");
+        assert_eq!(meta.comment_text(&path).as_deref(), Some("//TODO"));
+        assert_eq!(meta.comments[&path[..]].key_head, "// //TODO");
+    }
+
+    #[test]
+    fn directive_detection_is_precise() {
+        assert!(is_directive_line("#:schema ./s.json"));
+        assert!(is_directive_line(
+            "# yaml-language-server: $schema=./s.json"
+        ));
+        assert!(!is_directive_line("# :schema field is optional"));
+        assert!(!is_directive_line("# yaml-language-server: note"));
+        assert!(!is_directive_line("#:schema"));
+        assert!(!is_directive_line("// #:schema docs"));
+    }
+
+    #[test]
+    fn doc_block_comments_lose_the_decorative_star() {
+        let p = codec_for("a.json")
+            .parse("[\n  /** doc note */\n  1\n]\n")
+            .unwrap();
+        assert_eq!(p.meta.comment_text(&[Idx(0)]).as_deref(), Some("doc note"));
+    }
+
+    #[test]
+    fn toml_comment_text() {
+        let meta = codec_for("a.toml")
+            .parse("port = 8080 # inline\n")
+            .unwrap()
+            .meta;
+        assert_eq!(
+            meta.comment_text(&[Key("port".into())]).as_deref(),
+            Some("inline")
+        );
     }
 }

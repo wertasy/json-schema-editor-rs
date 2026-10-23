@@ -44,6 +44,10 @@ pub struct FileState {
     pub history: History,
     /// loaded/last-saved snapshot for change marks
     pub baseline: Option<crate::doc::Doc>,
+    /// a document comment was edited since the last save; comments live in
+    /// the format metadata, not the Doc baseline, so they need their own
+    /// dirty bit (the quit prompt and title marker consult it).
+    pub comments_dirty: bool,
     /// live validation problems (refreshed after writes)
     pub issues_now: Vec<Issue>,
     /// validation error locations, marked on their rows
@@ -107,6 +111,7 @@ impl FileState {
             menu_cache: HashMap::new(),
             history: History::default(),
             baseline: Some(baseline),
+            comments_dirty: false,
             issues_now: Vec::new(),
             err_paths: Vec::new(),
             warn_paths: Vec::new(),
@@ -289,6 +294,9 @@ impl App {
             return self.dirty();
         }
         let ft = &self.files[i];
+        if ft.comments_dirty {
+            return true;
+        }
         match &ft.baseline {
             Some(base) => !crate::ui::menu::nodes_equal_doc(&ft.doc, base),
             None => false,

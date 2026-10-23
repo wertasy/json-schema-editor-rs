@@ -27,7 +27,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::doc::{Codec, Doc, Meta, Parsed, jsondoc};
+use crate::doc::{Codec, Doc, Meta, Parsed, PathSeg, jsondoc};
 use crate::ui::{FileSession, NodeRef, Options, Outcome, RawCodec};
 
 const ERR_NO_SCHEMA: &str =
@@ -614,6 +614,23 @@ fn load_session(
                     codec.set_schema_location_with(doc, &mut meta, loc, schema_member);
                 },
             ))
+        },
+        comment_at: {
+            let shared_meta = Arc::clone(&shared_meta);
+            Some(Arc::new(move |path: &[PathSeg]| {
+                lock(&shared_meta).comment_text(path)
+            }))
+        },
+        set_comment: {
+            let shared_meta = Arc::clone(&shared_meta);
+            let prefix = if matches!(ext.as_str(), ".yaml" | ".yml" | ".toml") {
+                "#"
+            } else {
+                "//"
+            };
+            Some(Arc::new(move |path: &[PathSeg], text: &str| {
+                lock(&shared_meta).set_comment_text(path, text, prefix);
+            }))
         },
         status: status.join("\n"),
         startup_notice: startup.join("\n"),

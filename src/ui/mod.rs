@@ -103,6 +103,13 @@ pub struct Options {
     /// schema; `true` means the schema declares a top-level "$schema"
     /// property. None disables schema switching.
     pub replace_schema_location: Option<Arc<dyn Fn(&mut Doc, &str, bool) + Send + Sync>>,
+    /// CommentAt returns the document comment attached to a path as plain
+    /// text (markers stripped), or None when there is none.
+    pub comment_at: Option<Arc<dyn Fn(&[PathSeg]) -> Option<String> + Send + Sync>>,
+    /// SetComment replaces the document comment attached to a path; an empty
+    /// text removes it. The caller has already edited the session meta, so a
+    /// later save writes the new comment.
+    pub set_comment: Option<Arc<dyn Fn(&[PathSeg], &str) + Send + Sync>>,
     /// Status is a warning line shown on the root screen (e.g. compile
     /// failure).
     pub status: String,

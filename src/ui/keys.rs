@@ -18,13 +18,14 @@ use crate::icons::{ERR, WARN};
 use crate::smodel::{EnumOpt, FormNode, FormNodeId, Kind, Schema};
 use crate::ui::files::wrap_cursor;
 use crate::ui::menu::{
-    AddState, AnchorMode, AnchorState, App, COMMENT_PREVIEW_LINES, CommentState, ConfirmState,
-    EditState, ErrsState, ExternalEdit, FastMoveState, FilePickState, IssuesState, MergeState, Msg,
-    Overlay, RefPickState, SearchState, SelState, TextState, WriteState, anchor_defs,
-    anchor_holder, anchor_holder_path, anchor_merge_use_paths, anchor_role, copy_detached_from_doc,
-    copy_from_doc, count_anchor_uses, cursor_ancestor, cursor_by_path, cursor_for_row,
-    cursor_prefix, is_path_prefix, merge_ref_uses, nodes_equal, nodes_equal_doc, page_delta,
-    read_clipboard, ref_would_cycle, remap_state_cursor, vertical_delta, write_clipboard,
+    AddState, AnchorMode, AnchorState, App, CommentEditState, CommentState, ConfirmState,
+    DESC_BLOCK_PREVIEW_LINES, DescLine, DescSource, EditState, ErrsState, ExternalEdit,
+    FastMoveState, FilePickState, IssuesState, MergeState, Msg, Overlay, RefPickState, SearchState,
+    SelState, TextState, WriteState, anchor_defs, anchor_holder, anchor_holder_path,
+    anchor_merge_use_paths, anchor_role, copy_detached_from_doc, copy_from_doc, count_anchor_uses,
+    cursor_ancestor, cursor_by_path, cursor_for_row, cursor_prefix, is_path_prefix, merge_ref_uses,
+    nodes_equal, nodes_equal_doc, page_delta, read_clipboard, ref_would_cycle, remap_state_cursor,
+    vertical_delta, write_clipboard,
 };
 use crate::ui::rows::{
     SynthKey, any_type_menu, clip_runes, current_variant, display_title, doc_array_len,
@@ -332,6 +333,24 @@ fn is_null_val(doc: &Doc, v: NodeId) -> bool {
     matches!(doc.value(v), Value::Null)
 }
 
+/// bump_number_literal adds delta to a numeric literal. Integer spellings
+/// stay exact (i128, no f64 round trip); fractional/exponent forms fall back
+/// to the shortest JSON float form.
+fn bump_number_literal(lit: &str, delta: i64) -> Option<String> {
+    if !lit.contains(['.', 'e', 'E']) {
+        // Integer spellings stay exact; an integer outside i128 is left
+        // untouched rather than rounded through f64.
+        let v = lit.parse::<i128>().ok()?;
+        return v.checked_add(delta as i128).map(|n| n.to_string());
+    }
+    let f = lit.parse::<f64>().ok()?;
+    let sum = f + delta as f64;
+    if !sum.is_finite() {
+        return None;
+    }
+    Some(jsondoc::go_json_float(sum))
+}
+
 fn is_null_opt(doc: &Doc, v: Option<NodeId>) -> bool {
     v.map_or(true, |v| is_null_val(doc, v))
 }
@@ -497,24 +516,32 @@ fn wrap_text(s: &str, max: usize) -> Vec<String> {
     out
 }
 
-/// comment_preview caps the collapsed description at
-/// [`COMMENT_PREVIEW_LINES`] lines, marking a cut with "...".
-fn comment_preview(mut lines: Vec<String>, width: usize) -> Vec<String> {
-    if lines.len() <= COMMENT_PREVIEW_LINES {
+/// fold_desc_block caps one collapsed source block at
+/// [`DESC_BLOCK_PREVIEW_LINES`] lines, leaving room for the trailing `…`.
+fn fold_desc_block(mut lines: Vec<String>, width: usize) -> Vec<String> {
+    if lines.len() <= DESC_BLOCK_PREVIEW_LINES {
         return lines;
     }
-    lines.truncate(COMMENT_PREVIEW_LINES);
+    lines.truncate(DESC_BLOCK_PREVIEW_LINES);
     if let Some(last) = lines.last_mut() {
-        const ELLIPSIS: &str = "...";
-        let avail = width.saturating_sub(ELLIPSIS.len());
-        if avail == 0 {
-            *last = ELLIPSIS.to_string();
-        } else {
-            *last = clip_display(last, avail);
-            last.push_str(ELLIPSIS);
-        }
+        // one column for the space and one for the `…`
+        *last = clip_display(last, width.saturating_sub(2));
     }
     lines
+}
+
+/// desc_line_view styles one description line; a folded block ends with an
+/// emphasized `…`.
+fn desc_line_view(line: &DescLine) -> String {
+    let body = match line.source {
+        DescSource::Schema => style::desc(&line.text),
+        DescSource::Comment => style::comment(&line.text),
+    };
+    if line.folded {
+        format!("{body} {}", style::accent("…"))
+    } else {
+        body
+    }
 }
 use crate::ui::menu::style;
 
@@ -790,14 +817,13 @@ fn ti_view(ti: &TextInput) -> String {
     format!("{before}\x1b[7m{cell}\x1b[0m{after}")
 }
 
-/// Render a TextArea like bubbles textarea.View(): lines joined with the
-/// cursor cell left for simplicity (View content is not asserted by tests).
+/// Render a TextArea viewport with a reverse-video cursor cell. The window
+/// follows the cursor row (bubbles textarea behavior); a long line scrolls
+/// horizontally so the cursor stays visible.
 fn ta_view(ta: &TextArea) -> String {
-    // Only the viewport is rendered: the Go/bubbles textarea also showed its
-    // height, scrolled to the cursor. Rendering the whole buffer repainted
-    // the entire document on every keystroke.
     let (top, h) = ta.window();
-    let w = ta.width() as usize;
+    let w = (ta.width() as usize).max(1);
+    let (cursor_row, cursor_col) = ta.cursor();
     let mut out = String::new();
     let end = (top + h).min(ta.line_count());
     for i in top..end {
@@ -805,7 +831,26 @@ fn ta_view(ta: &TextArea) -> String {
             out.push('\n');
         }
         let line = ta.line(i).unwrap_or("");
-        out.push_str(&clip_runes(line, w.max(1)));
+        let shift = if i == cursor_row && cursor_col >= w {
+            cursor_col + 1 - w
+        } else {
+            0
+        };
+        let chars: Vec<char> = line.chars().skip(shift).take(w).collect();
+        if i != cursor_row {
+            out.extend(chars);
+            continue;
+        }
+        let col = cursor_col.saturating_sub(shift).min(w - 1);
+        let upto = col.min(chars.len());
+        out.extend(chars.iter().take(upto));
+        let cell = chars.get(col).copied().unwrap_or(' ');
+        out.push_str("\x1b[7m");
+        out.push(cell);
+        out.push_str("\x1b[0m");
+        if col < chars.len() {
+            out.extend(chars.iter().skip(col + 1));
+        }
     }
     out
 }
@@ -897,22 +942,15 @@ impl App {
     /// visible screen away.
     fn list_page_size(&self, st: &MenuState, rows: &[Row]) -> usize {
         let (_title, summary) = self.menu_title(st);
-        let desc = self.focused_desc(st, rows);
-        let width = self.width.saturating_sub(1);
-        let desc_lines = if desc.is_empty() {
-            0
-        } else {
-            let full = wrap_text(&desc, width);
-            if self.desc_expanded {
-                full.len()
-            } else {
-                comment_preview(full, width).len()
-            }
-        };
+        let desc_lines = self.desc_lines_for(st, rows, !self.desc_expanded).len();
         let mut summary_lines = if summary.is_empty() {
             0
         } else {
-            wrap_text(&format!("variant: {}", summary), width).len()
+            wrap_text(
+                &format!("variant: {}", summary),
+                self.width.saturating_sub(1),
+            )
+            .len()
         };
         if st.kind == MenuKind::OneOf && st.searching {
             summary_lines += 1;
@@ -1202,6 +1240,8 @@ impl App {
             "tab" | "ctrl+i" => self.nav_go(false),
             " " => self.space_key(r),
             "d" | "delete" => self.delete_row(&r),
+            "-" => self.adjust_number(&r, -1),
+            "=" | "+" => self.adjust_number(&r, 1),
             "J" => self.move_item(&r, 1),
             "K" => self.move_item(&r, -1),
             "t" => {
@@ -1249,6 +1289,7 @@ impl App {
                 }
             }
             "c" => self.toggle_desc(&r, &rows),
+            "C" => self.edit_comment_row(&r),
             "?" => {
                 self.help = true;
                 self.help_scroll = 0;
@@ -1738,6 +1779,36 @@ impl App {
     }
 
     // --- field editing -----------------------------------------------------
+
+    /// adjustNumber implements - / = / + on a numeric field: bump the current
+    /// number by delta, or write delta ("-1"/"1") when a schema-typed field
+    /// has no value. Numbers the schema does not define (unknown keys,
+    /// schema-less documents, raw fields) work by their runtime value.
+    fn adjust_number(&mut self, r: &Row, delta: i64) {
+        // Field: a scalar row. Drill: an array item/schema-less value whose
+        // schema node is a container or oneOf but whose runtime value is a
+        // number (generic arrays). Unknown: a schema-less object member.
+        if !matches!(r.kind, RowKind::Field | RowKind::Drill | RowKind::Unknown) {
+            return;
+        }
+        let typed_numeric = r.fn_.is_some_and(|f| {
+            let node = &self.fs().schema.nodes[f as usize];
+            node.kind == Kind::Scalar && matches!(node.json_type.as_str(), "integer" | "number")
+        });
+        let path = r.path.clone();
+        let literal = match self.doc().get(&path).map(|n| self.doc().value(n)) {
+            Some(Value::Num(lit)) => match bump_number_literal(lit, delta) {
+                Some(next) => next,
+                None => return, // unrepresentable literal: leave it untouched
+            },
+            // Only a schema-typed numeric field can seed a missing value: for
+            // a runtime-typed key there is nothing that says it is a number.
+            None | Some(Value::Null) if typed_numeric => delta.to_string(),
+            _ => return,
+        };
+        let n = self.fs_mut().doc.new_num(literal);
+        let _ = self.fs_mut().doc.set(&path, n);
+    }
 
     /// editValueExternalRow opens $EDITOR on the value under the cursor.
     fn edit_value_external_row(&mut self, r: &Row) {
@@ -5166,7 +5237,7 @@ impl App {
                 self.refilter(&mut s);
                 return Some(Overlay::Search(s));
             }
-            "alt+enter" => {
+            "ctrl+a" => {
                 if s.replace {
                     self.replace_search_all(s);
                     // replace_search_all clears the overlay on a real
@@ -5572,6 +5643,7 @@ impl App {
             Some(Overlay::Errs(s)) => return self.errs_view(s),
             Some(Overlay::RefPick(s)) => return self.ref_pick_view(s),
             Some(Overlay::Text(s)) => return self.text_view(s),
+            Some(Overlay::CommentEdit(s)) => return self.comment_edit_view(s),
             Some(Overlay::Sel(s)) => return self.sel_view(s),
             Some(Overlay::Comment(s)) => return self.comment_view(s),
             _ => {}
@@ -5919,16 +5991,7 @@ impl App {
             b.push('\n');
             header += 1;
         }
-        let desc = self.focused_desc(&st, &rows);
-        let mut desc_lines: Vec<String> = Vec::new();
-        if !desc.is_empty() {
-            let full = wrap_text(&desc, self.width.saturating_sub(1));
-            desc_lines = if self.desc_expanded {
-                full
-            } else {
-                comment_preview(full, self.width.saturating_sub(1))
-            };
-        }
+        let desc_lines = self.desc_lines_for(&st, &rows, !self.desc_expanded);
         let mut summary_lines: Vec<String> = Vec::new();
         if !summary.is_empty() {
             summary_lines = wrap_text(
@@ -5966,7 +6029,7 @@ impl App {
         }
         for line in &desc_lines {
             b.push_str(&clip_display(
-                &style::desc(line),
+                &desc_line_view(line),
                 self.width.saturating_sub(1),
             ));
             b.push('\n');
@@ -6079,7 +6142,7 @@ impl App {
         }
         let help = if s.replace {
             format!(
-                "↑/↓ ctrl+j/k · pgup/dn · enter jump/replace · alt+enter all · tab focus · alt+i {} · alt+x {} · esc",
+                "↑/↓ ctrl+j/k · pgup/dn · enter jump/replace · ctrl+a all · tab focus · alt+i {} · alt+x {} · esc",
                 case_txt, mode_txt
             )
         } else {
@@ -6197,11 +6260,10 @@ impl App {
         let Some(st) = self.top().cloned() else {
             return;
         };
-        let desc = self.focused_desc(&st, rows);
-        if desc.is_empty() {
+        let lines = self.desc_lines_for(&st, rows, false);
+        if lines.is_empty() {
             return;
         }
-        let lines = wrap_text(&desc, self.width.saturating_sub(1));
         if lines.len() > self.desc_page_capacity() {
             self.desc_expanded = false;
             let title = if !r.label.is_empty() {
@@ -6247,22 +6309,142 @@ impl App {
         Some(Overlay::Comment(s))
     }
 
-    /// focusedDesc returns the schema description of the highlighted row.
-    fn focused_desc(&self, st: &MenuState, rows: &[Row]) -> String {
+    /// key_comment_edit drives the multiline document-comment editor.
+    /// ctrl+s writes the comment into the session metadata (a later save emits it);
+    /// the document body is unchanged.
+    pub fn key_comment_edit(&mut self, msg: Msg, mut s: CommentEditState) -> Option<Overlay> {
+        match msg.key_str().as_str() {
+            "ctrl+s" => {
+                let text = s.ta.value();
+                if self.doc_comment_at(&s.path).unwrap_or_default() == text {
+                    return None; // no-op: keep the stored formatting/markers
+                }
+                let setter = self.opts().set_comment.clone();
+                if let Some(set) = setter {
+                    set(&s.path, &text);
+                    self.fs_mut().comments_dirty = true;
+                }
+                return None;
+            }
+            "esc" => return None,
+            _ => {}
+        }
+        if let Some(k) = msg_key(&msg) {
+            s.ta.handle_key(k);
+        }
+        Some(Overlay::CommentEdit(s))
+    }
+
+    /// edit_comment_row implements C: open the multiline editor for the
+    /// focused key's document comment. A key without a comment starts with an
+    /// empty buffer, so the same key adds one; applying empty text removes it.
+    fn edit_comment_row(&mut self, r: &Row) {
+        if !matches!(
+            r.kind,
+            RowKind::Field | RowKind::Drill | RowKind::Unknown | RowKind::Toggle | RowKind::Variant
+        ) {
+            return;
+        }
+        let path = r.path.clone();
+        if self.doc().get(&path).is_none() {
+            self.notice = "comment: key has no value in the document".to_string();
+            return;
+        }
+        let text = self.doc_comment_at(&path).unwrap_or_default();
+        let title = if !r.label.is_empty() {
+            r.label.clone()
+        } else if let Some(f) = r.fn_ {
+            self.fs().schema.nodes[f as usize].title.clone()
+        } else {
+            String::new()
+        };
+        self.open_comment_edit(&path, &title, &text);
+    }
+
+    /// open_comment_edit arms the multiline comment editor.
+    fn open_comment_edit(&mut self, path: &[PathSeg], title: &str, text: &str) {
+        self.overlay = Some(self.comment_edit_overlay(path, title, text));
+    }
+
+    /// comment_edit_overlay builds the comment editor state (the overlay
+    /// router assigns the returned surface).
+    fn comment_edit_overlay(&self, path: &[PathSeg], title: &str, text: &str) -> Overlay {
+        let mut ta = TextArea::new();
+        let w = self.width.saturating_sub(4).clamp(20, 100);
+        let h = self.height.saturating_sub(6).clamp(3, 24);
+        ta.set_width(w as u16);
+        ta.set_height(h as u16);
+        ta.set_value(text);
+        Overlay::CommentEdit(CommentEditState {
+            path: path.to_vec(),
+            title: title.to_string(),
+            ta,
+        })
+    }
+
+    /// doc_comment_at reads the session's document comment for one path.
+    fn doc_comment_at(&self, path: &[PathSeg]) -> Option<String> {
+        let f = self.opts().comment_at.clone()?;
+        f(path)
+    }
+
+    /// row_comment_text returns the document comment of a member row (None
+    /// for synthetic rows such as add/save/raw and for paths without one).
+    fn row_comment_text(&self, r: &Row) -> Option<String> {
+        if !matches!(
+            r.kind,
+            RowKind::Field | RowKind::Drill | RowKind::Unknown | RowKind::Toggle | RowKind::Variant
+        ) || self.doc().get(&r.path).is_none()
+        {
+            return None;
+        }
+        self.doc_comment_at(&r.path)
+    }
+
+    /// focused_sources returns the schema help and document comment the
+    /// description panel should show, after applying `C`'s source mode.
+    fn focused_sources(&self, st: &MenuState, rows: &[Row]) -> (String, String) {
         if rows.is_empty() || st.cursor >= rows.len() {
-            return String::new();
+            return (String::new(), String::new());
         }
         let r = &rows[st.cursor];
+        let mut schema = String::new();
         if let Some(f) = r.fn_ {
-            let desc = self.fs().schema.nodes[f as usize].desc.clone();
-            if !desc.is_empty() {
-                return desc;
+            schema = self.fs().schema.nodes[f as usize].desc.clone();
+        }
+        if schema.is_empty() {
+            if let Some(v) = r.variant {
+                schema = self.fs().schema.nodes[v as usize].desc.clone();
             }
         }
-        if let Some(v) = r.variant {
-            return self.fs().schema.nodes[v as usize].desc.clone();
+        let comment = self.row_comment_text(r).unwrap_or_default();
+        (schema, comment)
+    }
+
+    /// desc_lines_for wraps the focused sources into colored lines. When
+    /// `folded`, each source independently keeps at most
+    /// [`DESC_BLOCK_PREVIEW_LINES`] lines and ends with an emphasized `…`.
+    fn desc_lines_for(&self, st: &MenuState, rows: &[Row], folded: bool) -> Vec<DescLine> {
+        let (schema, comment) = self.focused_sources(st, rows);
+        let width = self.width.saturating_sub(1);
+        let mut out = Vec::new();
+        for (source, raw) in [(DescSource::Schema, schema), (DescSource::Comment, comment)] {
+            if raw.trim().is_empty() {
+                continue;
+            }
+            let mut lines = wrap_text(&raw, width);
+            let cut = folded && lines.len() > DESC_BLOCK_PREVIEW_LINES;
+            if cut {
+                lines = fold_desc_block(lines, width);
+            }
+            let last = lines.len().saturating_sub(1);
+            out.extend(lines.into_iter().enumerate().map(|(i, text)| DescLine {
+                source,
+                text,
+                folded: cut && i == last,
+            }));
         }
-        String::new()
+        out
     }
 
     /// suggestionHint renders the completion hint line (Go suggestionHint).
@@ -7040,7 +7222,7 @@ impl App {
         let off = s.scroll.min(max_scroll);
         for line in s.lines.iter().skip(off).take(page) {
             b.push_str(&clip_display(
-                &style::desc(line),
+                &desc_line_view(line),
                 self.width.saturating_sub(1),
             ));
             b.push('\n');
@@ -7054,6 +7236,19 @@ impl App {
         b
     }
 
+    /// comment_edit_view renders the multiline document-comment editor.
+    fn comment_edit_view(&self, s: &CommentEditState) -> String {
+        let title = if s.title.is_empty() {
+            "Edit comment".to_string()
+        } else {
+            format!("Edit comment: {}", s.title)
+        };
+        let mut b = format!("{}\n", style::bold(&title));
+        b.push_str(&ta_view(&s.ta));
+        b.push('\n');
+        self.finish_with_hint(b, style::help("ctrl+s apply · esc cancel"))
+    }
+
     fn text_view(&self, s: &TextState) -> String {
         let mut title = format!("Edit raw {}", self.opts().raw.raw_label());
         if let Some(f) = s.fn_ {
@@ -7065,10 +7260,6 @@ impl App {
         let mut b = format!("{}\n", style::bold(&title));
         b.push_str(&ta_view(&s.ta));
         b.push('\n');
-        if !s.err.is_empty() {
-            b.push_str(&style::fg1(&s.err));
-            b.push('\n');
-        }
         self.finish_with_hint(b, style::help("ctrl+s apply · esc cancel"))
     }
 

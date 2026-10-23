@@ -62,6 +62,11 @@ pub mod style {
     pub fn desc(s: &str) -> String {
         render("38;5;141", s)
     }
+    /// Document comments use a different color from schema help in the
+    /// description panel.
+    pub fn comment(s: &str) -> String {
+        render("38;5;117", s)
+    }
     pub fn anchor(s: &str) -> String {
         render("38;5;177", s)
     }
@@ -94,9 +99,26 @@ pub mod style {
 pub const MENU_HELP: &str =
     "↑/↓ move · enter edit/open · esc back · ctrl+s/w save · / search · ? help";
 pub const OVERLAY_HELP: &str = "enter select · / search · esc cancel";
-/// Comment preview cap: the focused row's description never pushes the menu
-/// further than this unless c expands it.
-pub const COMMENT_PREVIEW_LINES: usize = 3;
+/// Collapsed description cap per source: the schema help and the document
+/// comment each show at most this many wrapped lines; a cut block gets an
+/// emphasized trailing `…`.
+pub const DESC_BLOCK_PREVIEW_LINES: usize = 2;
+
+/// DescSource selects the color of one description-panel line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DescSource {
+    Schema,
+    Comment,
+}
+
+/// DescLine is one wrapped line of the focused row's description panel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DescLine {
+    pub source: DescSource,
+    pub text: String,
+    /// the block was cut here: render an emphasized `…` after the text
+    pub folded: bool,
+}
 
 /// maxMacroKeys caps a single recorded macro; reaching it stops recording
 /// and keeps the keys captured so far.
@@ -155,6 +177,10 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
     HelpEntry {
         keys: "z",
         desc: "show/hide fields with no value (null/unset)",
+    },
+    HelpEntry {
+        keys: "- / = / +",
+        desc: "number: subtract / add 1 (missing schema-typed values seed -1/1; schema-less/array-item numbers use their runtime value)",
     },
     HelpEntry {
         keys: "[N] gg / G",
@@ -265,6 +291,10 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
         desc: "description: expand/fold; too long for one page opens a scrollable page (↑/↓ or j/k scroll, c/q/esc close)",
     },
     HelpEntry {
+        keys: "C",
+        desc: "edit the document comment of the focused key (empty text removes it)",
+    },
+    HelpEntry {
         keys: "?",
         desc: "open/close this help",
     },
@@ -288,8 +318,6 @@ pub enum Msg {
     Char(char, bool),
     Esc,
     Enter,
-    /// alt+enter is a distinct chord (replace-all in the search overlay)
-    AltEnter,
     Tab,
     BackTab,
     Backspace,
@@ -317,7 +345,6 @@ impl Msg {
             Msg::Char(c, true) => format!("alt+{}", c),
             Msg::Esc => "esc".to_string(),
             Msg::Enter => "enter".to_string(),
-            Msg::AltEnter => "alt+enter".to_string(),
             Msg::Tab => "tab".to_string(),
             Msg::BackTab => "shift+tab".to_string(),
             Msg::Backspace => "backspace".to_string(),
@@ -601,9 +628,19 @@ pub struct ExternalEdit {
 pub struct CommentState {
     /// the field/row label shown in the page title
     pub title: String,
-    /// the fully wrapped description lines
-    pub lines: Vec<String>,
+    /// the fully wrapped description lines, tagged with their source color
+    pub lines: Vec<DescLine>,
     pub scroll: usize,
+}
+
+/// CommentEditState is the multiline editor for the document comment of one
+/// key. ctrl+s applies it to the session metadata (the document body is not
+/// touched); esc cancels.
+pub struct CommentEditState {
+    pub path: Vec<PathSeg>,
+    /// the row label shown in the editor title
+    pub title: String,
+    pub ta: TextArea,
 }
 
 /// Overlay is the single open surface (Go's 16 nullable fields + routeKey
@@ -623,6 +660,7 @@ pub enum Overlay {
     Anc(AnchorState),
     Mrg(MergeState),
     Comment(CommentState),
+    CommentEdit(CommentEditState),
 }
 
 // --- the app ------------------------------------------------------------------
@@ -750,6 +788,7 @@ impl App {
         match &self.overlay {
             Some(Overlay::Edit(_)) => i.edit = true,
             Some(Overlay::Text(_)) => i.text = true,
+            Some(Overlay::CommentEdit(_)) => i.text = true,
             Some(Overlay::Search(_)) => i.search_active = true,
             Some(Overlay::Add(_)) => i.add = true,
             Some(Overlay::Write(_)) => i.write = true,
@@ -998,6 +1037,9 @@ impl App {
     /// baseline.
     pub fn dirty(&self) -> bool {
         let f = self.fs();
+        if f.comments_dirty {
+            return true;
+        }
         match &f.baseline {
             Some(base) => !nodes_equal(&f.doc, Some(f.doc.root), base, Some(base.root)),
             None => false,
@@ -1281,6 +1323,7 @@ impl App {
             Overlay::Anc(s) => self.key_anchor(msg, s),
             Overlay::Mrg(s) => self.key_merge(msg, s),
             Overlay::Comment(s) => self.key_comment(msg, s),
+            Overlay::CommentEdit(s) => self.key_comment_edit(msg, s),
         };
     }
 
@@ -1402,6 +1445,7 @@ impl App {
             f.saved = true;
             f.with_errors = forced;
             f.baseline = Some(f.doc.clone()); // markers clear once saved
+            f.comments_dirty = false;
             if exit {
                 self.exiting = true;
                 return;
@@ -2112,7 +2156,7 @@ fn key_event_to_msg(key: KeyEvent) -> Option<Msg> {
             }
         }
         KeyCode::Esc => Some(Msg::Esc),
-        KeyCode::Enter => Some(if alt { Msg::AltEnter } else { Msg::Enter }),
+        KeyCode::Enter => Some(Msg::Enter),
         KeyCode::Tab => Some(Msg::Tab),
         KeyCode::BackTab => Some(Msg::BackTab),
         KeyCode::Backspace => Some(Msg::Backspace),

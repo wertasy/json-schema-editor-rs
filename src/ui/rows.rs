@@ -3480,6 +3480,8 @@ mod tests {
             copy: None,
             paste: None,
             replace_schema_location: None,
+            comment_at: None,
+            set_comment: None,
             status: String::new(),
             startup_notice: String::new(),
             load_errors: vec![],

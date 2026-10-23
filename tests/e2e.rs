@@ -668,6 +668,119 @@ fn pty_long_comment_page_scrolls_and_closes() {
 }
 
 #[test]
+fn pty_document_comment_display_and_c_edits_it() {
+    let dir = mktemp();
+    let schema = dir.path().join("comment.schema.json");
+    let cfg = dir.path().join("cfg.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{"port":{"type":"number","description":"schema port help"}}}"#,
+    );
+    write_file(&cfg, "{\n  // port doc note\n  \"port\": 8080\n}\n");
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+        return;
+    };
+
+    pty.wait_frame(
+        "both description sources",
+        0,
+        &["schema port help", "port doc note"],
+    );
+
+    // C opens the comment editor directly; ctrl+s applies, and the text
+    // survives to the saved file.
+    pty.send(b"C");
+    let (_, off) = pty.wait_frame("comment editor", 0, &["Edit comment", "ctrl+s apply"]);
+    pty.send(b"\x05 EDITED");
+    pty.send(b"\x13");
+    let (_, off) = pty.wait_frame("editor closed", off, &["port doc note EDITED"]);
+    pty.send(b"w");
+    pty.wait_frame("saved", off, &["Write to "]);
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+
+    let text = read_text(&cfg);
+    assert!(text.contains("// port doc note EDITED"), "{text}");
+    assert!(text.contains("\"port\": 8080"), "{text}");
+}
+
+#[test]
+fn pty_numeric_quick_keys_step_and_seed() {
+    let dir = mktemp();
+    let schema = dir.path().join("number.schema.json");
+    let cfg = dir.path().join("cfg.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{
+          "count":{"type":"integer"},
+          "missing":{"type":"number"}
+        }}"#,
+    );
+    write_file(&cfg, "{\"count\":5}\n");
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+        return;
+    };
+
+    pty.wait_frame("numeric menu", 0, &["count", "missing"]);
+    // 5 → 4 → 5 → 6
+    pty.send(b"-");
+    pty.send(b"+");
+    pty.send(b"=");
+    pty.wait_frame("stepped value", 0, &["6"]);
+    // the missing schema field is seeded with -1
+    pty.send(b"j");
+    pty.send(b"-");
+    pty.send(b"w");
+    pty.wait_frame("numeric changes saved", 0, &["Write to "]);
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+
+    let text = read_text(&cfg);
+    assert!(text.contains("\"count\": 6"), "{text}");
+    assert!(text.contains("\"missing\": -1"), "{text}");
+}
+
+#[test]
+fn pty_numeric_quick_keys_array_items() {
+    let dir = mktemp();
+    let schema = dir.path().join("array-number.schema.json");
+    let cfg = dir.path().join("cfg.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{"nums":{"type":"array","items":{"type":"integer"}}}}"#,
+    );
+    write_file(&cfg, "{\"nums\":[3,4]}\n");
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+        return;
+    };
+
+    pty.wait_frame("root with array", 0, &["nums"]);
+    pty.send(b"\r");
+    pty.wait_frame("array menu", 0, &["< Add item >", "nums[0]"]);
+    // array menu rows: < Add item >, item 0, item 1
+    pty.send(b"j");
+    pty.send(b"-");
+    pty.send(b"j");
+    pty.send(b"+");
+    pty.send(b"w");
+    pty.wait_frame("array changes saved", 0, &["Write to "]);
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+
+    let doc = read_json(&cfg);
+    assert_eq!(doc["nums"], serde_json::json!([2, 5]), "{doc}");
+}
+
+#[test]
 fn pty_yaml_schema_less_editing_keeps_comments() {
     let dir = mktemp();
     let cfg = dir.path().join("plain.yaml");
@@ -1911,7 +2024,7 @@ fn pty_search_replace() {
         off,
         &["$.server.host  localhost → 127.0.0.1"],
     );
-    pty.send(b"\x1b\r"); // alt+enter: replace all in scope
+    pty.send(b"\x01"); // ctrl+a: replace all in scope
     let (_, off) = pty.wait_frame("replace-all notice", off, &["replaced 2 occurrence"]);
     pty.send(b"\x13"); // ctrl+s: persist
     pty.wait_frame("saved", off, &["Write to "]);
