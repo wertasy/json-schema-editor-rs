@@ -759,6 +759,17 @@ fn search_input_line(prompt: &str, ti: &TextInput, width: usize) -> String {
     out
 }
 
+/// search_field_line renders one overlay input row. Only the focused input
+/// shows the reverse-video caret; the inactive row is dimmed and caret-less
+/// so tabbing between search and replace is visible.
+fn search_field_line(label: &str, ti: &TextInput, focused: bool) -> String {
+    if focused {
+        format!("{label}: {}", ti_view(ti))
+    } else {
+        style::faint(&format!("{label}: {}", ti.value()))
+    }
+}
+
 /// Render a TextInput like bubbles textinput.View(): the value with the
 /// cursor cell reverse-video.
 fn ti_view(ti: &TextInput) -> String {
@@ -5167,7 +5178,7 @@ impl App {
                 self.refilter(&mut s);
                 return Some(Overlay::Search(s));
             }
-            "ctrl+r" => {
+            "alt+enter" => {
                 if s.replace {
                     self.replace_search_all(s);
                     // replace_search_all clears the overlay on a real
@@ -5232,6 +5243,16 @@ impl App {
                 return None;
             }
             "esc" => {
+                // replace mode is one level deeper: esc drops back to the
+                // plain search list; the next esc closes the overlay.
+                if s.replace {
+                    s.replace = false;
+                    s.replace_focused = false;
+                    let cur = s.cursor;
+                    self.refilter(&mut s);
+                    s.cursor = cur.min(s.results.len().saturating_sub(1));
+                    return Some(Overlay::Search(s));
+                }
                 self.close_search(s);
                 return None;
             }
@@ -6023,14 +6044,15 @@ impl App {
             inputs += 1;
         }
         let status = self.status_lines();
+        let search_focused = !s.replace || !s.replace_focused;
         b.push_str(&clip_display(
-            &format!("search: {}", ti_view(&s.ti)),
+            &search_field_line("search", &s.ti, search_focused),
             self.width.saturating_sub(1),
         ));
         b.push('\n');
         if s.replace {
             b.push_str(&clip_display(
-                &format!("replace: {}", ti_view(&s.rti)),
+                &search_field_line("replace", &s.rti, s.replace_focused),
                 self.width.saturating_sub(1),
             ));
             b.push('\n');
@@ -6067,11 +6089,19 @@ impl App {
             b.push_str(&clip_display(line, self.width.saturating_sub(1)));
             b.push('\n');
         }
-        b.push_str(&clip_display(
-            &style::help(&format!(
-                "↑/↓ ctrl+j/k · pgup/pgdn page · enter jump/replace · tab replace · alt+i {} · alt+x {}",
+        let help = if s.replace {
+            format!(
+                "↑/↓ ctrl+j/k · pgup/dn · enter jump/replace · alt+enter all · tab focus · alt+i {} · alt+x {} · esc",
                 case_txt, mode_txt
-            )),
+            )
+        } else {
+            format!(
+                "↑/↓ ctrl+j/k · pgup/pgdn page · enter jump · tab replace · alt+i {} · alt+x {} · esc close",
+                case_txt, mode_txt
+            )
+        };
+        b.push_str(&clip_display(
+            &style::help(&help),
             self.width.saturating_sub(1),
         ));
         b

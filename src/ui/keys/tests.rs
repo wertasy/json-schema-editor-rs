@@ -339,6 +339,7 @@ fn key(k: &str) -> Msg {
         "ctrl+k" => Msg::Ctrl('k'),
         "ctrl+s" => Msg::Ctrl('s'),
         "ctrl+r" => Msg::Ctrl('r'),
+        "alt+enter" => Msg::AltEnter,
         "ctrl+o" => Msg::Ctrl('o'),
         "ctrl+i" => Msg::Ctrl('i'),
         "ctrl+u" => Msg::Ctrl('u'),
@@ -359,7 +360,7 @@ fn press(app: &mut App, keys: &[&str]) {
             "enter" | "esc" | "up" | "down" | "left" | "right" | "space" | "tab" | "shift+tab"
             | "backspace" | "delete" | "home" | "end" | "ctrl+c" | "ctrl+j" | "ctrl+k"
             | "ctrl+s" | "ctrl+r" | "ctrl+o" | "ctrl+i" | "ctrl+u" | "ctrl+n" | "ctrl+p"
-            | "alt+i" | "alt+x" | "pgup" | "pgdown" | "ctrl+f" | "ctrl+b" => {
+            | "alt+i" | "alt+x" | "alt+enter" | "pgup" | "pgdown" | "ctrl+f" | "ctrl+b" => {
                 app.update(key(k));
             }
             _ => {
@@ -8662,6 +8663,10 @@ fn menu_search_replace() {
         "enter keeps the overlay open"
     );
     assert_eq!(search_state(&m).results.len(), 0);
+    // esc leaves replace mode first; the overlay itself stays open
+    press(&mut m, &["esc"]);
+    let s = search_state(&m);
+    assert!(!s.replace && !s.replace_focused);
     press(&mut m, &["esc"]);
     assert!(m.overlay.is_none());
     assert_eq!(
@@ -8669,7 +8674,7 @@ fn menu_search_replace() {
         "/mnt"
     );
 
-    // ctrl+r replaces every hit in scope; numbers stay untouched
+    // alt+enter replaces every hit in scope; numbers stay untouched
     let doc2 = dbuild(|db| {
         db.obj(vec![
             ("name", db.s("alpha")),
@@ -8686,7 +8691,18 @@ fn menu_search_replace() {
     press(
         &mut m2,
         &[
-            "r", "a", "l", "p", "h", "a", "tab", "b", "e", "t", "a", "ctrl+r",
+            "r",
+            "a",
+            "l",
+            "p",
+            "h",
+            "a",
+            "tab",
+            "b",
+            "e",
+            "t",
+            "a",
+            "alt+enter",
         ],
     );
     assert_eq!(str_at(&m2.fs().doc, &["name"]), "beta");
@@ -8710,7 +8726,7 @@ fn menu_search_replace() {
     assert_eq!(search_state(&m3).results.len(), 2);
     press(&mut m3, &["alt+i"]);
     assert_eq!(search_state(&m3).results.len(), 0);
-    press(&mut m3, &["enter", "ctrl+r"]);
+    press(&mut m3, &["enter", "alt+enter"]);
     assert_eq!(str_at(&m3.fs().doc, &["name"]), "alpha");
     press(&mut m3, &["alt+i"]);
     assert_eq!(search_state(&m3).results.len(), 2);
@@ -8727,7 +8743,18 @@ fn menu_search_replace() {
     press(
         &mut m6,
         &[
-            "r", "s", "a", "m", "e", "tab", "o", "t", "h", "e", "r", "ctrl+r",
+            "r",
+            "s",
+            "a",
+            "m",
+            "e",
+            "tab",
+            "o",
+            "t",
+            "h",
+            "e",
+            "r",
+            "alt+enter",
         ],
     );
     assert_eq!(str_at(&m6.fs().doc, &["server", "host"]), "other");
@@ -8747,13 +8774,19 @@ fn menu_search_replace() {
         &mut m5,
         &["r", "/", "d", "a", "t", "a", "tab", "z", "z", "z", "esc"],
     );
+    assert!(!search_state(&m5).replace, "esc drops back to search mode");
     assert_eq!(
         sget(&m5.fs().doc, &[ks("mounts"), PathSeg::Idx(0), ks("src")]),
         "/data"
     );
 
-    // with replace armed, enter on the search input still jumps
+    // esc leaves replace mode, the second esc closes the overlay
     press(&mut m4, &["esc"]);
+    assert!(!search_state(&m4).replace);
+    press(&mut m4, &["esc"]);
+    assert!(m4.overlay.is_none());
+
+    // with replace armed, enter on the search input still jumps
     press(&mut m4, &["/", "w", "e", "b", "a", "p", "p"]);
     assert_eq!(search_state(&m4).results.len(), 1);
     press(&mut m4, &["tab", "tab"]);
@@ -8762,6 +8795,65 @@ fn menu_search_replace() {
     assert!(!matches!(m4.overlay, Some(Overlay::Search(_))));
     assert_eq!(cursor_cursor(&mut m4), 0);
     assert_eq!(row_at(&mut m4).path, sp(&["name"]));
+}
+
+#[test]
+fn search_replace_caret_follows_focused_input() {
+    let mut m = items_app(test_doc());
+    m.width = 80;
+    m.height = 20;
+    fn row<'a>(view: &'a str, prefix: &str) -> &'a str {
+        view.lines()
+            .find(|l| l.contains(prefix))
+            .unwrap_or_else(|| panic!("missing {prefix:?} row:\n{view}"))
+    }
+    press(&mut m, &["r", "d", "a", "t", "a", "tab", "x"]);
+    let view = m.view();
+    // tab focused the replace input: only it shows the reverse-video caret
+    assert!(
+        !row(&view, "search:").contains("\x1b[7m"),
+        "search row has a caret:\n{view}"
+    );
+    assert!(
+        row(&view, "replace:").contains("\x1b[7m"),
+        "replace row lost its caret:\n{view}"
+    );
+
+    press(&mut m, &["tab"]);
+    let view = m.view();
+    assert!(
+        row(&view, "search:").contains("\x1b[7m"),
+        "search row lost its caret:\n{view}"
+    );
+    assert!(
+        !row(&view, "replace:").contains("\x1b[7m"),
+        "replace row has a caret:\n{view}"
+    );
+}
+
+#[test]
+fn search_help_lists_only_the_active_mode() {
+    let mut m = items_app(test_doc());
+    m.width = 120;
+    m.height = 20;
+    press(&mut m, &["/"]);
+    let view = m.view();
+    assert!(view.contains("tab replace"), "search help:\n{view}");
+    assert!(view.contains("esc close"), "search help:\n{view}");
+    assert!(!view.contains("alt+enter"), "search help:\n{view}");
+
+    press(&mut m, &["tab"]);
+    let view = m.view();
+    assert!(view.contains("alt+enter all"), "replace help:\n{view}");
+    assert!(view.contains("tab focus"), "replace help:\n{view}");
+    assert!(!view.contains("tab replace"), "replace help:\n{view}");
+    assert!(!view.contains("esc close"), "replace help:\n{view}");
+
+    // esc drops back to search mode, and the help follows
+    press(&mut m, &["esc"]);
+    let view = m.view();
+    assert!(view.contains("tab replace"), "search help:\n{view}");
+    assert!(!view.contains("alt+enter"), "search help:\n{view}");
 }
 
 #[test]
@@ -8851,7 +8943,7 @@ fn search_replace_unknown_key() {
     );
     press(&mut m, &["tab"]);
     press(&mut m, &["g", "o", "o", "d", "b", "y", "e"]);
-    press(&mut m, &["ctrl+r"]);
+    press(&mut m, &["alt+enter"]);
     assert_eq!(str_at(&m.fs().doc, &["comment"]), "goodbye world");
     assert!(
         m.notice.contains("replaced 1 occurrence"),

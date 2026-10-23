@@ -288,6 +288,8 @@ pub enum Msg {
     Char(char, bool),
     Esc,
     Enter,
+    /// alt+enter is a distinct chord (replace-all in the search overlay)
+    AltEnter,
     Tab,
     BackTab,
     Backspace,
@@ -315,6 +317,7 @@ impl Msg {
             Msg::Char(c, true) => format!("alt+{}", c),
             Msg::Esc => "esc".to_string(),
             Msg::Enter => "enter".to_string(),
+            Msg::AltEnter => "alt+enter".to_string(),
             Msg::Tab => "tab".to_string(),
             Msg::BackTab => "shift+tab".to_string(),
             Msg::Backspace => "backspace".to_string(),
@@ -2109,7 +2112,7 @@ fn key_event_to_msg(key: KeyEvent) -> Option<Msg> {
             }
         }
         KeyCode::Esc => Some(Msg::Esc),
-        KeyCode::Enter => Some(Msg::Enter),
+        KeyCode::Enter => Some(if alt { Msg::AltEnter } else { Msg::Enter }),
         KeyCode::Tab => Some(Msg::Tab),
         KeyCode::BackTab => Some(Msg::BackTab),
         KeyCode::Backspace => Some(Msg::Backspace),

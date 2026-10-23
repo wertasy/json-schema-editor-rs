@@ -1911,7 +1911,7 @@ fn pty_search_replace() {
         off,
         &["$.server.host  localhost → 127.0.0.1"],
     );
-    pty.send(b"\x12"); // ctrl+r: replace all in scope
+    pty.send(b"\x1b\r"); // alt+enter: replace all in scope
     let (_, off) = pty.wait_frame("replace-all notice", off, &["replaced 2 occurrence"]);
     pty.send(b"\x13"); // ctrl+s: persist
     pty.wait_frame("saved", off, &["Write to "]);
