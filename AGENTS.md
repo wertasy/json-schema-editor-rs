@@ -18,6 +18,7 @@ cargo test pty_multi_file_session   # one test by name
 cargo build --release
 cargo run -- -s examples/server.schema.json examples/server.config.json
 cargo fmt                           # keep formatting local to touched code
+cargo clippy --all-targets --all-features  # lint gate; lints live in [lints] (Cargo.toml) + clippy.toml
 ```
 
 The e2e tests spawn the built binary. They isolate the schema cache with `JSE_CACHE_DIR`; never let tests touch the user's real cache or the public network. pty tests skip when no pty is available.

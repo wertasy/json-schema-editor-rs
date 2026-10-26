@@ -39,3 +39,62 @@ codegen-units = 1
 strip = true
 panic = "abort"
 debug = 0
+
+# Lints from BeautifulRust (https://github.com/morganlinton/BeautifulRust),
+# enforce with: cargo clippy --all-targets --all-features
+# jse is a binary crate, so the upstream [lib]-marked lints are dropped
+# (missing_docs, missing_panics_doc, missing_errors_doc, print_stdout, print_stderr).
+# Three upstream settings fight this codebase's core idioms and are deferred with
+# measured counts (re-enable during a cleanup pass, not silently):
+#   as_conversions (749)  — NodeId arena indexing is `node as usize` by design
+#   unreachable_pub (513) — pub-in-binary-crate is used throughout
+#   pedantic group (~900, worst: doc_markdown 339, unreadable_literal 77) — enabled
+#     per-lint below instead of as a group
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "warn"          # each unsafe op needs its own unsafe block
+missing_debug_implementations = "warn"   # every public type implements Debug
+rust_2018_idioms = { level = "warn", priority = -1 } # 2018-edition idioms, e.g. Formatter<'_>
+unreachable_pub = "allow"
+
+[lints.clippy]
+# Groups first, at lower priority so the individual settings below win.
+all = { level = "warn", priority = -1 }
+
+# Panics: return errors, and give every intentional panic a reason.
+unwrap_used = "warn"                     # use ?, or expect("why this cannot fail")
+expect_used = "allow"                    # expect with a reason is the sanctioned form
+panic_in_result_fn = "warn"              # a fn returning Result shouldn't also panic
+
+# Suppressions must explain themselves and expire when no longer needed.
+allow_attributes = "warn"                # prefer #[expect] over #[allow]
+allow_attributes_without_reason = "warn" # every suppression says why
+
+# Unsafe must be justified.
+undocumented_unsafe_blocks = "warn"      # // SAFETY: comment on every unsafe block
+multiple_unsafe_ops_per_block = "warn"   # one unsafe operation per block
+
+# API shape.
+fn_params_excessive_bools = "warn"       # bool parameters: use an enum or two methods
+struct_excessive_bools = "warn"          # many bool fields: use an enum or bitflags
+clone_on_ref_ptr = "warn"                # write Rc::clone(&x) so cheap clones are visible
+redundant_clone = "warn"                 # a clone whose original is never used again
+rc_buffer = "warn"                       # Rc<String> / Rc<Vec<T>>: use Rc<str> / Rc<[T]>
+
+# Idioms.
+string_add = "warn"                      # build strings with format! or push_str, not +
+wildcard_imports = "warn"                # no glob imports (use super::* in tests is allowed)
+
+# Output and debugging leftovers.
+dbg_macro = "warn"
+todo = "warn"
+
+# Casts that silently lose information.
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+
+# Pedantic lints that are mostly noise in practice, or that the skill disagrees with.
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+module_inception = "allow"               # a leaf module named after its main item is fine
+enum_glob_use = "allow"                  # use Enum::* inside a function that matches on it
