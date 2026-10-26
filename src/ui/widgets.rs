@@ -281,6 +281,8 @@ pub enum Key {
     CtrlK,
     CtrlU,
     CtrlW,
+    /// readline-style yank of the last ctrl+k/u/w kill
+    CtrlY,
     /// alt+f: end of the current/next word (shell forward-word)
     WordForward,
     /// alt+b: start of the current/previous word (shell backward-word)
@@ -313,7 +315,8 @@ fn is_word_delim(c: char) -> bool {
 /// TextInput is a one-line editable buffer with a cursor and tab-completion
 /// support — the bubbles textinput operations menu_keys.go uses: SetValue /
 /// Value / CursorEnd, character insert, backspace/delete, left/right,
-/// home/end (ctrl+a/ctrl+e), ctrl+k/ctrl+u line kills, ctrl+w word kill.
+/// home/end (ctrl+a/ctrl+e), ctrl+k/ctrl+u line kills, ctrl+w word kill, and
+/// ctrl+y yank of the last kill.
 #[derive(Clone, Debug)]
 pub struct TextInput {
     value: String,
@@ -323,6 +326,8 @@ pub struct TextInput {
     suggestions: Vec<String>,
     /// Completion cycle position; None until the first complete_* call.
     sug_idx: Option<usize>,
+    /// Last text removed by ctrl+k/u/w, pasted back by ctrl+y.
+    kill: String,
 }
 
 impl Default for TextInput {
@@ -333,6 +338,7 @@ impl Default for TextInput {
             placeholder: String::new(),
             suggestions: Vec::new(),
             sug_idx: None,
+            kill: String::new(),
         }
     }
 }
@@ -458,6 +464,10 @@ impl TextInput {
                 }
             }
         }
+        let killed = self.value[cut..self.cursor].to_string();
+        if !killed.is_empty() {
+            self.kill = killed;
+        }
         self.value.replace_range(cut..self.cursor, "");
         self.cursor = cut;
     }
@@ -533,13 +543,27 @@ impl TextInput {
             Key::Home | Key::CtrlA => self.cursor = 0,
             Key::End | Key::CtrlE => self.cursor_end(),
             Key::CtrlK => {
+                let killed = self.value[self.cursor..].to_string();
+                if !killed.is_empty() {
+                    self.kill = killed;
+                }
                 self.value.truncate(self.cursor);
             }
             Key::CtrlU => {
+                let killed = self.value[..self.cursor].to_string();
+                if !killed.is_empty() {
+                    self.kill = killed;
+                }
                 self.value.replace_range(0..self.cursor, "");
                 self.cursor = 0;
             }
             Key::CtrlW => self.delete_word_backward(),
+            Key::CtrlY => {
+                if !self.kill.is_empty() {
+                    let killed = self.kill.clone();
+                    self.insert_str(&killed);
+                }
+            }
             Key::WordForward => self.word_forward(),
             Key::WordBackward => self.word_backward(),
             Key::Enter | Key::Up | Key::Down => {}
@@ -560,6 +584,8 @@ pub struct TextArea {
     col: usize,
     width: u16,
     height: u16,
+    /// Last text removed by ctrl+k/u/w on the current line, yanked by ctrl+y.
+    kill: String,
 }
 
 impl Default for TextArea {
@@ -570,6 +596,7 @@ impl Default for TextArea {
             col: 0,
             width: 0,
             height: 0,
+            kill: String::new(),
         }
     }
 }
@@ -711,6 +738,10 @@ impl TextArea {
                 }
             }
         }
+        let killed = self.lines[self.row][cut..self.col].to_string();
+        if !killed.is_empty() {
+            self.kill = killed;
+        }
         self.lines[self.row].replace_range(cut..self.col, "");
         self.col = cut;
     }
@@ -810,13 +841,27 @@ impl TextArea {
             Key::Home | Key::CtrlA => self.col = 0,
             Key::End | Key::CtrlE => self.col = self.line_len(),
             Key::CtrlK => {
+                let killed = self.lines[self.row][self.col..].to_string();
+                if !killed.is_empty() {
+                    self.kill = killed;
+                }
                 self.lines[self.row].truncate(self.col);
             }
             Key::CtrlU => {
+                let killed = self.lines[self.row][..self.col].to_string();
+                if !killed.is_empty() {
+                    self.kill = killed;
+                }
                 self.lines[self.row].replace_range(0..self.col, "");
                 self.col = 0;
             }
             Key::CtrlW => self.delete_word_backward(),
+            Key::CtrlY => {
+                if !self.kill.is_empty() {
+                    let killed = self.kill.clone();
+                    self.insert_str(&killed);
+                }
+            }
             Key::WordForward => self.word_forward(),
             Key::WordBackward => self.word_backward(),
         }
@@ -1284,6 +1329,38 @@ mod tests {
     }
 
     #[test]
+    fn text_input_kill_then_yank_roundtrips() {
+        let mut ti = TextInput::new();
+        ti.set_value("echo hello");
+        ti.handle_key(Key::CtrlU);
+        assert_eq!(ti.value(), "");
+        ti.handle_key(Key::CtrlY);
+        assert_eq!(ti.value(), "echo hello");
+
+        // ctrl+w replaces the kill buffer with the word it removed
+        ti.handle_key(Key::CtrlW);
+        assert_eq!(ti.value(), "echo ");
+        ti.handle_key(Key::CtrlY);
+        assert_eq!(ti.value(), "echo hello");
+
+        // ctrl+k kills to the end and ctrl+y restores it
+        ti.handle_key(Key::CtrlA);
+        ti.handle_key(Key::CtrlK);
+        assert_eq!(ti.value(), "");
+        ti.handle_key(Key::CtrlY);
+        assert_eq!(ti.value(), "echo hello");
+
+        // empty kills leave the previous buffer intact
+        let mut ti = TextInput::new();
+        ti.set_value("keep");
+        ti.handle_key(Key::CtrlU);
+        ti.set_value("");
+        ti.handle_key(Key::CtrlU);
+        ti.handle_key(Key::CtrlY);
+        assert_eq!(ti.value(), "keep");
+    }
+
+    #[test]
     fn text_input_word_motion() {
         let mut ti = TextInput::new();
         ti.set_value("one two three");
@@ -1462,6 +1539,22 @@ mod tests {
         ta.handle_key(Key::End);
         ta.handle_key(Key::Down); // line 1 is shorter: column clamps to 1
         assert_eq!(ta.cursor(), (1, 1));
+    }
+
+    #[test]
+    fn text_area_kill_then_yank_roundtrips() {
+        let mut ta = TextArea::new();
+        ta.set_value("alpha beta\ngamma");
+        ta.handle_key(Key::End);
+        ta.handle_key(Key::CtrlU);
+        assert_eq!(ta.value(), "\ngamma");
+        ta.handle_key(Key::CtrlY);
+        assert_eq!(ta.value(), "alpha beta\ngamma");
+
+        ta.handle_key(Key::CtrlW);
+        assert_eq!(ta.value(), "alpha \ngamma");
+        ta.handle_key(Key::CtrlY);
+        assert_eq!(ta.value(), "alpha beta\ngamma");
     }
 
     #[test]

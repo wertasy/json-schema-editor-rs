@@ -1121,6 +1121,101 @@ fn remote_schema() {
 
 // --- pty tests --------------------------------------------------------------
 
+#[cfg(unix)]
+#[test]
+fn pty_shell_tab_arrows_keep_the_candidate_list() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = mktemp();
+    let schema = dir.path().join("shell.schema.json");
+    let cfg = dir.path().join("shell.json");
+    write_file(&schema, r#"{"type":"object"}"#);
+    write_file(&cfg, r#"{"name":"old"}"#);
+    let commands = dir.path().join("bin");
+    std::fs::create_dir(&commands).unwrap();
+    for name in ["zzalpha", "zzalpine", "zzalps"] {
+        let p = commands.join(name);
+        std::fs::write(&p, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path_env = commands.to_string_lossy().into_owned();
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(
+        &["-s", schema_arg.as_str(), cfg_arg.as_str()],
+        &[("PATH", path_env.as_str())],
+        &cache,
+    ) else {
+        return;
+    };
+    pty.wait_frame("root menu", 0, &["↑/↓ move"]);
+    pty.send(b"!");
+    pty.wait_frame("shell prompt", 0, &["shell: r <cmd> insert"]);
+    let (_, off) = pty.wait_frame(
+        "automatic candidates",
+        0,
+        &["  zzalpha", "  zzalpine", "  zzalps"],
+    );
+    pty.send(b"r zzal");
+    let (_, off) = pty.wait_frame("typed", off, &["!r zzal"]);
+    pty.send(b"\t");
+    let (_, off) = pty.wait_frame(
+        "candidate overlay",
+        off,
+        &["> r zzalpha", "  r zzalpine", "  r zzalps", "!r zzalpha"],
+    );
+    pty.send(b"\x1b[B"); // down
+    let (_, off) = pty.wait_frame("down candidate", off, &["> r zzalpine", "!r zzalpine"]);
+    pty.send(b"\x1b[A"); // up
+    let (_, off) = pty.wait_frame("up candidate", off, &["> r zzalpha", "!r zzalpha"]);
+    pty.send(b"\t");
+    pty.wait_frame("tab after arrows cycles", off, &["> r zzalpine"]);
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+}
+
+#[test]
+fn pty_shell_command_inserts_output() {
+    let dir = mktemp();
+    let schema = dir.path().join("shell.schema.json");
+    let cfg = dir.path().join("shell.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{
+		"name":{"type":"string","title":"Name"},
+		"tags":{"type":"array","title":"Tags","items":{"type":"string"}}}}"#,
+    );
+    write_file(&cfg, r#"{"name":"old","tags":["a"]}"#);
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+        return;
+    };
+
+    pty.wait_frame("root menu", 0, &["↑/↓ move"]);
+    pty.send(b"!");
+    pty.wait_frame("shell prompt", 0, &["shell: r <cmd> insert"]);
+    pty.send(b"r echo from-shell");
+    let (_, typed_off) = pty.wait_frame("command typed", 0, &["!r echo from-shell"]);
+    pty.send(b"\r");
+    // The redraw after enter shows the inserted value; the typed prompt text
+    // was already consumed by typed_off.
+    pty.wait_frame("inserted output", typed_off, &["from-shell"]);
+    pty.send(b"\x13"); // ctrl+s
+    pty.wait_frame("saved", typed_off, &["Write to"]);
+    pty.send(b"q");
+    pty.wait_exit(0);
+
+    let saved = read_json(&cfg);
+    assert_eq!(
+        saved["name"],
+        json!("from-shell"),
+        "shell output must replace the focused string"
+    );
+    assert_eq!(saved["tags"], json!(["a"]), "array untouched");
+}
+
 #[test]
 fn pty_smoke() {
     let out = mktemp();

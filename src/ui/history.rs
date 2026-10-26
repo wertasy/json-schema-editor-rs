@@ -92,6 +92,8 @@ pub struct Inputs {
     pub search_active: bool,
     pub add: bool,
     pub write: bool,
+    /// `!` shell-command input
+    pub shell: bool,
     pub anc: bool,
     pub mrg: bool,
     pub confirm: bool,
@@ -112,7 +114,15 @@ pub struct Inputs {
 /// textarea, search, add-key input, anchor/merge inputs): q/@/. are ordinary
 /// characters there and history keys must not fire.
 pub fn typing(i: &Inputs) -> bool {
-    i.edit || i.text || i.search_active || i.add || i.write || i.anc || i.mrg || i.fast_move
+    i.edit
+        || i.text
+        || i.search_active
+        || i.add
+        || i.write
+        || i.shell
+        || i.anc
+        || i.mrg
+        || i.fast_move
 }
 
 /// list_mode reports whether the plain menu key table owns the keyboard.

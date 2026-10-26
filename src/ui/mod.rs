@@ -28,6 +28,7 @@ pub mod rows;
 pub mod schema_picker;
 pub mod search;
 pub mod select;
+pub mod shell;
 pub mod widgets;
 
 use std::collections::HashMap;

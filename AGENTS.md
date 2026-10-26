@@ -50,6 +50,7 @@ src/ui/
   accessible.rs      --accessible line protocol
   lineio.rs          one-line-per-read stdin reader
   schema_picker.rs   SchemaStore picker (TUI + accessible)
+  shell.rs           vi-style `!` modes: `r` stdout insert, `a` line append, `w` document-to-stdin, bare execute; tab completion
   merge.rs paste.rs search.rs select.rs   placeholders; actual logic lives elsewhere
 tests/
   common/mod.rs      pty + run helpers

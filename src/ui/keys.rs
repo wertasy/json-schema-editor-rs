@@ -21,7 +21,7 @@ use crate::ui::menu::{
     AddState, AnchorMode, AnchorState, App, CommentEditState, CommentState, ConfirmState,
     DESC_BLOCK_PREVIEW_LINES, DescLine, DescSource, EditState, ErrsState, ExternalEdit,
     FastMoveState, FilePickState, IssuesState, MergeState, Msg, Overlay, RefPickState, SearchState,
-    SelState, TextState, WriteState, anchor_defs, anchor_holder, anchor_holder_path,
+    SelState, ShellState, TextState, WriteState, anchor_defs, anchor_holder, anchor_holder_path,
     anchor_merge_use_paths, anchor_role, copy_detached_from_doc, copy_from_doc, count_anchor_uses,
     cursor_ancestor, cursor_by_path, cursor_for_row, cursor_prefix, is_path_prefix, merge_ref_uses,
     nodes_equal, nodes_equal_doc, page_delta, read_clipboard, ref_would_cycle, remap_state_cursor,
@@ -34,8 +34,101 @@ use crate::ui::rows::{
     replace_hits, search_index, seed_variant_cursor, summary, variant_field_defs,
     variant_signature, variant_value_summary,
 };
+use crate::ui::shell::{self, ShellTarget};
 use crate::ui::widgets::{Key, RawExt, TextArea, TextInput, apply_scalar, scalar_text};
 use crate::ui::{Issue, MenuKind, MenuState, Row, RowKind};
+
+/// maxShellHistory caps the `!` history ring; the oldest command drops first.
+pub const MAX_SHELL_HISTORY: usize = 100;
+
+/// shellSugWindow caps the visible tab-completion candidates above the prompt.
+pub const SHELL_SUG_WINDOW: usize = 8;
+
+/// Candidate overlays size to their content with a readable floor; the
+/// terminal's available width is the only ceiling.
+pub const SUG_MIN_WIDTH: usize = 24;
+/// Candidates sharing at least this many leading characters hide the shared
+/// prefix (shown as a leading `…`) so their differing tails stay visible.
+pub const SUG_STRIP_PREFIX_MIN: usize = 8;
+
+/// shell_sug_refresh rebuilds the auto-completion list for the current input
+/// without choosing a candidate; tab/arrows select from it.
+fn shell_sug_refresh(s: &mut ShellState) {
+    s.sug_prefix = s.ti.value().to_string();
+    s.sug = shell::completion_candidates(s.ti.value());
+    s.sug_idx = None;
+    s.sug_line.clear();
+}
+
+/// shell_complete applies the next/previous whole-line completion. A fresh
+/// cycle scans the current token (PATH command or filesystem path); repeated
+/// tab presses walk the same candidate list.
+fn shell_complete(s: &mut ShellState, forward: bool) {
+    let value = s.ti.value().to_string();
+    // A directory completion enters that directory on the next tab instead
+    // of cycling the old candidate list.
+    if s.sug_idx.is_none() || value != s.sug_line || value.ends_with('/') || value.ends_with('\\') {
+        s.sug_prefix = value.clone();
+        s.sug = shell::completion_candidates(&value);
+        s.sug_idx = None;
+        if s.sug.is_empty() {
+            return;
+        }
+        let idx = if forward { 0 } else { s.sug.len() - 1 };
+        shell_apply_sug(s, idx);
+        return;
+    }
+    shell_complete_step(s, forward);
+}
+
+/// cycle_text_sugs moves a TextInput completion cursor over a stored candidate
+/// list and writes the selected candidate. Used by arrows once completion is
+/// active, so the list is not rebuilt from the completed value (which would
+/// shrink it to that one candidate).
+fn cycle_text_sugs(ti: &mut TextInput, sugs: &[String], idx: &mut i64, delta: i64) -> bool {
+    if sugs.is_empty() {
+        return false;
+    }
+    let n = sugs.len() as i64;
+    *idx = if *idx < 0 {
+        if delta > 0 { 0 } else { n - 1 }
+    } else {
+        (*idx + delta).rem_euclid(n)
+    };
+    ti.set_value(sugs[*idx as usize].clone());
+    ti.cursor_end();
+    true
+}
+
+/// shell_completion_active reports whether the input still holds a candidate
+/// from the current completion list (so arrows should move within it).
+fn shell_completion_active(s: &ShellState) -> bool {
+    s.sug_idx.is_some() && s.ti.value() == s.sug_line
+}
+
+/// shell_complete_step moves the candidate cursor without rescanning the
+/// token; tab and, while active, the arrow keys use this.
+fn shell_complete_step(s: &mut ShellState, forward: bool) {
+    let Some(i) = s.sug_idx else { return };
+    let n = s.sug.len();
+    if n == 0 {
+        return;
+    }
+    let idx = if forward {
+        (i + 1) % n
+    } else {
+        (i + n - 1) % n
+    };
+    shell_apply_sug(s, idx);
+}
+
+fn shell_apply_sug(s: &mut ShellState, idx: usize) {
+    let candidate = s.sug[idx].clone();
+    s.ti.set_value(candidate.clone());
+    s.sug_line = candidate;
+    s.sug_idx = Some(idx);
+    s.hist_idx = None;
+}
 
 // ---------------------------------------------------------------------------
 // free helpers
@@ -464,6 +557,55 @@ pub(crate) fn clip_display(s: &str, max: usize) -> String {
     out
 }
 
+/// strip_query removes the already-typed prefix from a candidate. Matching is
+/// case-insensitive, mirroring suggestion filtering; the returned slice is
+/// the differing tail.
+fn strip_query<'a>(candidate: &'a str, query: &str) -> Option<&'a str> {
+    if query.is_empty() {
+        return None;
+    }
+    let mut end = 0usize;
+    let mut cand = candidate.char_indices();
+    for q in query.chars() {
+        let Some((idx, c)) = cand.next() else {
+            return None;
+        };
+        if c != q && !c.to_lowercase().eq(q.to_lowercase()) {
+            return None;
+        }
+        end = idx + c.len_utf8();
+    }
+    Some(&candidate[end..])
+}
+
+/// clip_left_ellipsis keeps the end of plain text within max cells, marking
+/// the cut with a leading `…`. The tail is never dropped: it is the part that
+/// distinguishes candidates sharing a long prefix.
+fn clip_left_ellipsis(s: &str, max: usize) -> String {
+    if display_width(s) <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    if max == 1 {
+        return "…".to_string();
+    }
+    let mut tail: Vec<char> = Vec::new();
+    let mut w = 0usize;
+    for c in s.chars().rev() {
+        let cw = char_width(c);
+        if w + cw > max - 1 {
+            break;
+        }
+        tail.push(c);
+        w += cw;
+    }
+    let mut out = String::from("…");
+    out.extend(tail.into_iter().rev());
+    out
+}
+
 /// clipLeft keeps the tail of s within max runes, marking the cut with "…".
 fn clip_left(s: &str, max: usize) -> String {
     if max == 0 {
@@ -793,6 +935,7 @@ pub(crate) fn msg_key(msg: &Msg) -> Option<Key> {
         Msg::Ctrl('k') => Key::CtrlK,
         Msg::Ctrl('u') => Key::CtrlU,
         Msg::Ctrl('w') => Key::CtrlW,
+        Msg::Ctrl('y') => Key::CtrlY,
         _ => return None,
     })
 }
@@ -1365,6 +1508,7 @@ impl App {
             "S" => self.open_schema_picker(),
             "ctrl+s" | "w" => self.save(),
             "W" => self.open_write_to(),
+            "!" => self.open_shell(),
             _ => {}
         }
     }
@@ -2086,6 +2230,7 @@ impl App {
                     err: String::new(),
                     is_new,
                     cands,
+                    sug_prefix: String::new(),
                     sugs: Vec::new(),
                     sug_idx: -1,
                 }));
@@ -2921,6 +3066,7 @@ impl App {
             return;
         };
         let prefix = e.ti.value().to_string();
+        e.sug_prefix = prefix.clone();
         if let Some(src) = src {
             if src.tag_ref.is_empty() && !src.suggestions.is_empty() {
                 let opts = filter_completions(&src.suggestions, &prefix);
@@ -3024,8 +3170,18 @@ impl App {
                 self.overlay = Some(Overlay::Write(s));
                 self.refresh_write_suggestions();
             }
+            Overlay::Shell(mut s) => {
+                // the prompt is one line: pasted newlines become spaces
+                s.ti.insert_str(&text.replace('\n', " "));
+                shell_sug_refresh(&mut s);
+                self.overlay = Some(Overlay::Shell(s));
+            }
             Overlay::Anc(mut s) => {
                 s.ti.insert_str(&text);
+                s.sug = -1;
+                s.sug_prefix = s.ti.value().to_string();
+                s.sugs = Self::anchor_filtered(&s);
+                s.sug_line.clear();
                 self.overlay = Some(Overlay::Anc(s));
             }
             Overlay::Mrg(mut s) => {
@@ -4203,15 +4359,21 @@ impl App {
                 cands.push(d.name);
             }
         }
-        self.overlay = Some(Overlay::Anc(AnchorState {
+        let mut s = AnchorState {
             path: r.path.clone(),
             mode,
             fn_: r.fn_,
             ti,
             cands,
+            sug_prefix: String::new(),
+            sugs: Vec::new(),
+            sug_line: String::new(),
             sug: -1,
             err: String::new(),
-        }));
+        };
+        s.sug_prefix = s.ti.value().to_string();
+        s.sugs = Self::anchor_filtered(&s);
+        self.overlay = Some(Overlay::Anc(s));
     }
 
     /// anchorFiltered lists the reference candidates matching the input.
@@ -4235,19 +4397,28 @@ impl App {
         if s.mode != AnchorMode::RefSet {
             return;
         }
-        let cands = Self::anchor_filtered(s);
-        if cands.is_empty() {
+        // Capture the list under the typed prefix on the first tab. Later
+        // tabs/arrows must keep cycling that list: recomputing from the
+        // completed name would shrink it to that one candidate.
+        if s.sug < 0 || s.ti.value() != s.sug_line {
+            s.sug_prefix = s.ti.value().to_string();
+            s.sugs = Self::anchor_filtered(s);
+            s.sug = -1;
+        }
+        if s.sugs.is_empty() {
             return;
         }
         s.sug += delta;
         if s.sug < 0 {
-            s.sug = cands.len() as i64 - 1;
+            s.sug = s.sugs.len() as i64 - 1;
         }
-        if s.sug >= cands.len() as i64 {
+        if s.sug >= s.sugs.len() as i64 {
             s.sug = 0;
         }
-        s.ti.set_value(cands[s.sug as usize].clone());
+        let candidate = s.sugs[s.sug as usize].clone();
+        s.ti.set_value(candidate.clone());
         s.ti.cursor_end();
+        s.sug_line = candidate;
     }
 
     /// anchorCommit applies the & / * input (Go anchorCommit).
@@ -5182,6 +5353,15 @@ impl App {
                 }
             }
             "esc" => return None,
+            "up" | "down" if !e.sugs.is_empty() => {
+                cycle_text_sugs(
+                    &mut e.ti,
+                    &e.sugs,
+                    &mut e.sug_idx,
+                    if msg.key_str() == "up" { -1 } else { 1 },
+                );
+                return Some(Overlay::Edit(e));
+            }
             "tab" | "ctrl+n" | "shift+tab" | "ctrl+p" => {
                 if e.sugs.is_empty() {
                     return Some(Overlay::Edit(e));
@@ -5323,6 +5503,266 @@ impl App {
         }
     }
 
+    /// openShell arms the `!` command input at the bottom of the screen.
+    fn open_shell(&mut self) {
+        let mut s = ShellState {
+            ti: TextInput::new(),
+            hist_idx: None,
+            draft: String::new(),
+            sug_prefix: String::new(),
+            sug: Vec::new(),
+            sug_idx: None,
+            sug_line: String::new(),
+        };
+        shell_sug_refresh(&mut s);
+        self.overlay = Some(Overlay::Shell(s));
+    }
+
+    /// keyShell drives the `!` line: enter runs the command and writes its
+    /// output at the cursor row; up/down walk the session history. The prompt
+    /// already shows one `!`, so enter on `!` (visible `!!`) or `!!` reruns
+    /// the previous input; esc cancels.
+    pub fn key_shell(&mut self, msg: Msg, mut s: ShellState) -> Option<Overlay> {
+        match msg.key_str().as_str() {
+            "enter" => {
+                let cmd = s.ti.value().trim().to_string();
+                if cmd.is_empty() {
+                    return Some(Overlay::Shell(s));
+                }
+                // The prompt itself already shows one `!`: typing one more
+                // (visible `!!`) or two (`!!!`) both mean "repeat the last
+                // input" on enter, never a literal `!` shell command.
+                if cmd == "!" || cmd == "!!" {
+                    return self.shell_rerun_last();
+                }
+                self.shell_history.push(cmd.clone());
+                if self.shell_history.len() > MAX_SHELL_HISTORY {
+                    self.shell_history.remove(0);
+                }
+                self.execute_shell_input(&cmd);
+                None
+            }
+            "esc" => None,
+            "up" => {
+                if shell_completion_active(&s) {
+                    shell_complete_step(&mut s, false);
+                } else {
+                    self.shell_history_up(&mut s);
+                }
+                Some(Overlay::Shell(s))
+            }
+            "down" => {
+                if shell_completion_active(&s) {
+                    shell_complete_step(&mut s, true);
+                } else {
+                    self.shell_history_down(&mut s);
+                }
+                Some(Overlay::Shell(s))
+            }
+            "tab" | "ctrl+n" => {
+                shell_complete(&mut s, true);
+                Some(Overlay::Shell(s))
+            }
+            "shift+tab" | "ctrl+p" => {
+                shell_complete(&mut s, false);
+                Some(Overlay::Shell(s))
+            }
+            _ => {
+                if let Some(k) = msg_key(&msg) {
+                    s.hist_idx = None;
+                    s.ti.handle_key(k);
+                    shell_sug_refresh(&mut s);
+                }
+                Some(Overlay::Shell(s))
+            }
+        }
+    }
+
+    /// shell_rerun_last repeats the most recent `!` input line, mode
+    /// included (`r`/`a`/`w`/bare), like vi's `!!`.
+    fn shell_rerun_last(&mut self) -> Option<Overlay> {
+        match self.shell_history.last().cloned() {
+            Some(line) => self.execute_shell_input(&line),
+            None => self.notice = "! no previous command".to_string(),
+        }
+        None
+    }
+
+    /// shell_history_up recalls the previous command, remembering the draft
+    /// that was being typed before the first recall.
+    fn shell_history_up(&self, s: &mut ShellState) {
+        let len = self.shell_history.len();
+        if len == 0 {
+            return;
+        }
+        let idx = match s.hist_idx {
+            None => {
+                s.draft = s.ti.value().to_string();
+                len - 1
+            }
+            Some(0) => 0,
+            Some(i) => i - 1,
+        };
+        s.hist_idx = Some(idx);
+        s.ti.set_value(self.shell_history[idx].clone());
+        shell_sug_refresh(s);
+    }
+
+    /// shell_history_down moves toward the draft; stepping past the newest
+    /// entry restores the original input.
+    fn shell_history_down(&self, s: &mut ShellState) {
+        let Some(i) = s.hist_idx else { return };
+        if i + 1 < self.shell_history.len() {
+            s.hist_idx = Some(i + 1);
+            s.ti.set_value(self.shell_history[i + 1].clone());
+        } else {
+            s.hist_idx = None;
+            s.ti.set_value(s.draft.clone());
+        }
+        shell_sug_refresh(s);
+    }
+
+    /// execute_shell_input applies one `!` input line: `r <cmd>` inserts the
+    /// command's stdout at the cursor value, `w <cmd>` streams the document
+    /// to the command's stdin, and a bare command only runs (vi's `:!`).
+    fn execute_shell_input(&mut self, line: &str) {
+        let (mode, cmd) = match shell::parse_input(line) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                self.notice = format!("! {e}");
+                return;
+            }
+        };
+        match mode {
+            shell::ShellMode::Read => self.shell_read(&cmd),
+            shell::ShellMode::AppendLines => self.shell_append_lines(&cmd),
+            shell::ShellMode::Write => self.shell_write(&cmd),
+            shell::ShellMode::Execute => self.shell_execute_only(&cmd),
+        }
+    }
+
+    /// shell_read is vi's `:r !cmd` scoped to the cursor value: the command's
+    /// stdout replaces a string or appends to a string array.
+    fn shell_read(&mut self, cmd: &str) {
+        let stdout = match shell::run_capture(cmd) {
+            Ok(out) => out,
+            Err(e) => {
+                self.notice = format!("! {e}");
+                return;
+            }
+        };
+        let target = match self.shell_target() {
+            Some(t) => t,
+            None => {
+                self.notice = "! cursor is not on a string or an array of strings".to_string();
+                return;
+            }
+        };
+        let output = shell::output_text(&stdout);
+        if let Err(e) = shell::apply(&mut self.fs_mut().doc, &target, &output) {
+            self.notice = format!("! {e}");
+        }
+    }
+
+    /// shell_append_lines is the `a <cmd>` mode: split stdout into lines and
+    /// append each one as a new item of the focused string array.
+    fn shell_append_lines(&mut self, cmd: &str) {
+        let stdout = match shell::run_capture(cmd) {
+            Ok(out) => out,
+            Err(e) => {
+                self.notice = format!("! {e}");
+                return;
+            }
+        };
+        let target = match self.shell_array_target() {
+            Some(t) => t,
+            None => {
+                self.notice = "! cursor is not on a string array".to_string();
+                return;
+            }
+        };
+        let lines = shell::output_lines(&stdout);
+        if let Err(e) = shell::apply_lines(&mut self.fs_mut().doc, &target, &lines) {
+            self.notice = format!("! {e}");
+        }
+    }
+
+    /// shell_write is vi's `:w !cmd`: pipe the whole live document (comments
+    /// included, in its own syntax) to the command's stdin. The document is
+    /// never modified; command output goes to the bottom notice.
+    fn shell_write(&mut self, cmd: &str) {
+        let text = match self.opts().raw.encode_raw_doc(self.doc()) {
+            Ok(text) => text,
+            Err(e) => {
+                self.notice = format!("! cannot serialize document: {e}");
+                return;
+            }
+        };
+        match shell::run_with_input(cmd, &text) {
+            Ok(out) => {
+                let shown = shell::compact_output(&out);
+                self.notice = if shown.is_empty() {
+                    format!("! piped {} bytes to command", text.len())
+                } else {
+                    shown
+                };
+            }
+            Err(e) => self.notice = format!("! {e}"),
+        }
+    }
+
+    /// shell_execute_only is vi's `:!cmd`: run the command and show its
+    /// output without touching the document.
+    fn shell_execute_only(&mut self, cmd: &str) {
+        match shell::run_capture(cmd) {
+            Ok(out) => self.notice = shell::compact_output(&out),
+            Err(e) => self.notice = format!("! {e}"),
+        }
+    }
+
+    /// shell_target resolves the value slot under the cursor: a string row,
+    /// an array-of-strings row (append), or the array of an empty item menu.
+    fn shell_target(&mut self) -> Option<ShellTarget> {
+        let st = self.top().cloned()?;
+        let rows = self.menu_rows_state(&st);
+        let cursor = st.cursor.min(rows.len().saturating_sub(1));
+        let r = rows.get(cursor)?;
+        let (node, path) =
+            if st.kind == MenuKind::Items && matches!(r.kind, RowKind::Add | RowKind::NoItems) {
+                // an empty string array has only its append row: the cursor
+                // still denotes the array value itself
+                (Some(st.node), st.path.clone())
+            } else if matches!(r.kind, RowKind::Field | RowKind::Drill | RowKind::Unknown) {
+                (r.fn_, r.path.clone())
+            } else {
+                return None;
+            };
+        let f = self.fs();
+        shell::resolve_target(&f.schema, &f.doc, node, &path)
+    }
+
+    /// shell_array_target resolves the `a` mode slot. A row that is itself a
+    /// string array wins; while browsing an item list, a scalar item falls
+    /// back to the containing array, so appending works without leaving the
+    /// array menu.
+    fn shell_array_target(&mut self) -> Option<ShellTarget> {
+        let st = self.top().cloned()?;
+        let rows = self.menu_rows_state(&st);
+        let cursor = st.cursor.min(rows.len().saturating_sub(1));
+        let r = rows.get(cursor)?;
+        if matches!(r.kind, RowKind::Field | RowKind::Drill | RowKind::Unknown) {
+            let f = self.fs();
+            if let Some(t) = shell::resolve_array_target(&f.schema, &f.doc, r.fn_, &r.path) {
+                return Some(t);
+            }
+        }
+        if st.kind == MenuKind::Items {
+            let f = self.fs();
+            return shell::resolve_array_target(&f.schema, &f.doc, Some(st.node), &st.path);
+        }
+        None
+    }
+
     /// keyWrite drives the w/W write-to-path input (Go keyWrite).
     pub fn key_write(&mut self, msg: Msg, mut w: WriteState) -> Option<Overlay> {
         match msg.key_str().as_str() {
@@ -5341,6 +5781,15 @@ impl App {
                 // validate_and_write may have opened the errors overlay;
                 // keep whatever it installed (Go's m.errs survives).
                 self.overlay.take()
+            }
+            "up" | "down" if !w.sugs.is_empty() => {
+                cycle_text_sugs(
+                    &mut w.ti,
+                    &w.sugs,
+                    &mut w.sug_idx,
+                    if msg.key_str() == "up" { -1 } else { 1 },
+                );
+                return Some(Overlay::Write(w));
             }
             "tab" | "ctrl+n" | "shift+tab" | "ctrl+p" => {
                 if w.sugs.is_empty() {
@@ -5393,6 +5842,7 @@ impl App {
         w.sug_idx = -1;
         w.sugs.clear();
         let value = w.ti.value().to_string();
+        w.sug_prefix = value.clone();
         let (dir, prefix) = match value.rfind('/') {
             Some(i) => (value[..=i].to_string(), value[i + 1..].to_string()),
             None => (String::new(), value.clone()),
@@ -5430,6 +5880,12 @@ impl App {
         match msg.key_str().as_str() {
             "enter" => return self.anchor_commit(s),
             "esc" => return None,
+            "up" | "down" => {
+                if s.mode == AnchorMode::RefSet && !s.sugs.is_empty() {
+                    self.cycle_anchor_sug(&mut s, if msg.key_str() == "up" { -1 } else { 1 });
+                    return Some(Overlay::Anc(s));
+                }
+            }
             "tab" | "ctrl+n" => {
                 self.cycle_anchor_sug(&mut s, 1);
                 return Some(Overlay::Anc(s));
@@ -5443,6 +5899,9 @@ impl App {
         s.sug = -1;
         if let Some(k) = msg_key(&msg) {
             s.ti.handle_key(k);
+            s.sug_prefix = s.ti.value().to_string();
+            s.sugs = Self::anchor_filtered(&s);
+            s.sug_line.clear();
         }
         Some(Overlay::Anc(s))
     }
@@ -6069,6 +6528,11 @@ impl App {
 
     /// helpLine renders the bottom hint row.
     fn help_line(&self) -> String {
+        if matches!(&self.overlay, Some(Overlay::Shell(_))) {
+            return self.rec_hint(
+                "shell: r <cmd> insert · a <cmd> lines→array · w <cmd> pipe doc · <cmd> run · tab/↑/↓ candidates · ↑/↓ history when idle · !!+enter repeat · esc",
+            );
+        }
         if let Some(f) = &self.fast_move {
             if f.backward {
                 return self.rec_hint("Fast move: type a character to move up · esc cancels");
@@ -6099,6 +6563,168 @@ impl App {
             }
         }
         self.rec_hint(crate::ui::menu::MENU_HELP)
+    }
+
+    /// shellInputLine renders the `!` prompt above the help bar; the caret is
+    /// the text input's reverse-video cell.
+    fn shell_input_line(&self) -> Option<String> {
+        match &self.overlay {
+            Some(Overlay::Shell(s)) => {
+                Some(search_input_line("!", &s.ti, self.width.saturating_sub(1)))
+            }
+            _ => None,
+        }
+    }
+
+    /// suggestion_overlay_lines renders one candidate window: `>` on the
+    /// selected row, accent-colored text for it, faint text for the rest.
+    fn suggestion_overlay_lines(
+        sugs: &[String],
+        idx: i64,
+        query: &str,
+        max: usize,
+        left: usize,
+        max_width: usize,
+    ) -> Vec<String> {
+        let avail = max_width.saturating_sub(left);
+        if sugs.is_empty() || max == 0 || avail == 0 {
+            return Vec::new();
+        }
+        let n = sugs.len();
+        let selected = idx >= 0;
+        let sel = if selected {
+            (idx as usize).min(n - 1)
+        } else {
+            0
+        };
+        let max = max.min(n);
+        let start = if selected {
+            sel.saturating_sub(max.saturating_sub(1)).min(n - max)
+        } else {
+            0
+        };
+        let end = start + max;
+        // Hide the already-typed leading text when it is long enough; the
+        // differing tail is what the user still needs to choose between.
+        let strip = end - start > 1 && query.chars().count() >= SUG_STRIP_PREFIX_MIN;
+        let displays: Vec<String> = (start..end)
+            .map(|i| {
+                let raw = &sugs[i];
+                match strip.then(|| strip_query(raw, query)).flatten() {
+                    Some(tail) if !tail.is_empty() => format!("…{tail}"),
+                    _ => raw.clone(),
+                }
+            })
+            .collect();
+        let natural = displays
+            .iter()
+            .enumerate()
+            .map(|(j, shown)| {
+                let on = selected && start + j == sel;
+                display_width(&format!("{}{}", cursor_prefix(on), shown))
+            })
+            .max()
+            .unwrap_or(0);
+        let width = natural.max(SUG_MIN_WIDTH).min(avail);
+        if width == 0 {
+            return Vec::new();
+        }
+        let mut out = Vec::with_capacity(max);
+        for (j, shown) in displays.iter().enumerate() {
+            let i = start + j;
+            let on = selected && i == sel;
+            let marker = cursor_prefix(on);
+            let content_width = width.saturating_sub(display_width(marker));
+            let mut content = shown.clone();
+            if display_width(&content) > content_width {
+                content = clip_left_ellipsis(&content, content_width);
+            }
+            let mut line = format!("{marker}{content}");
+            if display_width(&line) > width {
+                line = clip_display(&line, width);
+            }
+            // Fill the row so the background paints a solid rectangle, not
+            // just the glyphs of the candidate text.
+            let pad = width.saturating_sub(display_width(&line));
+            line.push_str(&" ".repeat(pad));
+            out.push(if on {
+                style::sug_sel(&line)
+            } else {
+                style::sug_dim(&line)
+            });
+        }
+        out
+    }
+
+    /// overlay_prefix keeps the content left of an inline candidate window:
+    /// the underlying row's first `left` cells, padded when it is shorter.
+    fn overlay_prefix(line: &str, left: usize) -> String {
+        if left == 0 {
+            return String::new();
+        }
+        let mut out = clip_display(line, left);
+        let pad = left.saturating_sub(display_width(&out));
+        out.push_str(&" ".repeat(pad));
+        out
+    }
+
+    /// indent_overlay indents a bottom input's candidate rectangle. There is
+    /// no underlying row content to preserve there.
+    fn indent_overlay(lines: Vec<String>, left: usize) -> Vec<String> {
+        if left == 0 {
+            return lines;
+        }
+        let indent = " ".repeat(left);
+        lines
+            .into_iter()
+            .map(|line| format!("{indent}{line}"))
+            .collect()
+    }
+
+    /// shellSuggestionLines renders the visible window of an active tab
+    /// completion. The prompt is at the bottom, so its window sits above it.
+    fn shell_suggestion_lines(&self) -> Vec<String> {
+        let Some(Overlay::Shell(s)) = &self.overlay else {
+            return Vec::new();
+        };
+        if s.sug.is_empty() {
+            return Vec::new();
+        }
+        let idx = if s.sug_idx.is_some() && s.ti.value() == s.sug_line {
+            s.sug_idx.unwrap() as i64
+        } else {
+            -1
+        };
+        let lines = Self::suggestion_overlay_lines(
+            &s.sug,
+            idx,
+            &s.sug_prefix,
+            SHELL_SUG_WINDOW,
+            1, // after the `!` prompt
+            self.width.saturating_sub(1),
+        );
+        Self::indent_overlay(lines, 1)
+    }
+
+    /// writeSuggestionLines is the W write-path candidate window (above the
+    /// input line: the help bar occupies the space below it).
+    fn write_suggestion_lines(&self, title_width: usize) -> Vec<String> {
+        let Some(Overlay::Write(w)) = &self.overlay else {
+            return Vec::new();
+        };
+        if w.sugs.is_empty() {
+            return Vec::new();
+        }
+        let left = display_width(&self.title_col("Write to", title_width));
+        let lines = Self::suggestion_overlay_lines(
+            &w.sugs,
+            w.sug_idx,
+            &w.sug_prefix,
+            SHELL_SUG_WINDOW,
+            left,
+            self.width.saturating_sub(1),
+        );
+        Self::indent_overlay(lines, left)
     }
 
     /// finish_with_hint pads the view with blank rows so the help row lands
@@ -6271,8 +6897,19 @@ impl App {
         let status = self.status_lines();
         let title_width = self.menu_title_col_width(&rows);
         let write_lines = self.write_input_lines(title_width);
+        let write_sugs = self.write_suggestion_lines(title_width);
+        let shell_line = self.shell_input_line();
+        let shell_sugs = self.shell_suggestion_lines();
         let mut h = self.height.saturating_sub(
-            header + 1 + desc_lines.len() + summary_lines.len() + status.len() + write_lines.len(),
+            header
+                + 1
+                + desc_lines.len()
+                + summary_lines.len()
+                + status.len()
+                + write_sugs.len()
+                + write_lines.len()
+                + shell_sugs.len()
+                + usize::from(shell_line.is_some()),
         );
         if !self.notice.is_empty() {
             h = h.saturating_sub(1);
@@ -6293,7 +6930,10 @@ impl App {
             + summary_lines.len()
             + status.len()
             + usize::from(!self.notice.is_empty())
-            + write_lines.len();
+            + write_sugs.len()
+            + write_lines.len()
+            + shell_sugs.len()
+            + usize::from(shell_line.is_some());
         let mut lines = b.matches('\n').count();
         while lines < self.height.saturating_sub(1).saturating_sub(bottom) {
             b.push('\n');
@@ -6324,7 +6964,19 @@ impl App {
             ));
             b.push('\n');
         }
+        for line in &write_sugs {
+            b.push_str(&clip_display(line, self.width.saturating_sub(1)));
+            b.push('\n');
+        }
         for line in &write_lines {
+            b.push_str(&clip_display(line, self.width.saturating_sub(1)));
+            b.push('\n');
+        }
+        for line in &shell_sugs {
+            b.push_str(&clip_display(line, self.width.saturating_sub(1)));
+            b.push('\n');
+        }
+        if let Some(line) = &shell_line {
             b.push_str(&clip_display(line, self.width.saturating_sub(1)));
             b.push('\n');
         }
@@ -6486,14 +7138,91 @@ impl App {
         if offset > max_off {
             offset = max_off;
         }
-        for i in offset..rows.len().min(offset + height) {
-            let line = self.row_line(&rows[i], i == cursor, title_width);
+        let end = rows.len().min(offset + height);
+        let mut i = offset;
+        while i < end {
+            let row = &rows[i];
+            let line = self.row_line(row, i == cursor, title_width);
             self.write_cut(b, &line);
-            // the & / * name input sits on the line under the cursor
+            let is_cursor = i == cursor;
+            let extra_lines = line.matches('\n').count();
+            i += 1;
+            if !is_cursor {
+                continue;
+            }
+            let slots_below =
+                height.saturating_sub(cursor.saturating_sub(offset) + 1 + extra_lines);
+            // The & / * input and its candidates overlay the rows below the
+            // cursor instead of inserting new lines.
             if let Some(Overlay::Anc(s)) = &self.overlay {
-                if i == cursor {
-                    let lines = self.anchor_input_lines(s);
-                    self.write_cut(b, &lines);
+                let lines = self.anchor_input_lines(s);
+                let input_lines = lines.matches('\n').count() + 1;
+                self.write_cut(b, &lines);
+                i += input_lines.min(end.saturating_sub(i));
+                let max = slots_below
+                    .saturating_sub(input_lines)
+                    .min(SHELL_SUG_WINDOW);
+                let prompt = if s.mode == AnchorMode::RefSet {
+                    "  reference: "
+                } else {
+                    "  anchor: "
+                };
+                let left = display_width(prompt);
+                let sugs = if s.mode == AnchorMode::RefSet && !s.sugs.is_empty() {
+                    Self::suggestion_overlay_lines(
+                        &s.sugs,
+                        s.sug,
+                        &s.sug_prefix,
+                        max,
+                        left,
+                        self.width.saturating_sub(1),
+                    )
+                } else {
+                    Vec::new()
+                };
+                let base = i;
+                for (k, rect) in sugs.iter().enumerate() {
+                    let prefix = if base + k < end {
+                        Self::overlay_prefix(
+                            &self.row_line(&rows[base + k], false, title_width),
+                            left,
+                        )
+                    } else {
+                        " ".repeat(left)
+                    };
+                    self.write_cut(b, &format!("{prefix}{rect}"));
+                }
+                i += sugs.len().min(end.saturating_sub(i));
+            }
+            // Inline scalar edit: the candidate overlay covers the rows
+            // below the edited row (and any free row slots), so the menu
+            // never shifts.
+            if let Some(Overlay::Edit(e)) = &self.overlay {
+                if self.inline_edit_row(row, e) && !e.sugs.is_empty() {
+                    let max = slots_below.min(SHELL_SUG_WINDOW);
+                    let left =
+                        2 + display_width(&self.title_col(&self.row_title_text(row), title_width));
+                    let sugs = Self::suggestion_overlay_lines(
+                        &e.sugs,
+                        e.sug_idx,
+                        &e.sug_prefix,
+                        max,
+                        left,
+                        self.width.saturating_sub(1),
+                    );
+                    let base = i;
+                    for (k, rect) in sugs.iter().enumerate() {
+                        let prefix = if base + k < end {
+                            Self::overlay_prefix(
+                                &self.row_line(&rows[base + k], false, title_width),
+                                left,
+                            )
+                        } else {
+                            " ".repeat(left)
+                        };
+                        self.write_cut(b, &format!("{prefix}{rect}"));
+                    }
+                    i += sugs.len().min(end.saturating_sub(i));
                 }
             }
         }
@@ -6535,11 +7264,6 @@ impl App {
         )];
         if !w.err.is_empty() {
             lines.push(style::fg1(&format!("  {}", w.err)));
-        } else {
-            let hint = self.suggestion_hint(&w.sugs, w.sug_idx);
-            if !hint.is_empty() {
-                lines.push(hint);
-            }
         }
         lines
     }
@@ -6737,49 +7461,9 @@ impl App {
         out
     }
 
-    /// suggestionHint renders the completion hint line (Go suggestionHint).
-    fn suggestion_hint(&self, sugs: &[String], idx: i64) -> String {
-        if sugs.is_empty() {
-            return String::new();
-        }
-        const WINDOW: usize = 3;
-        let mut start = 0usize;
-        if idx >= 0 {
-            let idx = idx as usize;
-            start = idx.saturating_sub(WINDOW - 1);
-            let max = sugs.len().saturating_sub(WINDOW);
-            if start > max {
-                start = max;
-            }
-        }
-        let mut parts: Vec<String> = Vec::new();
-        if start > 0 {
-            parts.push("…".to_string());
-        }
-        for i in start..sugs.len().min(start + WINDOW) {
-            if i as i64 == idx {
-                parts.push(style::accent(&sugs[i]));
-            } else {
-                parts.push(sugs[i].clone());
-            }
-        }
-        if start + WINDOW < sugs.len() {
-            parts.push("…".to_string());
-        }
-        format!(
-            "{}{}",
-            style::help("  tab: "),
-            parts.join(&style::help(" · "))
-        )
-    }
-
-    /// editLines renders the in-place input line plus hint and error.
+    /// editLines renders the in-place input line plus error.
     fn edit_lines(&self, e: &EditState, left: &str) -> String {
         let mut line = format!("{}{}{}", cursor_prefix(true), left, ti_view(&e.ti));
-        let hint = self.suggestion_hint(&e.sugs, e.sug_idx);
-        if !hint.is_empty() {
-            line += &format!("\n{hint}");
-        }
         if !e.err.is_empty() {
             line += &format!("\n{}", style::fg1(&format!("  {}", e.err)));
         }
@@ -6794,33 +7478,10 @@ impl App {
             "  anchor: "
         };
         let mut lines = vec![format!("{}{}", style::help(prompt), ti_view(&s.ti))];
-        if s.mode == AnchorMode::RefSet && !Self::anchor_filtered(s).is_empty() {
-            lines.push(format!(
-                "{}{}",
-                style::help("  tab: "),
-                self.anchor_sug_view(s)
-            ));
-        }
         if !s.err.is_empty() {
             lines.push(style::fg1(&format!("  {}", s.err)));
         }
         lines.join("\n")
-    }
-
-    fn anchor_sug_view(&self, s: &AnchorState) -> String {
-        let cands = Self::anchor_filtered(s);
-        let parts: Vec<String> = cands
-            .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                if i as i64 == s.sug {
-                    style::accent(c)
-                } else {
-                    c.clone()
-                }
-            })
-            .collect();
-        parts.join(" · ")
     }
 
     /// mergeInputLines renders the merge-keys input under the title.

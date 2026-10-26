@@ -94,10 +94,18 @@ pub mod style {
     pub fn diff(s: &str) -> String {
         render("1;38;5;204", s)
     }
+    /// Completion candidate rows share a dark background; the selected one
+    /// keeps the accent foreground.
+    pub fn sug_sel(s: &str) -> String {
+        render("38;5;39;48;5;236", s)
+    }
+    pub fn sug_dim(s: &str) -> String {
+        render("2;48;5;236", s)
+    }
 }
 
 pub const MENU_HELP: &str =
-    "↑/↓ move · enter edit/open · esc back · ctrl+s/w save · / search · ? help";
+    "↑/↓ move · enter edit/open · esc back · ctrl+s/w save · / search · ! shell · ? help";
 pub const OVERLAY_HELP: &str = "enter select · / search · esc cancel";
 /// Collapsed description cap per source: the schema help and the document
 /// comment each show at most this many wrapped lines; a cut block gets an
@@ -295,7 +303,7 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
         desc: "edit the document comment of the focused key (empty text removes it)",
     },
     HelpEntry {
-        keys: "?",
+        keys: "? ",
         desc: "open/close this help",
     },
     HelpEntry {
@@ -317,6 +325,10 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
     HelpEntry {
         keys: "ctrl+e",
         desc: "expand: materialize the referenced value (cursor row or menu) into a copy",
+    },
+    HelpEntry {
+        keys: "!",
+        desc: "shell: r <cmd> inserts stdout into the focused value, a <cmd> appends stdout lines to a string array, w <cmd> pipes the document to stdin (vi :w !cmd), bare <cmd> only runs; candidates appear automatically above the prompt and filter as you type; tab/↑/↓ select (↑/↓ are history until a candidate is selected); ! then enter repeats the last input (the prompt shows the first !)",
     },
 ];
 
@@ -430,6 +442,8 @@ pub struct EditState {
     pub is_new: bool,
     /// existing same-key values in the document (fixed at open)
     pub cands: Vec<String>,
+    /// input prefix the current suggestion list was built from
+    pub sug_prefix: String,
     /// cands filtered by the current input prefix
     pub sugs: Vec<String>,
     /// tab cycle position (-1 = none)
@@ -465,8 +479,28 @@ pub struct AddState {
 pub struct WriteState {
     pub ti: TextInput,
     pub err: String,
+    /// input prefix the current suggestion list was built from
+    pub sug_prefix: String,
     pub sugs: Vec<String>,
     pub sug_idx: i64,
+}
+
+/// shellState is the `!` command input: one line at the bottom, with up/down
+/// walking this session's executed commands.
+pub struct ShellState {
+    pub ti: TextInput,
+    /// index into App::shell_history while browsing; None at the prompt
+    pub hist_idx: Option<usize>,
+    /// input saved before the first history recall
+    pub draft: String,
+    /// input line the current completion list was built from
+    pub sug_prefix: String,
+    /// whole-line tab-completion candidates for the current token
+    pub sug: Vec<String>,
+    /// cycle position in `sug`; None when no completion has been applied
+    pub sug_idx: Option<usize>,
+    /// input value produced by the current completion cycle
+    pub sug_line: String,
 }
 
 /// selState is the full-screen enum option picker.
@@ -591,6 +625,12 @@ pub struct AnchorState {
     pub ti: TextInput,
     /// reference mode: anchor names in document order
     pub cands: Vec<String>,
+    /// input prefix the current suggestion list was built from
+    pub sug_prefix: String,
+    /// candidate list captured when a tab cycle starts
+    pub sugs: Vec<String>,
+    /// input value produced by the current completion selection
+    pub sug_line: String,
     /// completion cursor, -1 when nothing selected
     pub sug: i64,
     pub err: String,
@@ -669,6 +709,7 @@ pub enum Overlay {
     Edit(EditState),
     Add(AddState),
     Write(WriteState),
+    Shell(ShellState),
     Anc(AnchorState),
     Mrg(MergeState),
     Comment(CommentState),
@@ -719,6 +760,8 @@ pub struct App {
     pub exec_editor: bool,
     /// pending $EDITOR target stashed for the event loop (or tests)
     pub pending_edit: Option<ExternalEdit>,
+    /// commands executed through the `!` overlay, oldest first
+    pub shell_history: Vec<String>,
 }
 
 impl App {
@@ -747,6 +790,7 @@ impl App {
             exiting: false,
             exec_editor: false,
             pending_edit: None,
+            shell_history: Vec::new(),
         }
     }
 
@@ -804,6 +848,7 @@ impl App {
             Some(Overlay::Search(_)) => i.search_active = true,
             Some(Overlay::Add(_)) => i.add = true,
             Some(Overlay::Write(_)) => i.write = true,
+            Some(Overlay::Shell(_)) => i.shell = true,
             Some(Overlay::Anc(_)) => i.anc = true,
             Some(Overlay::Mrg(_)) => i.mrg = true,
             Some(Overlay::Confirm(_)) => i.confirm = true,
@@ -1354,6 +1399,7 @@ impl App {
             Overlay::Edit(s) => self.key_edit(msg, s),
             Overlay::Add(s) => self.key_add(msg, s),
             Overlay::Write(s) => self.key_write(msg, s),
+            Overlay::Shell(s) => self.key_shell(msg, s),
             Overlay::Anc(s) => self.key_anchor(msg, s),
             Overlay::Mrg(s) => self.key_merge(msg, s),
             Overlay::Comment(s) => self.key_comment(msg, s),
@@ -1398,6 +1444,7 @@ impl App {
         self.overlay = Some(Overlay::Write(WriteState {
             ti,
             err: String::new(),
+            sug_prefix: String::new(),
             sugs: Vec::new(),
             sug_idx: -1,
         }));

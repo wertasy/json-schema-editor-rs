@@ -348,6 +348,7 @@ fn key(k: &str) -> Msg {
         "ctrl+p" => Msg::Ctrl('p'),
         "ctrl+a" => Msg::Ctrl('a'),
         "ctrl+w" => Msg::Ctrl('w'),
+        "ctrl+y" => Msg::Ctrl('y'),
         "ctrl+e" => Msg::Ctrl('e'),
         "alt+i" => Msg::Char('i', true),
         "alt+x" => Msg::Char('x', true),
@@ -366,8 +367,8 @@ fn press(app: &mut App, keys: &[&str]) {
             "enter" | "esc" | "up" | "down" | "left" | "right" | "space" | "tab" | "shift+tab"
             | "backspace" | "delete" | "home" | "end" | "ctrl+c" | "ctrl+j" | "ctrl+k"
             | "ctrl+s" | "ctrl+r" | "ctrl+o" | "ctrl+i" | "ctrl+u" | "ctrl+n" | "ctrl+p"
-            | "ctrl+a" | "ctrl+w" | "ctrl+e" | "alt+i" | "alt+x" | "alt+f" | "alt+b" | "pgup"
-            | "pgdown" | "ctrl+f" | "ctrl+b" => {
+            | "ctrl+a" | "ctrl+w" | "ctrl+y" | "ctrl+e" | "alt+i" | "alt+x" | "alt+f" | "alt+b"
+            | "pgup" | "pgdown" | "ctrl+f" | "ctrl+b" => {
                 app.update(key(k));
             }
             _ => {
@@ -10456,5 +10457,622 @@ fn multi_pattern_keys_are_not_unknown() {
     assert!(
         issues.iter().any(|i| i.msg.contains("c1")),
         "nonmatching key must still warn: {issues:?}"
+    );
+}
+
+// --- shell command insertion (`!`) -----------------------------------------
+
+fn shell_schema() -> Schema {
+    schema_build(|b| {
+        let name = b.id(scalar("name", "Name", "string"));
+        let count = b.id(scalar("count", "Count", "integer"));
+        let item = b.id(scalar("tags", "", "string"));
+        let tags = b.id(FormNode {
+            key: "tags".into(),
+            title: "Tags".into(),
+            kind: Kind::Array,
+            items: Some(item),
+            ..FormNode::default()
+        });
+        b.id(FormNode {
+            key: "$".into(),
+            kind: Kind::Object,
+            children: vec![name, tags, count],
+            ..FormNode::default()
+        })
+    })
+}
+
+fn shell_doc() -> Doc {
+    dbuild(|db| {
+        db.obj(vec![
+            ("name", db.s("old")),
+            ("tags", db.arr(vec![db.s("a")])),
+            ("count", db.n("1")),
+        ])
+    })
+}
+
+fn shell_value(app: &App) -> String {
+    match &app.overlay {
+        Some(Overlay::Shell(s)) => s.ti.value().to_string(),
+        _ => panic!("shell prompt is not open"),
+    }
+}
+
+#[test]
+fn shell_inserts_stdout_into_string_and_string_array_values() {
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    press(&mut app, &["!"]);
+    assert!(matches!(app.overlay, Some(Overlay::Shell(_))));
+    let view = app.view();
+    let lines: Vec<&str> = view.lines().collect();
+    assert!(
+        lines[lines.len() - 2].starts_with('!'),
+        "prompt row must sit directly above the help row: {:?}",
+        &lines[lines.len() - 2..]
+    );
+    assert!(lines[lines.len() - 1].contains("shell: r <cmd> insert"));
+
+    press(&mut app, &["r echo shell"]);
+    press(&mut app, &["enter"]);
+    assert!(app.overlay.is_none());
+    assert_eq!(str_at(&app.doc(), &["name"]), "shell");
+
+    // string array row: append the output as a new item
+    press(&mut app, &["j"]);
+    press(&mut app, &["!"]);
+    press(&mut app, &["r echo next"]);
+    press(&mut app, &["enter"]);
+    let tags = app.doc().get(&sp(&["tags"])).unwrap();
+    let got: Vec<String> = match app.doc().value(tags) {
+        Value::Array(items) => items
+            .iter()
+            .map(|i| match app.doc().value(*i) {
+                Value::Str(s) => s.clone(),
+                _ => "<not a string>".into(),
+            })
+            .collect(),
+        _ => panic!("tags is not an array"),
+    };
+    assert_eq!(got, vec!["a".to_string(), "next".to_string()]);
+}
+
+#[test]
+fn shell_history_recalls_and_bang_bang_reruns_the_last_command() {
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    press(&mut app, &["!"]);
+    press(&mut app, &["r echo one"]);
+    press(&mut app, &["enter"]);
+    assert_eq!(str_at(&app.doc(), &["name"]), "one");
+
+    press(&mut app, &["!"]);
+    press(&mut app, &["up"]);
+    assert_eq!(shell_value(&app), "r echo one");
+    press(&mut app, &["down"]);
+    assert_eq!(shell_value(&app), "");
+    press(&mut app, &["esc"]);
+
+    press(&mut app, &["!"]);
+    press(&mut app, &["r echo two"]);
+    press(&mut app, &["enter"]);
+    assert_eq!(str_at(&app.doc(), &["name"]), "two");
+    assert_eq!(app.shell_history, vec!["r echo one", "r echo two"]);
+
+    // The prompt already shows one `!`: typing one more displays `!!` and
+    // enter repeats the last input (the reported `exit 1` case).
+    let name = app.fs_mut().doc.new_str("changed");
+    app.fs_mut()
+        .doc
+        .set(&sp(&["name"]), name)
+        .expect("rewrite name");
+    press(&mut app, &["!"]);
+    press(&mut app, &["!"]);
+    assert!(matches!(app.overlay, Some(Overlay::Shell(_))));
+    press(&mut app, &["enter"]);
+    assert!(app.overlay.is_none());
+    assert_eq!(str_at(&app.doc(), &["name"]), "two");
+
+    // Typing two bangs after the prompt also repeats on enter.
+    let name = app.fs_mut().doc.new_str("changed again");
+    app.fs_mut()
+        .doc
+        .set(&sp(&["name"]), name)
+        .expect("rewrite name");
+    press(&mut app, &["!"]);
+    press(&mut app, &["!!"]);
+    assert!(matches!(app.overlay, Some(Overlay::Shell(_))));
+    press(&mut app, &["enter"]);
+    assert_eq!(str_at(&app.doc(), &["name"]), "two");
+    assert_eq!(
+        app.shell_history,
+        vec!["r echo one", "r echo two"],
+        "!! must not add another history entry"
+    );
+}
+
+#[test]
+fn shell_bang_without_history_never_runs_a_literal_bang_command() {
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    press(&mut app, &["!"]);
+    press(&mut app, &["!"]);
+    assert!(matches!(app.overlay, Some(Overlay::Shell(_))));
+    press(&mut app, &["enter"]);
+    assert!(app.overlay.is_none());
+    assert_eq!(app.notice, "! no previous command");
+    assert!(!app.notice.contains("exit"), "notice: {}", app.notice);
+    assert_eq!(str_at(&app.doc(), &["name"]), "old");
+}
+
+#[test]
+fn shell_failure_and_non_string_targets_only_report_notices() {
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    press(&mut app, &["!"]);
+    press(&mut app, &["exit 4"]);
+    press(&mut app, &["enter"]);
+    assert!(app.overlay.is_none());
+    assert!(app.notice.contains("exit 4"), "notice: {}", app.notice);
+    assert_eq!(str_at(&app.doc(), &["name"]), "old");
+
+    press(&mut app, &["j", "j"]);
+    press(&mut app, &["!"]);
+    press(&mut app, &["r echo nope"]);
+    press(&mut app, &["enter"]);
+    assert!(
+        app.notice.contains("not on a string"),
+        "notice: {}",
+        app.notice
+    );
+    assert_eq!(num_at(&app.doc(), &["count"]), "1");
+}
+
+#[test]
+fn shell_prefers_a_string_variant_over_a_string_array_variant() {
+    let schema = schema_build(|b| {
+        let string = b.id(scalar("value", "", "string"));
+        let array = b.id(FormNode {
+            key: "values".into(),
+            kind: Kind::Array,
+            items: Some(string),
+            ..FormNode::default()
+        });
+        let one = b.id(FormNode {
+            key: "field".into(),
+            title: "Field".into(),
+            kind: Kind::OneOf,
+            variants: vec![array, string],
+            ..FormNode::default()
+        });
+        b.id(FormNode {
+            key: "$".into(),
+            kind: Kind::Object,
+            children: vec![one],
+            ..FormNode::default()
+        })
+    });
+    let doc = dbuild(|db| db.obj(vec![("field", db.arr(vec![db.s("old")]))]));
+    let mut app = app_with(schema, doc, test_opts());
+    press(&mut app, &["!"]);
+    press(&mut app, &["r echo hi"]);
+    press(&mut app, &["enter"]);
+    assert_eq!(str_at(&app.doc(), &["field"]), "hi");
+}
+
+#[test]
+fn shell_bare_command_runs_without_touching_the_document() {
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    press(&mut app, &["!"]);
+    press(&mut app, &["echo run-only"]);
+    press(&mut app, &["enter"]);
+    assert!(app.overlay.is_none());
+    assert!(
+        app.notice.contains("run-only"),
+        "bare output must land in the bottom notice: {}",
+        app.notice
+    );
+    assert_eq!(str_at(&app.doc(), &["name"]), "old");
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_w_pipes_the_document_to_the_command_stdin() {
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    press(&mut app, &["!"]);
+    press(&mut app, &["w cat"]);
+    press(&mut app, &["enter"]);
+    assert!(app.overlay.is_none());
+    assert!(
+        app.notice.contains("\"name\"") && app.notice.contains("old"),
+        "cat must echo the document from stdin: {}",
+        app.notice
+    );
+    assert_eq!(str_at(&app.doc(), &["name"]), "old");
+    assert_eq!(app.shell_history, vec!["w cat"]);
+    assert!(!app.dirty(), "w must not modify the document");
+}
+
+#[test]
+fn shell_a_mode_appends_each_output_line_to_a_string_array() {
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    press(&mut app, &["j"]); // tags row
+    press(&mut app, &["!"]);
+    press(&mut app, &["a echo x && echo y"]);
+    press(&mut app, &["enter"]);
+    let tags = app.doc().get(&sp(&["tags"])).unwrap();
+    let got: Vec<String> = match app.doc().value(tags) {
+        Value::Array(items) => items
+            .iter()
+            .map(|i| match app.doc().value(*i) {
+                Value::Str(s) => s.clone(),
+                _ => "<not a string>".into(),
+            })
+            .collect(),
+        _ => panic!("tags is not an array"),
+    };
+    assert_eq!(got, vec!["a", "x", "y"]);
+}
+
+#[test]
+fn shell_a_mode_rejects_a_string_target() {
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    press(&mut app, &["!"]);
+    press(&mut app, &["a echo x"]);
+    press(&mut app, &["enter"]);
+    assert!(
+        app.notice.contains("not on a string array"),
+        "notice: {}",
+        app.notice
+    );
+    assert_eq!(str_at(&app.doc(), &["name"]), "old");
+}
+
+#[test]
+fn shell_tab_completes_the_current_path_token() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("alpha.txt"), "").unwrap();
+    std::fs::write(dir.path().join("alpine"), "").unwrap();
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    press(&mut app, &["!"]);
+    let line = format!("r cat {}/al", dir.path().display());
+    let base = dir.path().display().to_string();
+    press(&mut app, &[line.as_str()]);
+
+    press(&mut app, &["tab"]);
+    assert_eq!(shell_value(&app), format!("r cat {base}/alpha.txt"));
+    let view = app.view();
+    assert!(
+        view.contains("\x1b[38;5;39;48;5;236m> …pha.txt"),
+        "selected candidate must use the accent color: {view}"
+    );
+    assert!(
+        view.contains("  …pine"),
+        "the other candidate must be rendered too: {view}"
+    );
+    let line = view
+        .lines()
+        .find(|l| l.contains("\x1b[38;5;39;48;5;236m> …pha.txt"))
+        .expect("selected shell candidate line");
+    let start = line
+        .find("\x1b[38;5;39;48;5;236m")
+        .expect("candidate background");
+    assert_eq!(
+        display_width(&line[..start]),
+        1,
+        "shell candidates align after the ! prompt"
+    );
+    // While completion is active, the arrow keys move the candidate cursor
+    // instead of recalling command history.
+    press(&mut app, &["down"]);
+    assert_eq!(shell_value(&app), format!("r cat {base}/alpine"));
+    let view = app.view();
+    assert!(
+        view.contains("\x1b[38;5;39;48;5;236m> …pine"),
+        "selection marker must follow the arrow key: {view}"
+    );
+    press(&mut app, &["up"]);
+    assert_eq!(shell_value(&app), format!("r cat {base}/alpha.txt"));
+    // Wrap-around matches tab completion.
+    press(&mut app, &["up"]);
+    assert_eq!(shell_value(&app), format!("r cat {base}/alpine"));
+    press(&mut app, &["down"]);
+    assert_eq!(shell_value(&app), format!("r cat {base}/alpha.txt"));
+    // Tab after arrow movement keeps using the same candidate list.
+    press(&mut app, &["tab"]);
+    assert_eq!(shell_value(&app), format!("r cat {base}/alpine"));
+    press(&mut app, &["tab"]);
+    assert_eq!(shell_value(&app), format!("r cat {base}/alpha.txt"));
+}
+
+#[test]
+fn shell_ctrl_u_then_ctrl_y_restores_the_command() {
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    press(&mut app, &["!"]);
+    press(&mut app, &["echo hi"]);
+    press(&mut app, &["ctrl+u"]);
+    assert_eq!(shell_value(&app), "");
+    press(&mut app, &["ctrl+y"]);
+    assert_eq!(shell_value(&app), "echo hi");
+    press(&mut app, &["enter"]);
+    assert!(app.notice.contains("hi"), "notice: {}", app.notice);
+}
+
+#[test]
+fn edit_input_arrows_move_completion_selection() {
+    let schema = schema_build(|b| {
+        let mut name = scalar("name", "Name", "string");
+        name.suggestions = vec!["alpha".into(), "alpine".into(), "alps".into()];
+        let name = b.id(name);
+        let other1 = b.id(scalar("other1", "Other 1", "string"));
+        let other2 = b.id(scalar("other2", "Other 2", "string"));
+        let other3 = b.id(scalar("other3", "Other 3", "string"));
+        b.id(FormNode {
+            key: "$".into(),
+            kind: Kind::Object,
+            children: vec![name, other1, other2, other3],
+            ..FormNode::default()
+        })
+    });
+    let doc = dbuild(|db| {
+        db.obj(vec![
+            ("name", db.s("")),
+            ("other1", db.s("x")),
+            ("other2", db.s("y")),
+            ("other3", db.s("z")),
+        ])
+    });
+    let mut app = app_with(schema, doc, test_opts());
+    press(&mut app, &["enter"]);
+
+    let edit = |app: &App| match &app.overlay {
+        Some(Overlay::Edit(e)) => (e.ti.value().to_string(), e.sug_idx, e.sugs.len()),
+        _ => panic!("edit overlay is not open"),
+    };
+    assert_eq!(edit(&app), (String::new(), -1, 3));
+
+    // Entering the input starts completion without a tab press.
+    let view = app.view();
+    assert!(
+        view.contains("\x1b[2;48;5;236m  alpha"),
+        "candidates must appear as soon as the input opens: {view}"
+    );
+    assert!(
+        !view.contains("\x1b[38;5;39;48;5;236m> alpha"),
+        "the popup must not preselect a candidate: {view}"
+    );
+
+    press(&mut app, &["tab"]);
+    assert_eq!(edit(&app), ("alpha".to_string(), 0, 3));
+    let view = app.view();
+    assert!(
+        view.contains("\x1b[38;5;39;48;5;236m> alpha"),
+        "selected candidate must use the accent color: {view}"
+    );
+    assert!(
+        view.contains("\x1b[2;48;5;236m  alpine"),
+        "other candidates must be rendered faintly: {view}"
+    );
+    let line = view
+        .lines()
+        .find(|l| l.contains("\x1b[38;5;39;48;5;236m> alpha"))
+        .expect("selected candidate line");
+    let start = line
+        .find("\x1b[38;5;39;48;5;236m")
+        .expect("candidate background");
+    assert!(
+        line[..start].contains("Other 1"),
+        "the overlay must leave the row content left of its rectangle visible: {view}"
+    );
+    let body = &line[start + "\x1b[38;5;39;48;5;236m".len()..];
+    let end = body.find("\x1b[0m").expect("candidate reset");
+    assert_eq!(
+        display_width(&body[..end]),
+        SUG_MIN_WIDTH,
+        "short candidate rows use the minimum overlay width"
+    );
+    let rows = app.menu_rows();
+    let tw = app.menu_title_col_width(&rows);
+    let input_left = 2 + display_width(&app.title_col("Name", tw));
+    assert_eq!(
+        display_width(&line[..start]),
+        input_left,
+        "candidate overlay must start where the edit input text starts"
+    );
+    press(&mut app, &["down"]);
+    assert_eq!(edit(&app), ("alpine".to_string(), 1, 3));
+    press(&mut app, &["up"]);
+    assert_eq!(edit(&app), ("alpha".to_string(), 0, 3));
+    // Tab keeps cycling the same list after arrow movement.
+    press(&mut app, &["tab"]);
+    assert_eq!(edit(&app), ("alpine".to_string(), 1, 3));
+}
+
+#[test]
+fn write_path_arrows_move_completion_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("alpha.txt"), "").unwrap();
+    std::fs::write(dir.path().join("alpine"), "").unwrap();
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    app.fs_mut().opts.path = format!("{}/al", dir.path().display());
+    press(&mut app, &["W"]);
+
+    let write = |app: &App| match &app.overlay {
+        Some(Overlay::Write(w)) => (w.ti.value().to_string(), w.sug_idx, w.sugs.len()),
+        _ => panic!("write overlay is not open"),
+    };
+    let view = app.view();
+    assert!(
+        view.contains("\x1b[2;48;5;236m  …pha.txt"),
+        "write suggestions must appear on open: {view}"
+    );
+    press(&mut app, &["tab"]);
+    assert_eq!(write(&app).2, 2);
+    let view = app.view();
+    assert!(
+        view.contains("\x1b[38;5;39;48;5;236m> …pha.txt"),
+        "write-path selection must use the accent color: {view}"
+    );
+    let line = view
+        .lines()
+        .find(|l| l.contains("\x1b[38;5;39;48;5;236m> "))
+        .expect("selected write candidate line");
+    let start = line
+        .find("\x1b[38;5;39;48;5;236m")
+        .expect("candidate background");
+    let rows = app.menu_rows();
+    let tw = app.menu_title_col_width(&rows);
+    let input_left = display_width(&app.title_col("Write to", tw));
+    assert_eq!(
+        display_width(&line[..start]),
+        input_left,
+        "write candidates align with the path input text"
+    );
+    press(&mut app, &["down"]);
+    assert_eq!(
+        write(&app).2,
+        2,
+        "arrows must not rebuild the candidate list"
+    );
+    press(&mut app, &["up"]);
+    assert_eq!(write(&app).2, 2);
+}
+
+#[test]
+fn edit_candidate_overlay_uses_free_rows_below_the_last_row() {
+    let schema = schema_build(|b| {
+        let mut name = scalar("name", "Name", "string");
+        name.suggestions = vec!["alpha".into(), "alpine".into(), "alps".into()];
+        let name = b.id(name);
+        b.id(FormNode {
+            key: "$".into(),
+            kind: Kind::Object,
+            children: vec![name],
+            ..FormNode::default()
+        })
+    });
+    let doc = dbuild(|db| db.obj(vec![("name", db.s(""))]));
+    let mut app = app_with(schema, doc, test_opts());
+    press(&mut app, &["enter"]);
+    press(&mut app, &["tab"]);
+    let view = app.view();
+    assert!(
+        view.contains("\x1b[38;5;39;48;5;236m> alpha"),
+        "candidate overlay must use free rows below the last menu row: {view}"
+    );
+    assert!(
+        view.contains("\x1b[2;48;5;236m  alpine") && view.contains("\x1b[2;48;5;236m  alps"),
+        "all candidates must be visible: {view}"
+    );
+    assert!(
+        !view.contains("tab/↑↓:"),
+        "candidates are an overlay, not an inserted hint line: {view}"
+    );
+}
+
+#[test]
+fn anchor_candidate_overlay_uses_accent_and_arrow_selection() {
+    let mut m =
+        completion_model("sname: &alpha one\nsnum: &beta 2\nextra1: x\nextra2: y\nextra3: z\n");
+    set_cursor(&mut m, |r| {
+        r.kind == RowKind::Unknown && r.label == "extra1"
+    });
+    press(&mut m, &["*"]);
+    let view = m.view();
+    assert!(
+        view.contains("\x1b[2;48;5;236m  alpha"),
+        "anchor suggestions must appear on open: {view}"
+    );
+    assert!(
+        !view.contains("\x1b[38;5;39;48;5;236m> alpha"),
+        "the anchor popup must not preselect a candidate: {view}"
+    );
+    press(&mut m, &["tab"]);
+    let view = m.view();
+    assert!(
+        view.contains("\x1b[38;5;39;48;5;236m> alpha"),
+        "anchor candidate overlay must use the accent color: {view}"
+    );
+    assert!(
+        view.contains("\x1b[2;48;5;236m  beta"),
+        "the other anchor candidate must be faint: {view}"
+    );
+    let line = view
+        .lines()
+        .find(|l| l.contains("\x1b[38;5;39;48;5;236m> alpha"))
+        .expect("selected anchor candidate line");
+    let start = line
+        .find("\x1b[38;5;39;48;5;236m")
+        .expect("candidate background");
+    assert_eq!(
+        display_width(&line[..start]),
+        display_width("  reference: "),
+        "anchor candidates align with the reference input text"
+    );
+    press(&mut m, &["down"]);
+    match &m.overlay {
+        Some(Overlay::Anc(s)) => assert_eq!(s.ti.value(), "beta"),
+        _ => panic!("anchor overlay closed"),
+    }
+    let view = m.view();
+    assert!(
+        view.contains("\x1b[38;5;39;48;5;236m> beta"),
+        "arrow selection must move the accent marker: {view}"
+    );
+}
+
+#[test]
+fn candidate_overlay_width_tracks_content_with_a_cap_and_ellipsis() {
+    let short = vec!["alpha".to_string(), "beta".to_string()];
+    let lines = App::suggestion_overlay_lines(&short, 0, "", 2, 0, 80);
+    assert_eq!(display_width(&lines[0]), SUG_MIN_WIDTH);
+    assert_eq!(
+        display_width(&lines[1]),
+        SUG_MIN_WIDTH,
+        "short rows share the minimum width"
+    );
+
+    let long = vec![format!("{}TAIL", "x".repeat(100))];
+    let lines = App::suggestion_overlay_lines(&long, 0, "", 1, 0, 80);
+    assert_eq!(display_width(&lines[0]), 80, "fills the available width");
+    assert!(
+        lines[0].contains('…'),
+        "the cut start is marked with an ellipsis"
+    );
+    assert!(
+        lines[0].contains("TAIL"),
+        "the differing tail must never be dropped"
+    );
+    assert!(
+        !lines[0].contains(&"x".repeat(80)),
+        "the full long candidate must be truncated"
+    );
+
+    let lines = App::suggestion_overlay_lines(&long, 0, "", 1, 0, 20);
+    assert_eq!(display_width(&lines[0]), 20, "terminal width still caps it");
+    assert!(lines[0].contains("TAIL"), "tail kept at narrow widths too");
+}
+
+#[test]
+fn candidate_overlay_hides_a_long_shared_prefix() {
+    let sugs = vec![
+        "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/ad".to_string(),
+        "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/ai".to_string(),
+    ];
+    let lines = App::suggestion_overlay_lines(
+        &sugs,
+        -1,
+        "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/",
+        2,
+        0,
+        120,
+    );
+    assert!(
+        !lines[0].contains("https://raw.githubusercontent.com"),
+        "the shared URL prefix must be hidden: {:?}",
+        lines[0]
+    );
+    assert!(
+        lines[0].contains("…ad") && lines[1].contains("…ai"),
+        "the differing tails must stay visible: {:?}",
+        lines
     );
 }
