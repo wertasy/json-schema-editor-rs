@@ -224,7 +224,7 @@ fn pty_s_key_switches_schema() {
         }
     };
 
-    let (_, mut off) = pty.wait_frame("root menu", 0, &["Name", "Save and exit"]);
+    let (_, mut off) = pty.wait_frame("root menu", 0, &["Name", "↑/↓ move"]);
     pty.send(b"S"); // open the SchemaStore search mid-session
     (_, off) = pty.wait_frame("S opens the picker", off, &["Select a schema"]);
     pty.send(b"decoy"); // replace the filename-stem preset
@@ -233,7 +233,7 @@ fn pty_s_key_switches_schema() {
     (_, off) = pty.wait_frame(
         "schema switched",
         off,
-        &["schema from SchemaStore: Decoy", "Save and exit"],
+        &["schema from SchemaStore: Decoy", "↑/↓ move"],
     );
     pty.send(b"\x13"); // ctrl+s
     pty.wait_frame("saved", off, &["Write to "]);
@@ -300,7 +300,7 @@ fn pty_schema_picker() {
     let (_, off5) = pty.wait_frame("ctrl+j moves down", off, &["> Decoy"]);
     off = off5;
     pty.send(b"\r");
-    pty.wait_frame("form after pick", off, &["Save and exit"]);
+    pty.wait_frame("form after pick", off, &["↑/↓ move"]);
     pty.send(b"\x03"); // ctrl+c abort
 
     pty.wait_exit(130);

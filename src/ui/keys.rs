@@ -1226,7 +1226,8 @@ impl App {
             "F" => self.fast_move = Some(FastMoveState { backward: true }),
             "z" => self.toggle_empty_keys(),
             "e" => self.edit_value_external_row(&r),
-            "E" => {
+            "E" => self.edit_raw_current(&r),
+            "ctrl+e" => {
                 if !r.merged.is_empty() {
                     self.expand_merged(&r);
                 } else if let Some(path) = self.expand_target(&r) {
@@ -1286,6 +1287,7 @@ impl App {
             "tab" | "ctrl+i" => self.nav_go(false),
             " " => self.space_key(r),
             "d" | "delete" => self.delete_row(&r),
+            "D" => self.remove_item_shortcut(&r),
             "-" => self.adjust_number(&r, -1),
             "=" | "+" => self.adjust_number(&r, 1),
             "J" => self.move_item(&r, 1),
@@ -1424,20 +1426,6 @@ impl App {
                 self.push_child_menu(f, r.path.clone());
             }
             RowKind::Add => self.add_item(),
-            RowKind::Remove => {
-                let path = r.path.clone();
-                self.overlay = Some(Overlay::Confirm(ConfirmState {
-                    title: "Remove this item? (y/n)".to_string(),
-                    hint: String::new(),
-                    on_yes: Some(Box::new(move |m| {
-                        let _ = m.fs_mut().doc.remove(&path);
-                        m.fs_mut().stack.pop(); // back to the items menu
-                    })),
-                    on_no: None,
-                }));
-            }
-            RowKind::Save => self.save_and_exit(),
-            RowKind::Raw => self.edit_raw_external(),
             RowKind::Variant => self.enter_variant(&r),
             RowKind::Toggle => self.toggle_enum_member(&r),
             RowKind::Unknown => self.activate_unknown(r.path.clone()),
@@ -1663,7 +1651,7 @@ impl App {
     }
 
     /// countArmed reports whether a digit may start a count: the menu list
-    /// of an array (items below < Add item >).
+    /// of an array.
     fn count_armed(&self) -> bool {
         self.list_mode() && self.top().map(|st| st.kind) == Some(MenuKind::Items)
     }
@@ -2141,6 +2129,24 @@ impl App {
         }
     }
 
+    /// editRawCurrent opens the external $EDITOR with the raw JSON/YAML/TOML
+    /// of the current node: the row under the cursor when it is a value row,
+    /// otherwise (root scalar, action/status row) the whole document. E.
+    /// The built-in raw textarea remains for raw-degraded fields and the
+    /// any-type JSON variant.
+    fn edit_raw_current(&mut self, r: &Row) {
+        if !r.path.is_empty()
+            && matches!(
+                r.kind,
+                RowKind::Field | RowKind::Drill | RowKind::Unknown | RowKind::Variant
+            )
+        {
+            self.edit_value_external(r.path.clone(), -1);
+        } else {
+            self.edit_raw_external();
+        }
+    }
+
     /// openRawAt arms the built-in raw textarea overlay.
     fn open_raw_at(&mut self, fn_: Option<FormNodeId>, path: Option<Vec<PathSeg>>) {
         let mut ta = TextArea::new();
@@ -2322,10 +2328,10 @@ impl App {
                 ins_null(self, splice);
                 self.open_field(items, ipath.clone(), true);
                 if splice {
-                    // the placeholder row carries the inline editor: keep the
-                    // cursor there (rows[0] is the < Add item > row)
+                    // the inserted item is the first row when the array was
+                    // empty, otherwise row `idx` in the item-only list
                     if let Some(t) = self.top_mut() {
-                        t.cursor = idx + 1;
+                        t.cursor = idx;
                     }
                 }
             }
@@ -2406,6 +2412,38 @@ impl App {
         }
         self.fs_mut().doc.remove(&r.path);
         true
+    }
+
+    /// removeItemShortcut is D: remove the current array item, both from the
+    /// items list (cursor on an item row) and from the item's own form (the
+    /// menu path itself is an index). It confirms like the old removal row.
+    fn remove_item_shortcut(&mut self, r: &Row) {
+        let Some(st) = self.top().cloned() else {
+            return;
+        };
+        let (path, pop) = if matches!(st.path.last(), Some(PathSeg::Idx(_))) {
+            // inside an array item's form: remove that item and go back
+            (st.path.clone(), true)
+        } else if st.kind == MenuKind::Items
+            && matches!(r.kind, RowKind::Field | RowKind::Drill)
+            && r.idx >= 0
+        {
+            (r.path.clone(), false)
+        } else {
+            self.notice = "D removes an array item".to_string();
+            return;
+        };
+        self.overlay = Some(Overlay::Confirm(ConfirmState {
+            title: "Remove this item? (y/n)".to_string(),
+            hint: String::new(),
+            on_yes: Some(Box::new(move |m| {
+                let _ = m.fs_mut().doc.remove(&path);
+                if pop {
+                    m.fs_mut().stack.pop(); // back to the items menu
+                }
+            })),
+            on_no: None,
+        }));
     }
 
     /// deleteItem removes an array entry row.
@@ -4959,10 +4997,13 @@ impl App {
     /// keyText drives the raw textarea overlay (Go keyText).
     pub fn key_text(&mut self, msg: Msg, mut s: TextState) -> Option<Overlay> {
         match msg.key_str().as_str() {
-            "ctrl+s" => {
-                self.apply_text(&s);
-                return None;
-            }
+            "ctrl+s" => match self.apply_text(&s) {
+                Ok(()) => return None,
+                Err(e) => {
+                    s.err = e;
+                    return Some(Overlay::Text(s));
+                }
+            },
             "esc" => return None,
             _ => {}
         }
@@ -4972,30 +5013,26 @@ impl App {
         Some(Overlay::Text(s))
     }
 
-    /// applyText parses the textarea and applies it (Go applyText).
-    fn apply_text(&mut self, s: &TextState) {
+    /// applyText parses the textarea and applies it (Go applyText). An error
+    /// leaves the overlay open with the message.
+    fn apply_text(&mut self, s: &TextState) -> Result<(), String> {
         let text = s.ta.value();
         let trimmed = text.trim().to_string();
         if trimmed.is_empty() {
             match &s.path {
-                None => {
-                    // leave the overlay open with the error
-                    if let Some(Overlay::Text(t)) = &mut self.overlay {
-                        t.err = "cannot be empty".to_string();
-                    }
-                }
+                None => return Err("cannot be empty".to_string()),
                 Some(p) => {
                     self.fs_mut().doc.remove(p);
+                    return Ok(());
                 }
             }
-            return;
         }
         if s.verbatim_str {
             if let Some(p) = &s.path {
                 let n = self.fs_mut().doc.new_str(text);
                 let _ = self.fs_mut().doc.set(p, n);
             }
-            return;
+            return Ok(());
         }
         let label = self.opts().raw.raw_label();
         let decoded = match &s.path {
@@ -5006,19 +5043,22 @@ impl App {
             Some(_) => self.opts().raw.decode_raw_value(&trimmed),
         };
         match decoded {
-            Err(e) => {
-                if let Some(Overlay::Text(t)) = &mut self.overlay {
-                    t.err = format!("invalid {}: {}", label, e);
-                }
-            }
+            Err(e) => Err(format!("invalid {}: {}", label, e)),
             Ok(nd) => {
                 let root = nd.root;
                 match &s.path {
-                    None => self.fs_mut().doc = nd,
+                    None => {
+                        self.fs_mut().doc = nd;
+                        if self.fs().schema.schema_less {
+                            self.rebuild_schema_less_root();
+                        }
+                    }
                     Some(p) => {
-                        let _ = self.fs_mut().doc.set(p, root);
+                        let n = copy_from_doc(&mut self.fs_mut().doc, &nd, root);
+                        let _ = self.fs_mut().doc.set(p, n);
                     }
                 }
+                Ok(())
             }
         }
     }
@@ -5588,7 +5628,7 @@ impl App {
     // --- external $EDITOR ---------------------------------------------------
 
     /// editRawExternal writes the whole document to a temp file and arms
-    /// $EDITOR (Go editRawExternal).
+    /// $EDITOR (Go editRawExternal). Used by E at the root.
     fn edit_raw_external(&mut self) {
         let raw = self.opts().raw.clone();
         match raw.encode_raw_doc(self.doc()) {
@@ -6229,16 +6269,18 @@ impl App {
             );
         }
         let status = self.status_lines();
-        let mut h = self
-            .height
-            .saturating_sub(header + 1 + desc_lines.len() + summary_lines.len() + status.len());
+        let title_width = self.menu_title_col_width(&rows);
+        let write_lines = self.write_input_lines(title_width);
+        let mut h = self.height.saturating_sub(
+            header + 1 + desc_lines.len() + summary_lines.len() + status.len() + write_lines.len(),
+        );
         if !self.notice.is_empty() {
             h = h.saturating_sub(1);
         }
         if self.hide_empty {
             h = h.saturating_sub(1);
         }
-        self.write_rows(&mut b, &st, &rows, h);
+        self.write_rows(&mut b, &st, &rows, h, title_width);
         if self.hide_empty {
             b.push_str(&clip_display(
                 &format!("  {}", style::faint("[empty hidden]")),
@@ -6250,7 +6292,8 @@ impl App {
         let bottom = desc_lines.len()
             + summary_lines.len()
             + status.len()
-            + usize::from(!self.notice.is_empty());
+            + usize::from(!self.notice.is_empty())
+            + write_lines.len();
         let mut lines = b.matches('\n').count();
         while lines < self.height.saturating_sub(1).saturating_sub(bottom) {
             b.push('\n');
@@ -6279,6 +6322,10 @@ impl App {
                 &style::fg1(&clip_runes(&self.notice, self.width)),
                 self.width.saturating_sub(1),
             ));
+            b.push('\n');
+        }
+        for line in &write_lines {
+            b.push_str(&clip_display(line, self.width.saturating_sub(1)));
             b.push('\n');
         }
         b.push_str(&self.help_line());
@@ -6418,7 +6465,14 @@ impl App {
 
     /// writeRows renders the visible slice of rows (scroll computed
     /// read-only around the persisted offset).
-    fn write_rows(&self, b: &mut String, st: &MenuState, rows: &[Row], height: usize) {
+    fn write_rows(
+        &self,
+        b: &mut String,
+        st: &MenuState,
+        rows: &[Row],
+        height: usize,
+        title_width: usize,
+    ) {
         let height = height.max(1);
         let cursor = st.cursor.min(rows.len().saturating_sub(1));
         let mut offset = st.offset;
@@ -6432,7 +6486,6 @@ impl App {
         if offset > max_off {
             offset = max_off;
         }
-        let title_width = self.menu_title_col_width(rows);
         for i in offset..rows.len().min(offset + height) {
             let line = self.row_line(&rows[i], i == cursor, title_width);
             self.write_cut(b, &line);
@@ -6465,22 +6518,30 @@ impl App {
                 self.write_cut(b, &style::fg1(&format!("  {}", a.err)));
             }
         }
-        // write-to-path input for W
-        if let Some(Overlay::Write(w)) = &self.overlay {
-            let line = format!(
-                "{}{}{}",
-                cursor_prefix(true),
-                self.title_col("Write to", title_width),
-                ti_view(&w.ti)
-            );
-            self.write_cut(b, &line);
-            if !w.err.is_empty() {
-                self.write_cut(b, &style::fg1(&format!("  {}", w.err)));
-            } else if !self.suggestion_hint(&w.sugs, w.sug_idx).is_empty() {
-                let h = self.suggestion_hint(&w.sugs, w.sug_idx);
-                self.write_cut(b, &h);
+    }
+
+    /// write_input_lines renders the W write-to-path input in the bottom
+    /// block (above the help bar, so it never scrolls with the menu rows).
+    /// The line has no "> " cursor marker: it is the only focused input
+    /// there.
+    fn write_input_lines(&self, title_width: usize) -> Vec<String> {
+        let Some(Overlay::Write(w)) = &self.overlay else {
+            return Vec::new();
+        };
+        let mut lines = vec![format!(
+            "{}{}",
+            self.title_col("Write to", title_width),
+            ti_view(&w.ti)
+        )];
+        if !w.err.is_empty() {
+            lines.push(style::fg1(&format!("  {}", w.err)));
+        } else {
+            let hint = self.suggestion_hint(&w.sugs, w.sug_idx);
+            if !hint.is_empty() {
+                lines.push(hint);
             }
         }
+        lines
     }
 
     /// toggle_desc implements c: expand the focused description inline, or
@@ -6996,7 +7057,7 @@ impl App {
                 left = format!("{} {}", box_style, label);
                 let _ = box_;
             }
-            RowKind::Add | RowKind::Save | RowKind::Raw | RowKind::Remove | RowKind::Expand => {
+            RowKind::Add | RowKind::Expand => {
                 left = style::accent(&r.label);
             }
             RowKind::NoItems => {

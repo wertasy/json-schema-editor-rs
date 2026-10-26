@@ -173,12 +173,6 @@ pub enum RowKind {
     Toggle,
     /// "< Add item >"
     Add,
-    /// "< Remove this item >"
-    Remove,
-    /// "< Save and exit >"
-    Save,
-    /// "< Edit raw JSON/YAML/TOML >"
-    Raw,
     /// oneOf variant picker line
     Variant,
     /// placeholder for empty menus

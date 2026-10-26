@@ -228,7 +228,7 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
     },
     HelpEntry {
         keys: "d / delete",
-        desc: "delete the selected pair (required merge keys refused)",
+        desc: "delete the row/item (no confirmation; required merge keys refused)",
     },
     HelpEntry {
         keys: "a / A",
@@ -240,7 +240,7 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
     },
     HelpEntry {
         keys: "E",
-        desc: "expand: materialize the referenced value (cursor row or menu) into a copy",
+        desc: "edit the focused row's value in $EDITOR (raw JSON/YAML/TOML; whole document when the cursor is not on a value row)",
     },
     HelpEntry {
         keys: "&",
@@ -309,6 +309,14 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
     HelpEntry {
         keys: "ctrl+v",
         desc: "paste the clipboard into the focused text input (terminal ctrl+shift+v / bracketed paste works too)",
+    },
+    HelpEntry {
+        keys: "D",
+        desc: "remove the current array item (from the item list or its form; asks y/n)",
+    },
+    HelpEntry {
+        keys: "ctrl+e",
+        desc: "expand: materialize the referenced value (cursor row or menu) into a copy",
     },
 ];
 
@@ -704,7 +712,7 @@ pub struct App {
     pub file_pick: Option<FilePickState>,
     /// the session ended via ctrl+c/EOF abort
     pub aborted: bool,
-    /// the session ended cleanly (root quit or Save and exit)
+    /// the session ended cleanly (root quit)
     pub exiting: bool,
     /// run $EDITOR for real (false in tests: the pending edit is stashed
     /// instead so `finish_external_value` can deliver the content)
@@ -1380,11 +1388,6 @@ impl App {
     /// save handles ctrl+s: write the document and stay in the session.
     pub fn save(&mut self) {
         self.persist(false);
-    }
-
-    /// saveAndExit handles the root "Save and exit" row.
-    pub fn save_and_exit(&mut self) {
-        self.save_dirty_files_and_exit();
     }
 
     /// openWriteTo arms the w/W input.

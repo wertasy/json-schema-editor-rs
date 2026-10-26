@@ -96,15 +96,6 @@ pub enum SynthKey {
 
 // --- helpers usually found on listModel ------------------------------------
 
-/// rawLabel (raw.go): the raw editor syntax label, "JSON" by default.
-fn raw_label(opts: &Options) -> &'static str {
-    if opts.raw.label.is_empty() {
-        "JSON"
-    } else {
-        opts.raw.label
-    }
-}
-
 /// pathFor returns a copy of path with key appended.
 fn path_for(path: &[PathSeg], key: &str) -> Vec<PathSeg> {
     let mut p = path.to_vec();
@@ -222,7 +213,7 @@ pub fn menu_rows(
 pub fn menu_rows_for(
     schema: &mut Schema,
     doc: &Doc,
-    opts: &Options,
+    _opts: &Options,
     hide_empty: bool,
     st: &MenuState,
     env: &mut RowsEnv,
@@ -240,20 +231,8 @@ pub fn menu_rows_for(
             ..Row::default()
         });
     }
-    // A menu for an array item (path ends with an index) offers removal.
-    if !st.path.is_empty()
-        && st.kind != MenuKind::EnumArray
-        && st.kind != MenuKind::OneOf
-        && matches!(st.path.last(), Some(PathSeg::Idx(_)))
-    {
-        rows.push(Row {
-            kind: RowKind::Remove,
-            path: st.path.clone(),
-            idx: -1,
-            label: "< Remove this item >".into(),
-            ..Row::default()
-        });
-    }
+    // A menu for an array item (path ends with an index) no longer carries a
+    // "< Remove this item >" action row: D removes the item from its form.
     match st.kind {
         MenuKind::Object => {
             let merged = env.merge.merged_keys(st);
@@ -354,18 +333,22 @@ pub fn menu_rows_for(
             }
         }
         MenuKind::Items => {
-            rows.push(Row {
-                kind: RowKind::Add,
-                label: "< Add item >".into(),
-                idx: -1,
-                ..Row::default()
-            });
-            if let Some(cur) = doc.get(&st.path) {
-                if let Value::Array(items) = doc.value(cur) {
-                    for i in 0..items.len() {
-                        rows.push(item_row(schema, &mut env.synth, st.node, &st.path, i));
-                    }
-                }
+            let len = match doc.get(&st.path).map(|cur| doc.value(cur)) {
+                Some(Value::Array(items)) => items.len(),
+                _ => 0,
+            };
+            // Non-empty arrays add through a/A or paste: keep the row list
+            // purely items. An empty array shows the one append action.
+            if len == 0 {
+                rows.push(Row {
+                    kind: RowKind::Add,
+                    label: "< Add item >".into(),
+                    idx: -1,
+                    ..Row::default()
+                });
+            }
+            for i in 0..len {
+                rows.push(item_row(schema, &mut env.synth, st.node, &st.path, i));
             }
         }
         MenuKind::EnumArray => {
@@ -446,20 +429,6 @@ pub fn menu_rows_for(
                 ..Row::default()
             },
         );
-    }
-    if env.is_root {
-        rows.push(Row {
-            kind: RowKind::Save,
-            label: "< Save and exit >".into(),
-            idx: -1,
-            ..Row::default()
-        });
-        rows.push(Row {
-            kind: RowKind::Raw,
-            label: format!("< Edit raw {} >", raw_label(opts)),
-            idx: -1,
-            ..Row::default()
-        });
     }
     rows
 }
@@ -4237,14 +4206,10 @@ mod tests {
             RowKind::Drill,
             RowKind::Drill,
             RowKind::Drill,
-            RowKind::Save,
-            RowKind::Raw,
         ];
         assert_eq!(kinds(&rows), want, "root rows: {rows:?}");
         assert_eq!(fx.schema.nodes[rows[2].fn_.unwrap() as usize].key, "server");
         assert_eq!(fx.schema.nodes[rows[5].fn_.unwrap() as usize].key, "auth");
-        assert_eq!(rows[6].label, "< Save and exit >");
-        assert_eq!(rows[7].label, "< Edit raw JSON >");
     }
 
     #[test]
@@ -4332,12 +4297,11 @@ mod tests {
             vec![st(MenuKind::Items, mounts, vec![PathSeg::key("mounts")])],
             false,
         );
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].kind, RowKind::Add);
-        assert_eq!(rows[1].kind, RowKind::Drill);
-        assert_eq!(rows[1].idx, 0);
+        assert_eq!(rows.len(), 1, "non-empty array: item rows only");
+        assert_eq!(rows[0].kind, RowKind::Drill);
+        assert_eq!(rows[0].idx, 0);
 
-        // object item menu: remove row on top, then fields
+        // object item menu: fields only (D removes the item)
         let rows2 = rows_for(
             &mut fx,
             vec![st(
@@ -4347,12 +4311,11 @@ mod tests {
             )],
             false,
         );
-        assert_eq!(rows2.len(), 3);
-        assert_eq!(rows2[0].kind, RowKind::Remove);
-        assert_eq!(fx.schema.nodes[rows2[1].fn_.unwrap() as usize].key, "src");
-        assert_eq!(fx.schema.nodes[rows2[2].fn_.unwrap() as usize].key, "dst");
+        assert_eq!(rows2.len(), 2);
+        assert_eq!(fx.schema.nodes[rows2[0].fn_.unwrap() as usize].key, "src");
+        assert_eq!(fx.schema.nodes[rows2[1].fn_.unwrap() as usize].key, "dst");
 
-        // scalar item menu: add + field rows
+        // scalar item menu: item rows only
         let tags = child_of(&fx.schema, child_of(&fx.schema, root, "logging"), "tags");
         let mut fx3 = Fx::new();
         fx3.doc = dbuild(|db| {
@@ -4370,11 +4333,25 @@ mod tests {
             )],
             false,
         );
-        assert_eq!(rows3.len(), 3);
-        assert_eq!(rows3[0].kind, RowKind::Add);
-        assert_eq!(rows3[1].kind, RowKind::Field);
-        assert_eq!(rows3[1].idx, 0);
-        assert_eq!(rows3[2].idx, 1);
+        assert_eq!(rows3.len(), 2);
+        assert_eq!(rows3[0].kind, RowKind::Field);
+        assert_eq!(rows3[0].idx, 0);
+        assert_eq!(rows3[1].idx, 1);
+
+        // empty array: the append action is the only row
+        let mut fx4 = Fx::new();
+        fx4.doc = dbuild(|db| db.obj(vec![("logging", db.obj(vec![("tags", db.arr(vec![]))]))]));
+        let rows_empty = rows_for(
+            &mut fx4,
+            vec![st(
+                MenuKind::Items,
+                tags,
+                vec![PathSeg::key("logging"), PathSeg::key("tags")],
+            )],
+            false,
+        );
+        assert_eq!(rows_empty.len(), 1);
+        assert_eq!(rows_empty[0].kind, RowKind::Add);
 
         // enum array: one toggle row per option
         let rows4 = rows_for(

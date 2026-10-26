@@ -348,6 +348,7 @@ fn key(k: &str) -> Msg {
         "ctrl+p" => Msg::Ctrl('p'),
         "ctrl+a" => Msg::Ctrl('a'),
         "ctrl+w" => Msg::Ctrl('w'),
+        "ctrl+e" => Msg::Ctrl('e'),
         "alt+i" => Msg::Char('i', true),
         "alt+x" => Msg::Char('x', true),
         "alt+f" => Msg::Char('f', true),
@@ -365,8 +366,8 @@ fn press(app: &mut App, keys: &[&str]) {
             "enter" | "esc" | "up" | "down" | "left" | "right" | "space" | "tab" | "shift+tab"
             | "backspace" | "delete" | "home" | "end" | "ctrl+c" | "ctrl+j" | "ctrl+k"
             | "ctrl+s" | "ctrl+r" | "ctrl+o" | "ctrl+i" | "ctrl+u" | "ctrl+n" | "ctrl+p"
-            | "ctrl+a" | "ctrl+w" | "alt+i" | "alt+x" | "alt+f" | "alt+b" | "pgup" | "pgdown"
-            | "ctrl+f" | "ctrl+b" => {
+            | "ctrl+a" | "ctrl+w" | "ctrl+e" | "alt+i" | "alt+x" | "alt+f" | "alt+b" | "pgup"
+            | "pgdown" | "ctrl+f" | "ctrl+b" => {
                 app.update(key(k));
             }
             _ => {
@@ -1903,8 +1904,8 @@ fn numeric_quick_keys_work_on_array_items() {
     let mut m = app_with(schema, doc, test_opts());
     set_cursor_path(&mut m, &sp(&["nums"]));
     press(&mut m, &["enter"]);
-    // array menu: < Add item >, then item 0, item 1
-    press(&mut m, &["j", "-"]);
+    // array menu: item 0, item 1
+    press(&mut m, &["-"]);
     assert_eq!(nget(&m.fs().doc, &[ks("nums"), PathSeg::Idx(0)]), "0");
     press(&mut m, &["j", "+"]);
     assert_eq!(nget(&m.fs().doc, &[ks("nums"), PathSeg::Idx(1)]), "3.5");
@@ -1912,7 +1913,7 @@ fn numeric_quick_keys_work_on_array_items() {
     let doc = dbuild(|db| db.arr(vec![db.n("7")]));
     let schema = crate::smodel::untyped(&doc);
     let mut m = app_with(schema, doc, test_opts());
-    press(&mut m, &["j", "-"]);
+    press(&mut m, &["-"]);
     assert_eq!(nget(&m.fs().doc, &[PathSeg::Idx(0)]), "6");
 
     // schema-less nested array: the unknown key drills into a generic array
@@ -1921,7 +1922,7 @@ fn numeric_quick_keys_work_on_array_items() {
     let mut m = app_with(schema, doc, test_opts());
     set_cursor_path(&mut m, &sp(&["nums"]));
     press(&mut m, &["enter"]);
-    press(&mut m, &["j", "-"]);
+    press(&mut m, &["-"]);
     assert_eq!(nget(&m.fs().doc, &[ks("nums"), PathSeg::Idx(0)]), "10");
 }
 
@@ -2530,35 +2531,55 @@ fn n_at_idx(doc: &Doc, key: &str, idx: usize) -> String {
 }
 
 #[test]
-fn external_raw_edit() {
+fn edit_raw_current_node() {
+    // E edits the value under the cursor, not the root document.
     let mut m = mk_app(test_doc(), test_opts());
-    set_cursor(&mut m, |r| r.kind == RowKind::Raw);
-    press(&mut m, &["enter"]);
-    assert!(m.pending_edit.as_ref().map_or(false, |e| e.whole_doc));
-
-    // a successful edit replaces the document as one undo step
-    m.finish_external_value(r#"{"name":"edited"}"#);
+    press(&mut m, &["E"]);
+    let edit = m.pending_edit.as_ref().expect("value editor armed");
+    assert!(!edit.whole_doc, "a row value is not the whole document");
+    assert_eq!(edit.target, sp(&["name"]));
+    m.finish_external_value(r#""edited""#);
     assert_eq!(str_at(&m.fs().doc, &["name"]), "edited");
     assert!(m.dirty());
     press(&mut m, &["u"]);
     assert_eq!(str_at(&m.fs().doc, &["name"]), "webapp");
 
     // invalid JSON keeps the document and reports the parse error
-    set_cursor(&mut m, |r| r.kind == RowKind::Raw);
-    press(&mut m, &["enter"]);
+    press(&mut m, &["E"]);
     m.finish_external_value("{oops");
-    assert_eq!(
-        str_at(&m.fs().doc, &["name"]),
-        "webapp",
-        "invalid JSON must not replace the document"
-    );
+    assert_eq!(str_at(&m.fs().doc, &["name"]), "webapp");
     assert!(m.notice.contains("invalid JSON"), "notice = {}", m.notice);
 
     // an editor failure keeps the document too
-    set_cursor(&mut m, |r| r.kind == RowKind::Raw);
-    press(&mut m, &["enter"]);
+    press(&mut m, &["E"]);
     m.external_edit_failed("boom");
     assert!(m.notice.contains("boom"), "notice = {}", m.notice);
+
+    // a container row edits that object/value, not the root
+    press(&mut m, &["down", "down"]); // Server
+    press(&mut m, &["E"]);
+    let edit = m.pending_edit.as_ref().expect("value editor armed");
+    assert!(!edit.whole_doc);
+    assert_eq!(edit.target, sp(&["server"]));
+    m.finish_external_value(r#"{"port":9090}"#);
+    assert_eq!(num_at(&m.fs().doc, &["server", "port"]), "9090");
+    assert_eq!(str_at(&m.fs().doc, &["name"]), "webapp");
+
+    // no value row under the cursor: fall back to the whole document
+    let schema = schema_build(|b| {
+        b.id(FormNode {
+            key: "$".into(),
+            title: "$".into(),
+            kind: Kind::Object,
+            ..FormNode::default()
+        })
+    });
+    let mut m = app_with(schema, dbuild(|db| db.obj(vec![])), test_opts());
+    press(&mut m, &["E"]);
+    assert!(
+        m.pending_edit.as_ref().map_or(false, |e| e.whole_doc),
+        "the empty-object placeholder falls back to the whole document"
+    );
 }
 
 #[test]
@@ -2608,14 +2629,6 @@ fn menu_save_flow() {
     let mut m4 = mk_app(test_doc(), nopts);
     press(&mut m4, &["ctrl+s", "n"]);
     assert!(!m4.fs().saved && m4.overlay.is_none());
-
-    // Save and exit writes and quits
-    let (opts, exits) = counting_opts();
-    let mut m5 = mk_app(test_doc(), opts);
-    set_cursor(&mut m5, |r| r.kind == RowKind::Save);
-    press(&mut m5, &["enter"]);
-    assert_eq!(exits.load(Ordering::SeqCst), 1);
-    assert!(m5.fs().saved && m5.exiting);
 }
 
 #[test]
@@ -2887,13 +2900,13 @@ fn menu_next_prev_non_null() {
     press(&mut im, &["ctrl+j"]);
     assert_eq!(
         cursor_cursor(&mut im),
-        2,
+        1,
         "ctrl+j must skip a null array item"
     );
     press(&mut im, &["ctrl+j"]);
-    assert_eq!(cursor_cursor(&mut im), 3);
-    press(&mut im, &["ctrl+k"]);
     assert_eq!(cursor_cursor(&mut im), 2);
+    press(&mut im, &["ctrl+k"]);
+    assert_eq!(cursor_cursor(&mut im), 1);
 }
 
 fn render_path(p: &[PathSeg]) -> String {
@@ -3176,7 +3189,7 @@ fn paste_full_object_onto_page_root() {
 fn paste_array_items_at_cursor() {
     let mut m = paste_app(two_mount_doc(), r#"1, 2, "three""#);
     press(&mut m, &["down", "down", "down", "down", "enter"]);
-    press(&mut m, &["down", "down"]);
+    press(&mut m, &["down"]);
     press(&mut m, &["p"]);
     assert_eq!(m.notice, "pasted 3 items into $.mounts");
     assert_eq!(arr_len(&m.fs().doc, &sp(&["mounts"])), 5);
@@ -3191,7 +3204,7 @@ fn paste_array_items_at_cursor() {
 fn paste_full_array_onto_array_page() {
     let mut m = paste_app(two_mount_doc(), "[4,5]");
     press(&mut m, &["down", "down", "down", "down", "enter"]);
-    press(&mut m, &["p"]);
+    press(&mut m, &["down", "p"]);
     assert_eq!(m.notice, "pasted 2 items into $.mounts");
     assert_eq!(arr_len(&m.fs().doc, &sp(&["mounts"])), 4);
     assert_eq!(n_at_idx(&m.fs().doc, "mounts", 2), "4");
@@ -3235,7 +3248,6 @@ fn paste_mismatch_notices() {
     // a complete mapping lands in an items page as one object item
     let mut m = paste_app(two_mount_doc(), r#"{"src":"/c","dst":"/d"}"#);
     press(&mut m, &["down", "down", "down", "down", "enter"]);
-    press(&mut m, &["down"]);
     press(&mut m, &["p"]);
     assert_eq!(m.notice, "pasted 1 items into $.mounts");
     assert_eq!(arr_len(&m.fs().doc, &sp(&["mounts"])), 3);
@@ -3249,7 +3261,6 @@ fn paste_mismatch_notices() {
     // P above the cursor item
     let mut m = paste_app(two_mount_doc(), r#"{"src":"/c","dst":"/d"}"#);
     press(&mut m, &["down", "down", "down", "down", "enter"]);
-    press(&mut m, &["down"]);
     press(&mut m, &["P"]);
     assert_eq!(m.notice, "pasted 1 items into $.mounts");
     assert_eq!(mount_src(&m.fs().doc, 0), "/c");
@@ -3409,7 +3420,7 @@ fn paste_yaml_flow_mapping() {
 fn paste_yaml_block_items() {
     let mut m = yaml_paste_app(two_mount_doc(), "- 1\n- 2\n- three");
     press(&mut m, &["down", "down", "down", "down", "enter"]);
-    press(&mut m, &["down", "down"]);
+    press(&mut m, &["down"]);
     press(&mut m, &["p"]);
     assert_eq!(m.notice, "pasted 3 items into $.mounts");
     assert_eq!(arr_len(&m.fs().doc, &sp(&["mounts"])), 5);
@@ -3446,7 +3457,7 @@ fn paste_toml_block_pairs() {
 fn paste_toml_value_array() {
     let mut m = toml_paste_app(two_mount_doc(), r#"[{ src = "/c" }, { src = "/d" }]"#);
     press(&mut m, &["down", "down", "down", "down", "enter"]);
-    press(&mut m, &["down", "down"]);
+    press(&mut m, &["down"]);
     press(&mut m, &["p"]);
     assert_eq!(m.notice, "pasted 2 items into $.mounts");
     assert_eq!(arr_len(&m.fs().doc, &sp(&["mounts"])), 4);
@@ -3506,7 +3517,7 @@ fn paste_array_p_below_p_above() {
     let mk = |text: &str| {
         let mut m = paste_app(two_mount_doc(), text);
         press(&mut m, &["down", "down", "down", "down", "enter"]);
-        press(&mut m, &["down", "down"]);
+        press(&mut m, &["down"]);
         m
     };
 
@@ -3538,12 +3549,13 @@ fn paste_array_p_below_p_above() {
     assert_eq!(mount_src(&m.fs().doc, 1), "/b");
     assert_eq!(n_at_idx(&m.fs().doc, "mounts", 2), "6");
 
-    // a cursor on < Add item > is the list end: p and P append
-    let mut m = mk("8,");
-    press(&mut m, &["up", "up"]);
+    // an empty array shows < Add item >: P there appends the first item
+    let mut m = paste_app(empty_doc(), "8,");
+    press(&mut m, &["down", "down", "down", "down", "enter"]);
+    assert_eq!(row_at(&mut m).kind, RowKind::Add);
     press(&mut m, &["P"]);
     assert_eq!(m.notice, "pasted 1 items into $.mounts");
-    assert_eq!(n_at_idx(&m.fs().doc, "mounts", 2), "8");
+    assert_eq!(n_at_idx(&m.fs().doc, "mounts", 0), "8");
 }
 
 #[test]
@@ -3563,7 +3575,7 @@ fn paste_trailing_comma_in_complete_object() {
 fn paste_trailing_comma_in_complete_array_appends() {
     let mut m = paste_app(two_mount_doc(), "[4,5,]");
     press(&mut m, &["down", "down", "down", "down", "enter"]);
-    press(&mut m, &["p"]);
+    press(&mut m, &["down", "p"]);
     assert_eq!(m.notice, "pasted 2 items into $.mounts");
     assert_eq!(arr_len(&m.fs().doc, &sp(&["mounts"])), 4);
     assert_eq!(n_at_idx(&m.fs().doc, "mounts", 2), "4");
@@ -3640,27 +3652,31 @@ fn paste_value_onto_cursor_row() {
     opts.paste = Some(Arc::new(|| Ok("99".to_string())));
     let mut m = app_with(schema, doc, opts);
     press(&mut m, &["enter"]);
-    press(&mut m, &["down", "down"]);
+    press(&mut m, &["down"]);
     press(&mut m, &["P"]);
     assert_eq!(m.notice, "pasted value into $.items[1]");
     assert_eq!(n_at_idx(&m.fs().doc, "items", 1), "99");
     assert_eq!(n_at_idx(&m.fs().doc, "items", 0), "1");
 
-    // p and value-less rows refuse a single value
-    let mut m = paste_app(test_doc(), "123");
-    press(&mut m, &["p"]);
-    assert_eq!(
-        m.notice,
-        "a single value replaces a row's value — press P on the row"
-    );
-    assert!(nodes_equal_doc(&test_doc(), &m.fs().doc));
-    press(&mut m, &["G"]);
+    // an action/placeholder row refuses a single value
+    let schema = schema_build(|b| {
+        b.id(FormNode {
+            key: "$".into(),
+            title: "$".into(),
+            kind: Kind::Object,
+            ..FormNode::default()
+        })
+    });
+    let mut opts = test_opts();
+    opts.paste = Some(Arc::new(|| Ok("123".to_string())));
+    let mut m = app_with(schema, dbuild(|db| db.obj(vec![])), opts);
+    assert_eq!(row_at(&mut m).kind, RowKind::NoItems);
     press(&mut m, &["P"]);
     assert_eq!(
         m.notice,
         "a single value replaces a row's value — press P on the row"
     );
-    assert!(nodes_equal_doc(&test_doc(), &m.fs().doc));
+    assert_eq!(row_at(&mut m).kind, RowKind::NoItems);
 }
 
 #[test]
@@ -4345,10 +4361,10 @@ fn merge_expand_key() {
     let mut m = merge_model(MERGE_SRC);
     drill_build2(&mut m);
     press(&mut m, &["down"]);
-    press(&mut m, &["E"]);
+    press(&mut m, &["ctrl+e"]);
     assert!(
         has(&m.fs().doc, &sp(&["jobs", "build2", "env"])),
-        "E must materialize an own env member"
+        "ctrl+e must materialize an own env member"
     );
     assert_eq!(
         sget(&m.fs().doc, &sp(&["jobs", "build_base1", "env", "env1"])),
@@ -4810,10 +4826,10 @@ fn merge_creates_missing_mapping() {
 fn delete_expanded_merged_key_allowed_when_required() {
     let mut m = required_merge_model();
     press(&mut m, &["down", "enter"]);
-    press(&mut m, &["E"]);
+    press(&mut m, &["ctrl+e"]);
     assert!(
         has(&m.fs().doc, &sp(&["child", "name"])),
-        "E must materialize the merged name"
+        "ctrl+e must materialize the merged name"
     );
     press(&mut m, &["d"]);
     assert!(
@@ -4864,7 +4880,7 @@ fn merge_chain_rows_follow_the_defining_anchor() {
     if let Some(st) = m.top_mut() {
         st.cursor = 0;
     }
-    press(&mut m, &["E"]);
+    press(&mut m, &["ctrl+e"]);
     press(&mut m, &["d"]);
     assert!(
         !has(&m.fs().doc, &sp(&["jobs", "job1", "name"])),
@@ -5186,26 +5202,26 @@ fn alias_expand_detaches_copy() {
 }
 
 #[test]
-fn alias_expand_shortcut_e() {
+fn alias_expand_shortcut_ctrl_e() {
     let mut m = alias_model("base: &x\n  p: 1\ncopy: *x\n");
     drill_copy(&mut m);
-    press(&mut m, &["E"]);
+    press(&mut m, &["ctrl+e"]);
     let cp = getv(&m.fs().doc, &sp(&["copy"])).unwrap();
     assert_eq!(m.fs().doc.node(cp).anchor, "");
     assert!(alias_at(&m.fs().doc, &sp(&["copy"])).is_none());
 
-    // E on a reference row in the parent menu expands that row
+    // ctrl+e on a reference row in the parent menu expands that row
     let mut m2 = alias_model("base: &x\n  p: 1\ncopy: *x\n");
     press(&mut m2, &["down"]);
-    press(&mut m2, &["E"]);
+    press(&mut m2, &["ctrl+e"]);
     let cp = getv(&m2.fs().doc, &sp(&["copy"])).unwrap();
     assert_eq!(m2.fs().doc.node(cp).anchor, "");
     let b = getv(&m2.fs().doc, &sp(&["base"])).unwrap();
     assert_eq!(m2.fs().doc.node(b).anchor, "x");
 
-    // without a reference under the cursor e does nothing
+    // without a reference under the cursor ctrl+e does nothing
     let mut m3 = alias_model("base: &x\n  p: 1\n");
-    press(&mut m3, &["e"]);
+    press(&mut m3, &["ctrl+e"]);
     let b = getv(&m3.fs().doc, &sp(&["base"])).unwrap();
     assert_eq!(m3.fs().doc.node(b).anchor, "x");
 }
@@ -6133,7 +6149,7 @@ fn one_of_item_add_infer() {
     assert!(keys.iter().any(|k| k == "listen"));
     assert!(keys.iter().any(|k| k == "password"));
 
-    press(&mut m, &["down", "enter"]);
+    press(&mut m, &["enter"]);
     assert!(
         matches!(m.overlay, Some(Overlay::Sel(_))),
         "type picker should open"
@@ -7140,8 +7156,8 @@ fn completion_scrolling() {
     });
     let mut m = app_with(test_schema(), doc, test_opts());
     press(&mut m, &["down", "down", "down", "down", "enter"]);
+    press(&mut m, &["G", "A"]);
     press(&mut m, &["enter"]);
-    press(&mut m, &["down", "enter"]);
     match &m.overlay {
         Some(Overlay::Edit(e)) => assert_eq!(e.cands.len(), 5),
         _ => panic!("candidates missing"),
@@ -7178,8 +7194,8 @@ fn completion_dedup() {
     });
     let mut m = app_with(test_schema(), doc, test_opts());
     press(&mut m, &["down", "down", "down", "down", "enter"]);
+    press(&mut m, &["G", "A"]);
     press(&mut m, &["enter"]);
-    press(&mut m, &["down", "enter"]);
     match &m.overlay {
         Some(Overlay::Edit(e)) => {
             assert_eq!(e.cands, vec!["/data".to_string(), "/data2".to_string()])
@@ -8714,7 +8730,7 @@ fn array_item_selection_colors_labels_and_deletes_batch() {
     let mut m = items_app(doc);
     press(&mut m, &["down", "down", "down", "down", "enter"]);
     assert_eq!(m.top().unwrap().kind, MenuKind::Items);
-    press(&mut m, &["down", "m", "down", "down", "m"]);
+    press(&mut m, &["m", "down", "down", "m"]);
     let st = m.top().unwrap();
     assert_eq!(st.sel.len(), 2, "first and last items marked");
     assert!(!st.visual);
@@ -8722,7 +8738,7 @@ fn array_item_selection_colors_labels_and_deletes_batch() {
     // the "mounts[N]" label is styled like an object key
     let rows = m.menu_rows();
     let tw = m.menu_title_col_width(&rows);
-    let off = m.row_line(&rows[1], false, tw);
+    let off = m.row_line(&rows[0], false, tw);
     assert!(
         off.contains(&crate::ui::menu::style::fg9("mounts[0]")),
         "unfocused marked item must be red: {off:?}"
@@ -8731,7 +8747,7 @@ fn array_item_selection_colors_labels_and_deletes_batch() {
         off.starts_with(&crate::ui::menu::style::fg9("> ")),
         "marked item needs the red marker: {off:?}"
     );
-    let focused = m.row_line(&rows[3], true, tw);
+    let focused = m.row_line(&rows[2], true, tw);
     assert!(
         focused.contains(&crate::ui::menu::style::bold(&crate::ui::menu::style::fg9(
             "mounts[2]"
@@ -8842,9 +8858,13 @@ fn menu_mounts_add_fill_back() {
     press(&mut m, &["enter"]);
     assert_eq!(m.top().unwrap().kind, MenuKind::Object);
     assert_eq!(m.top().unwrap().path, vec![ks("mounts"), PathSeg::Idx(0)]);
-    assert!(find_row(&mut m, |r, _| r.kind == RowKind::Remove).is_some());
+    let rows = m.menu_rows();
+    assert!(
+        rows.iter()
+            .all(|r| matches!(r.kind, RowKind::Field | RowKind::Drill))
+    );
 
-    press(&mut m, &["down", "enter"]);
+    press(&mut m, &["enter"]);
     assert!(matches!(m.overlay, Some(Overlay::Edit(_))));
     press(&mut m, &["/", "d", "a", "t", "a", "enter"]);
     assert!(m.overlay.is_none(), "edit should close");
@@ -8877,10 +8897,7 @@ fn menu_delete_item() {
         )])
     });
     let mut m2 = items_app(doc2);
-    press(
-        &mut m2,
-        &["down", "down", "down", "enter", "down", "enter", "down"],
-    );
+    press(&mut m2, &["down", "down", "down", "enter", "down", "enter"]);
     press(&mut m2, &["d"]);
     assert_eq!(
         arr_strs(&m2.fs().doc, &sp(&["logging", "tags"])),
@@ -8917,7 +8934,7 @@ fn item_count_jump() {
     press(&mut m, &["1", "2", "g", "g"]);
     assert_eq!(row_at(&mut m).idx, 2);
     press(&mut m, &["g", "g"]);
-    assert_eq!(row_at(&mut m).kind, RowKind::Add);
+    assert_eq!(row_at(&mut m).idx, 0);
 
     // digits outside array menus do not arm a count
     press(&mut m, &["esc", "esc"]);
@@ -8943,19 +8960,16 @@ fn menu_move_item() {
         )])
     });
     let mut m = items_app(doc);
-    press(
-        &mut m,
-        &["down", "down", "down", "enter", "down", "enter", "down"],
-    );
+    press(&mut m, &["down", "down", "down", "enter", "down", "enter"]);
     let tags = sp(&["logging", "tags"]);
     assert_eq!(arr_strs(&m.fs().doc, &tags), vec!["prod", "dev", "stage"]);
 
     press(&mut m, &["J"]);
     assert_eq!(arr_strs(&m.fs().doc, &tags), vec!["dev", "prod", "stage"]);
-    assert_eq!(cursor_cursor(&mut m), 2);
+    assert_eq!(cursor_cursor(&mut m), 1);
     press(&mut m, &["K"]);
     assert_eq!(arr_strs(&m.fs().doc, &tags), vec!["prod", "dev", "stage"]);
-    assert_eq!(cursor_cursor(&mut m), 1);
+    assert_eq!(cursor_cursor(&mut m), 0);
     press(&mut m, &["K"]);
     assert_eq!(m.notice, "already first item");
     press(&mut m, &["down", "down"]);
@@ -8977,10 +8991,7 @@ fn menu_move_item() {
         )])
     });
     let mut m2 = items_app(doc2);
-    press(
-        &mut m2,
-        &["down", "down", "down", "enter", "down", "enter", "down"],
-    );
+    press(&mut m2, &["down", "down", "down", "enter", "down", "enter"]);
     press(&mut m2, &["J"]);
     assert_eq!(m2.notice, "already last item");
     press(&mut m2, &["K"]);
@@ -8997,10 +9008,10 @@ fn menu_move_item() {
         )])
     });
     let mut m3 = items_app(doc3);
-    press(&mut m3, &["down", "down", "down", "down", "enter", "down"]);
+    press(&mut m3, &["down", "down", "down", "down", "enter"]);
     press(&mut m3, &["J"]);
     assert_eq!(mount_src(&m3.fs().doc, 0), "/b");
-    assert_eq!(cursor_cursor(&mut m3), 2);
+    assert_eq!(cursor_cursor(&mut m3), 1);
     press(&mut m3, &["u"]);
     assert_eq!(mount_src(&m3.fs().doc, 0), "/a");
 }
@@ -9106,7 +9117,7 @@ fn cursor_wrap() {
     let last = m.menu_rows().len() - 1;
     press(&mut m, &["up"]);
     assert_eq!(cursor_cursor(&mut m), last);
-    assert_eq!(row_at(&mut m).kind, RowKind::Raw);
+    assert_eq!(row_at(&mut m).path, sp(&["auth"]));
     press(&mut m, &["down"]);
     assert_eq!(cursor_cursor(&mut m), 0);
 
@@ -9349,8 +9360,8 @@ fn edit_completion() {
     });
     let mut m = items_app(doc);
     press(&mut m, &["down", "down", "down", "down", "enter"]);
+    press(&mut m, &["G", "A"]);
     press(&mut m, &["enter"]);
-    press(&mut m, &["down", "enter"]);
     match &m.overlay {
         Some(Overlay::Edit(e)) => {
             assert_eq!(
@@ -9415,15 +9426,15 @@ fn menu_remove_item_confirm() {
     });
     let mut m = items_app(doc);
     press(&mut m, &["down", "down", "down", "down", "enter"]);
-    press(&mut m, &["down", "enter"]);
     press(&mut m, &["enter"]);
+    press(&mut m, &["D"]);
     assert!(matches!(m.overlay, Some(Overlay::Confirm(_))));
     press(&mut m, &["n"]);
     assert!(m.overlay.is_none());
     assert_eq!(m.top().unwrap().kind, MenuKind::Object);
     assert!(has(&m.fs().doc, &[ks("mounts"), PathSeg::Idx(0)]));
 
-    press(&mut m, &["enter", "y"]);
+    press(&mut m, &["D", "y"]);
     assert!(m.overlay.is_none());
     assert_eq!(m.top().unwrap().kind, MenuKind::Items);
     assert!(!has(&m.fs().doc, &[ks("mounts"), PathSeg::Idx(0)]));
@@ -9438,12 +9449,23 @@ fn menu_remove_item_confirm() {
     let mut m2 = items_app(doc2);
     press(
         &mut m2,
-        &[
-            "down", "down", "down", "down", "enter", "down", "enter", "enter", "esc",
-        ],
+        &["down", "down", "down", "down", "enter", "enter", "D", "esc"],
     );
     assert!(m2.overlay.is_none());
     assert!(has(&m2.fs().doc, &[ks("mounts"), PathSeg::Idx(0)]));
+}
+
+#[test]
+fn menu_d_removes_item_from_items_list() {
+    let mut m = items_app(test_doc());
+    press(&mut m, &["down", "down", "down", "down", "enter"]);
+    assert_eq!(m.top().unwrap().kind, MenuKind::Items);
+    press(&mut m, &["D"]);
+    assert!(matches!(m.overlay, Some(Overlay::Confirm(_))));
+    press(&mut m, &["y"]);
+    assert!(m.overlay.is_none());
+    assert_eq!(arr_len(&m.fs().doc, &sp(&["mounts"])), 0);
+    assert_eq!(m.top().unwrap().kind, MenuKind::Items);
 }
 
 #[test]
@@ -9801,7 +9823,7 @@ fn tags_items_model() -> (App, Doc) {
 fn insert_item_around_cursor() {
     // A after item 0
     let (mut m, _) = tags_items_model();
-    press(&mut m, &["down", "A"]);
+    press(&mut m, &["A"]);
     assert!(matches!(m.overlay, Some(Overlay::Edit(_))));
     press(&mut m, &["x", "enter"]);
     assert_eq!(
@@ -9816,7 +9838,7 @@ fn insert_item_around_cursor() {
 
     // a before item 1
     let (mut m, _) = tags_items_model();
-    press(&mut m, &["down", "down", "a"]);
+    press(&mut m, &["down", "a"]);
     press(&mut m, &["x", "enter"]);
     assert_eq!(
         arr_strs(&m.fs().doc, &sp(&["logging", "tags"])),
@@ -9828,9 +9850,9 @@ fn insert_item_around_cursor() {
         ]
     );
 
-    // A clamps to append on < Add item >
+    // A after the last item appends
     let (mut m, _) = tags_items_model();
-    press(&mut m, &["A"]);
+    press(&mut m, &["down", "down", "A"]);
     press(&mut m, &["x", "enter"]);
     assert_eq!(
         arr_strs(&m.fs().doc, &sp(&["logging", "tags"])),
@@ -9854,7 +9876,7 @@ fn insert_item_around_cursor() {
     });
     let mut m2 = items_app(doc2);
     press(&mut m2, &["down", "down", "down", "down", "enter"]);
-    press(&mut m2, &["down", "A"]);
+    press(&mut m2, &["A"]);
     assert_eq!(m2.top().unwrap().kind, MenuKind::Object);
     assert_eq!(m2.top().unwrap().path, vec![ks("mounts"), PathSeg::Idx(1)]);
     assert_eq!(arr_len(&m2.fs().doc, &sp(&["mounts"])), 3);
@@ -9864,13 +9886,6 @@ fn insert_item_around_cursor() {
         _ => panic!("spliced item must be an empty object"),
     }
     assert_eq!(mount_src(&m2.fs().doc, 2), "/b");
-
-    // < Add item > stays traceless until a field is written
-    press(&mut m2, &["esc"]);
-    press(&mut m2, &["up", "enter"]);
-    assert_eq!(m2.top().unwrap().kind, MenuKind::Object);
-    assert_eq!(m2.top().unwrap().path, vec![ks("mounts"), PathSeg::Idx(3)]);
-    assert_eq!(arr_len(&m2.fs().doc, &sp(&["mounts"])), 3);
 }
 
 // --- regression: the text input renders on the edited row (bug: enter on a

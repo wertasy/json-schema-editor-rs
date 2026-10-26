@@ -77,7 +77,7 @@ Select a schema for ci.yml
 - 根屏状态行提示 `no schema found: editing without schema guidance; save-time validation disabled`。
 - 对象按 **schema-less 键菜单**编辑：所有文档键都直接列出，`enter` 按运行时类型编辑，`a`/`A` 新增键并从内建类型选择。
 - 数组进入条目管理；标量/其他根值按运行时类型编辑。
-- 根屏的 `< Edit raw JSON >` / `< Edit raw YAML >` / `< Edit raw TOML >` 可整份外编。
+- `E` 在外部编辑器中编辑光标行的值；光标不在值行时编辑整份文档。
 - 不会写入 `$schema` 指向；保存时不做 schema 校验。无 schema 时文档键不再标记 `(not in schema)`，也不会产生未知键警告。
 - 目录不可用时只附加提示 `schema catalog unavailable: ...`，不阻止编辑。
 - 自动检索中中止选择器（`esc`、回车/EOF）等于「不要 schema」，继续进入无 schema 模式。

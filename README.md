@@ -13,8 +13,6 @@ $
   Logging                 —  --->
   Mounts                  1 item  --->
   Auth                    —  --->
-  < Save and exit >
-  < Edit raw JSON >
 ↑/↓ move · enter edit/open · esc back · ctrl+s/w save · / search · ? help
 ```
 
@@ -85,6 +83,7 @@ jse -s server.schema.json a.json b.yaml
 | `m` / `v` | 标记单项 / 连选；配合 `y`、`x`、`d` 批量操作 |
 | `y` / `Y` / `p` / `P` | 复制键值对 / 复制值 / 智能粘贴到菜单 / 粘贴到光标容器 |
 | `u` / `ctrl+r` | 撤销 / 重做 |
+| `E` / `ctrl+e` | 用外部编辑器编辑光标行的值（raw JSON/YAML/TOML；非值行时编辑整份文档） / 物化 YAML 别名与合并值 |
 | `ctrl+s` / `w` | 保存当前文件并留在编辑器 |
 | `W` | 另存副本到指定路径 |
 | `s` | 多文件时打开文件切换器 |

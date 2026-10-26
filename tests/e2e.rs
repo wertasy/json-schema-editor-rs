@@ -466,7 +466,7 @@ fn pty_schema_less_structured_editing() {
     let (snap, mut off) = pty.wait_frame(
         "schema-less root",
         0,
-        &["no schema found", "name", "nested", "Save and exit"],
+        &["no schema found", "name", "nested", "↑/↓ move"],
     );
     assert!(
         !snap.contains("(not in schema)"),
@@ -492,7 +492,7 @@ fn pty_schema_less_whole_doc_edit_rebuilds_root() {
     let dir = mktemp();
     let cfg = dir.path().join("shape.json");
     let editor = dir.path().join("editor.sh");
-    write_file(&cfg, r#"{"name":"z"}"#);
+    write_file(&cfg, "{}");
     write_file(
         &editor,
         "#!/bin/sh\nprintf '%s\\n' '[1, \"two\"]' > \"$1\"\n",
@@ -512,11 +512,11 @@ fn pty_schema_less_whole_doc_edit_rebuilds_root() {
         return;
     };
 
-    pty.wait_frame("schema-less object root", 0, &["name", "Save and exit"]);
-    pty.send(b"G\r"); // the last row: < Edit raw JSON >
+    pty.wait_frame("schema-less object root", 0, &["< Add Key >", "↑/↓ move"]);
+    pty.send(b"E"); // no value row: external editor with the whole document
     pty.wait_frame("raw edit applied", 0, &["Raw JSON edited"]);
     // The document is now an array: the root menu follows the new shape.
-    let (_, off) = pty.wait_frame("array root", 0, &["< Add item >", "$[0]", "$[1]"]);
+    let (_, off) = pty.wait_frame("array root", 0, &["$[0]", "$[1]"]);
     pty.send(b"\x13"); // ctrl+s
     pty.wait_frame("saved", off, &["Write to "]);
     pty.send(b"\x03");
@@ -601,7 +601,7 @@ fn pty_duplicate_child_titles_show_their_keys() {
         return;
     };
 
-    pty.wait_frame("root", 0, &["profile", "Save and exit"]);
+    pty.wait_frame("root", 0, &["profile", "↑/↓ move"]);
     pty.send(b"\r");
     let (snap, _) = pty.wait_frame(
         "profiles menu",
@@ -638,7 +638,7 @@ fn pty_long_comment_page_scrolls_and_closes() {
         return;
     };
 
-    pty.wait_frame("root with description", 0, &["Name", "Save and exit"]);
+    pty.wait_frame("root with description", 0, &["Name", "↑/↓ move"]);
     pty.send(b"c");
     let (snap, off) = pty.wait_frame(
         "long comment page",
@@ -662,7 +662,7 @@ fn pty_long_comment_page_scrolls_and_closes() {
     pty.wait_frame("paged back to the top", off, &["COMMENT LINE 01"]);
 
     pty.send(b"c");
-    pty.wait_frame("menu after comment page", 0, &["Name", "Save and exit"]);
+    pty.wait_frame("menu after comment page", 0, &["Name", "↑/↓ move"]);
     pty.send(b"\x03");
     pty.wait_exit(130);
 }
@@ -765,9 +765,8 @@ fn pty_numeric_quick_keys_array_items() {
 
     pty.wait_frame("root with array", 0, &["nums"]);
     pty.send(b"\r");
-    pty.wait_frame("array menu", 0, &["< Add item >", "nums[0]"]);
-    // array menu rows: < Add item >, item 0, item 1
-    pty.send(b"j");
+    pty.wait_frame("array menu", 0, &["nums[0]", "nums[1]"]);
+    // array menu rows: item 0, item 1
     pty.send(b"-");
     pty.send(b"j");
     pty.send(b"+");
@@ -798,7 +797,7 @@ fn pty_yaml_schema_less_editing_keeps_comments() {
     let (_, mut off) = pty.wait_frame(
         "schema-less YAML root",
         0,
-        &["no schema found", "name", "Edit raw YAML"],
+        &["no schema found", "name", "↑/↓ move"],
     );
     pty.send(b"\r"); // the only key: edit the string in place
     (_, off) = pty.wait_frame("inline YAML scalar editor", off, &["> name", "z"]);
@@ -1135,7 +1134,7 @@ fn pty_smoke() {
     ) else {
         return;
     };
-    pty.wait_frame("form frame", 0, &["Save and exit"]);
+    pty.wait_frame("form frame", 0, &["↑/↓ move"]);
     pty.send(b"\x03");
     pty.wait_exit(130);
     assert!(!out_file.exists(), "output file written despite abort");
@@ -1161,7 +1160,7 @@ fn pty_issues_use_document_paths() {
         return;
     };
 
-    pty.wait_frame("root issues row", 0, &["Save and exit", "validation error"]);
+    pty.wait_frame("root issues row", 0, &["↑/↓ move", "validation error"]);
     pty.send(b"\r"); // the issues row is first at the root
     let (snap, off) = pty.wait_frame("issues overlay", 0, &["at '$.port'", "at '$.items[0].tag'"]);
     // The overlay lists errors in the validator library's instance-path order
@@ -1192,7 +1191,7 @@ fn pty_issues_use_document_paths() {
 }
 
 #[test]
-fn pty_external_raw_editor() {
+fn pty_raw_editor_json() {
     let dir = mktemp();
     let schema = dir.path().join("mini.schema.json");
     let cfg = dir.path().join("o.json");
@@ -1205,8 +1204,8 @@ fn pty_external_raw_editor() {
     write_file(
         &editor,
         "#!/bin/sh\n\
-         grep -q '\"name\": \"z\"' \"$1\" || exit 3\n\
-         printf '%s\\n' '{\"name\":\"from-editor\"}' > \"$1\"\n",
+         grep -q '\"z\"' \"$1\" || exit 3\n\
+         printf '%s\\n' '\"from-editor\"' > \"$1\"\n",
     );
     set_executable(&editor);
 
@@ -1222,19 +1221,18 @@ fn pty_external_raw_editor() {
         return;
     };
 
-    pty.wait_frame("root menu", 0, &["Save and exit"]);
-    pty.send(b"G\r"); // jump to the last row: <Edit raw JSON>
-    let (_, off) = pty.wait_frame("editor applied", 0, &["Raw JSON edited"]);
+    pty.wait_frame("root menu", 0, &["Name", "↑/↓ move"]);
+    pty.send(b"E"); // external raw edit of the focused Name value
+    let (_, off) = pty.wait_frame("editor applied", 0, &["Value edited"]);
     pty.send(b"\x13"); // ctrl+s save
-    let (_, off2) = pty.wait_frame("saved", off, &["Write to "]);
+    pty.wait_frame("saved", off, &["Write to "]);
     pty.send(b"\x03");
     pty.wait_exit(130);
-    let _ = off2;
     assert_eq!(read_json(&cfg)["name"], json!("from-editor"));
 }
 
 #[test]
-fn pty_external_raw_yaml_editor() {
+fn pty_raw_editor_yaml() {
     let dir = mktemp();
     let schema = dir.path().join("mini.schema.json");
     let cfg = dir.path().join("o.yaml");
@@ -1248,9 +1246,8 @@ fn pty_external_raw_yaml_editor() {
         &editor,
         "#!/bin/sh\n\
          case \"$1\" in *.yaml) ;; *) exit 5;; esac\n\
-         grep -q '^name: demo$' \"$1\" || exit 3\n\
-         grep -q '\"name\"' \"$1\" && exit 4\n\
-         printf '# edited comment\\nname: edited\\n' > \"$1\"\n",
+         grep -q '^demo$' \"$1\" || exit 3\n\
+         printf 'edited\\n' > \"$1\"\n",
     );
     set_executable(&editor);
 
@@ -1266,21 +1263,16 @@ fn pty_external_raw_yaml_editor() {
         return;
     };
 
-    pty.wait_frame("root menu", 0, &["Save and exit", "Edit raw YAML"]);
-    pty.send(b"G\r"); // jump to the last row: <Edit raw YAML>
-    let (_, off) = pty.wait_frame("YAML editor applied", 0, &["Raw YAML edited"]);
+    pty.wait_frame("root menu", 0, &["Name", "↑/↓ move"]);
+    pty.send(b"E");
+    let (_, off) = pty.wait_frame("YAML editor applied", 0, &["Value edited"]);
     pty.send(b"\x13"); // ctrl+s save
     pty.wait_frame("saved", off, &["Write to "]);
     pty.send(b"\x03");
     pty.wait_exit(130);
 
     let text = read_text(&cfg);
-    assert!(
-        text.contains("# edited comment")
-            && text.contains("name: edited")
-            && !text.contains(r#""name""#),
-        "saved config did not keep the raw YAML (and its comment):\n{text}"
-    );
+    assert!(text.ends_with("name: edited\n"), "saved YAML:\n{text}");
 }
 
 #[test]
@@ -1303,7 +1295,7 @@ fn pty_issues_search_filters() {
         return;
     };
 
-    pty.wait_frame("root issues row", 0, &["Save and exit", "validation error"]);
+    pty.wait_frame("root issues row", 0, &["↑/↓ move", "validation error"]);
     pty.send(b"\r"); // the issues row is first at the root
     let (_, mut off) = pty.wait_frame("issues overlay", 0, &["at '$.port'", "at '$.items[0].tag'"]);
     pty.send(b"/");
@@ -1335,7 +1327,7 @@ fn pty_enum_array_search_toggles() {
         return;
     };
 
-    let (_, mut off) = pty.wait_frame("root menu", 0, &["Save and exit", "Levels"]);
+    let (_, mut off) = pty.wait_frame("root menu", 0, &["↑/↓ move", "Levels"]);
     pty.send(b"\r"); // Levels is the only field row
     (_, off) = pty.wait_frame("enum array menu", off, &["alpha", "beta", "gamma"]);
     pty.send(b"/");
@@ -1527,7 +1519,7 @@ fn pty_search_jump_into_array_variant() {
         return;
     };
 
-    pty.wait_frame("root menu", 0, &["Save and exit"]);
+    pty.wait_frame("root menu", 0, &["↑/↓ move"]);
     pty.send(b"/");
     pty.wait_frame("search", 0, &["search:"]);
     pty.send(b"$.dns.rules[1].server");
@@ -1567,7 +1559,7 @@ fn pty_search_enum_array_element_jump() {
         return;
     };
 
-    pty.wait_frame("root menu", 0, &["Save and exit"]);
+    pty.wait_frame("root menu", 0, &["↑/↓ move"]);
     pty.send(b"/");
     let (_, off) = pty.wait_frame("search", 0, &["search: "]);
     pty.send(b"info");
@@ -1605,7 +1597,7 @@ fn pty_search_schemaless_array_elements_jump() {
         return;
     };
 
-    pty.wait_frame("root menu", 0, &["Save and exit"]);
+    pty.wait_frame("root menu", 0, &["↑/↓ move"]);
     pty.send(b"/");
     let (_, mut off) = pty.wait_frame("search", 0, &["search: "]);
     pty.send(b"alpha");
@@ -1659,7 +1651,7 @@ fn pty_search_array_variant_elements_jump() {
         return;
     };
 
-    pty.wait_frame("root menu", 0, &["Save and exit"]);
+    pty.wait_frame("root menu", 0, &["↑/↓ move"]);
     pty.send(b"/");
     let (_, off) = pty.wait_frame("search", 0, &["search: "]);
     pty.send(b"ruleset-proxy-ai");
@@ -1701,7 +1693,7 @@ fn pty_search_jump_schema_less() {
         return;
     };
 
-    pty.wait_frame("root menu", 0, &["Save and exit", "no schema found"]);
+    pty.wait_frame("root menu", 0, &["↑/↓ move", "no schema found"]);
     pty.send(b"/");
     let (_, mut off) = pty.wait_frame("search", 0, &["search: "]);
     pty.send(b"port");
@@ -1753,7 +1745,7 @@ fn pty_quit_save_prompt() {
 
     // unchanged: esc quits at once, nothing written, no prompt
     let Some(mut pty) = start(&cache) else { return };
-    let (_, off) = pty.wait_frame("root menu", 0, &["Save and exit"]);
+    let (_, off) = pty.wait_frame("root menu", 0, &["↑/↓ move"]);
     pty.send(b"\x1b");
     let (all, _) = pty.wait_frame("clean exit", off, &["No changes, nothing written"]);
     assert!(
@@ -1766,7 +1758,7 @@ fn pty_quit_save_prompt() {
 
     // changed: esc asks whether to save; y writes and exits 0
     let Some(mut pty) = start(&cache) else { return };
-    let (_, off) = pty.wait_frame("root menu", 0, &["Save and exit"]);
+    let (_, off) = pty.wait_frame("root menu", 0, &["↑/↓ move"]);
     pty.send(b"\rhello\r");
     let (_, off) = pty.wait_frame("edited name", off, &["●"]);
     pty.send(b"\x1b");
@@ -1779,7 +1771,7 @@ fn pty_quit_save_prompt() {
 
     // changed: esc then n discards the edit and exits 130
     let Some(mut pty) = start(&cache) else { return };
-    let (_, off) = pty.wait_frame("root menu", 0, &["Save and exit"]);
+    let (_, off) = pty.wait_frame("root menu", 0, &["↑/↓ move"]);
     pty.send(b"\r\x15bye\r");
     let (_, off) = pty.wait_frame("edited name", off, &["●"]);
     pty.send(b"\x1b");
@@ -1810,7 +1802,7 @@ fn pty_save() {
         return;
     };
 
-    pty.wait_frame("root menu", 0, &["Save and exit"]);
+    pty.wait_frame("root menu", 0, &["↑/↓ move"]);
     // type the name on the field row, enter to confirm, ctrl+s to save
     pty.pause(Duration::from_millis(300));
     pty.send(b"\rhello\r"); // enter edit on Name, type, confirm
@@ -1845,7 +1837,7 @@ fn pty_menu_flow() {
         return;
     };
 
-    pty.wait_frame("root menu", 0, &["Save and exit"]);
+    pty.wait_frame("root menu", 0, &["↑/↓ move"]);
     pty.send(b"\x1b[B\r"); // ↓ → Server, enter → drill
     pty.pause(Duration::from_millis(300));
     pty.send(b"\r9050\r"); // enter edit on Port, type, confirm
@@ -1887,12 +1879,12 @@ fn pty_move_item() {
         return;
     };
 
-    pty.wait_frame("root menu", 0, &["Save and exit"]);
+    pty.wait_frame("root menu", 0, &["↑/↓ move"]);
     pty.send(b"\r"); // enter → Tags items
     // The breadcrumb of the drilled menu is the evidence: the root frame also
     // mentions "alpha" in the Tags row summary, so wait for both.
     let (_frame, off) = pty.wait_frame("items menu", 0, &["$.tags", "alpha"]);
-    pty.send(b"\x1b[BJ"); // ↓ to item 0 (alpha), J moves it down
+    pty.send(b"J"); // cursor starts on item 0 (alpha), J moves it down
     // the swap is visible once the rows render beta above alpha
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     let mut moved = false;
@@ -1939,7 +1931,7 @@ fn pty_search() {
         return;
     };
 
-    pty.wait_frame("root menu", 0, &["Save and exit"]);
+    pty.wait_frame("root menu", 0, &["↑/↓ move"]);
     pty.send(b"/"); // open search (single key: chunked runes won't match)
     let (_, off) = pty.wait_frame("search view", 0, &["search:", "alt+x regex"]);
     pty.send(b"8080"); // root search: value hit on the row that owns it
@@ -2013,7 +2005,7 @@ fn pty_search_replace() {
     };
 
     let warnings = format!("{} 2 warnings", WARN);
-    pty.wait_frame("root menu", 0, &["Save and exit", &warnings]);
+    pty.wait_frame("root menu", 0, &["↑/↓ move", &warnings]);
     pty.send(b"r"); // open search-and-replace directly
     let (_, off) = pty.wait_frame("replace view", 0, &["replace:", "case-insensitive"]);
     pty.send(b"localhost");
@@ -2061,7 +2053,7 @@ fn pty_enum_picker_search() {
         return;
     };
 
-    let (_, mut off) = pty.wait_frame("root menu", 0, &["Save and exit", "Name"]);
+    let (_, mut off) = pty.wait_frame("root menu", 0, &["↑/↓ move", "Name"]);
     pty.pause(Duration::from_millis(300)); // let the TUI finish raw-mode setup
     // the unknown-key status row sits above Name: ↓ Name, ↓ Mode, enter
     pty.send(b"\x1b[B\x1b[B\r");
@@ -2165,7 +2157,7 @@ fn pty_yaml_alias_edit_keeps_reference() {
         return;
     };
 
-    pty.wait_frame("root menu", 0, &["Save and exit"]);
+    pty.wait_frame("root menu", 0, &["↑/↓ move"]);
     pty.pause(Duration::from_millis(300));
     pty.send(b"\x1b[B\r"); // ↓ → Copy, enter → drill into the alias
     pty.pause(Duration::from_millis(300));
@@ -2204,7 +2196,7 @@ fn pty_yaml_alias_expand() {
         return;
     };
 
-    pty.wait_frame("root menu", 0, &["Save and exit"]);
+    pty.wait_frame("root menu", 0, &["↑/↓ move"]);
     pty.pause(Duration::from_millis(300));
     pty.send(b"\x1b[B\r"); // ↓ → Copy, enter → drill (Expand is row 0)
     pty.pause(Duration::from_millis(300));
@@ -2246,7 +2238,7 @@ fn pty_yaml_anchor_rename() {
         return;
     };
 
-    pty.wait_frame("root menu", 0, &["Save and exit"]);
+    pty.wait_frame("root menu", 0, &["↑/↓ move"]);
     pty.pause(Duration::from_millis(300));
     pty.send(b"&\x7fy\r"); // & on the base row: rename x → y
     pty.pause(Duration::from_millis(300));
@@ -2288,7 +2280,7 @@ fn pty_merge_keys() {
     };
 
     // drive: jobs → build2's job menu; cursor onto env; expand it; save
-    pty.wait_frame("root menu", 0, &["Save and exit"]);
+    pty.wait_frame("root menu", 0, &["↑/↓ move"]);
     pty.pause(Duration::from_millis(400));
     pty.send(b"\r"); // enter jobs
     pty.pause(Duration::from_millis(300));
@@ -2300,7 +2292,7 @@ fn pty_merge_keys() {
     pty.pause(Duration::from_millis(300));
     pty.send(b"\x1b[A"); // ↑ back onto env
     pty.pause(Duration::from_millis(300));
-    pty.send(b"E"); // expand env into build2
+    pty.send(b"\x05"); // ctrl+e: expand env into build2
     pty.pause(Duration::from_millis(300));
     pty.send(b"\x13"); // ctrl+s
 
@@ -2367,7 +2359,7 @@ fn pty_multi_file_session() {
         return;
     };
 
-    let (_, off) = pty.wait_frame("first file root", 0, &["a.json [1/2]", "Save and exit"]);
+    let (_, off) = pty.wait_frame("first file root", 0, &["a.json [1/2]", "↑/↓ move"]);
     pty.send(b"s"); // file switcher
     let (_, off) = pty.wait_frame("file picker", off, &["Files (2)", "b.json"]);
     pty.send(b"j\r"); // switch to b.json

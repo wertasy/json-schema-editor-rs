@@ -329,9 +329,8 @@ impl App {
     }
 
     /// saveDirtyFilesAndExit writes every dirty file (active first) and ends
-    /// the session. The active file always writes — the "Save and exit" row
-    /// keeps its contract of writing through even a clean document
-    /// (rewritten identically); inactive tabs write only when dirty.
+    /// the session. The active file always writes (rewritten identically);
+    /// inactive tabs write only when dirty.
     /// Validation errors open the errs overlay with exit armed (y
     /// --force-saves and quits; n/esc cancels the exit); a failed write
     /// leaves the session open with the notice.
