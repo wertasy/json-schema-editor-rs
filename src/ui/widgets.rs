@@ -439,6 +439,14 @@ impl TextInput {
             .map(|c| self.cursor + c.len_utf8())
     }
 
+    /// save_kill stores text removed by a kill key for ctrl+y; an empty kill
+    /// keeps the previous buffer (readline keeps the last non-empty kill).
+    fn save_kill(&mut self, killed: String) {
+        if !killed.is_empty() {
+            self.kill = killed;
+        }
+    }
+
     /// deleteWordBackward: bubbles ctrl+w — swallow the delimiter run, then
     /// the word run before the cursor.
     fn delete_word_backward(&mut self) {
@@ -464,10 +472,7 @@ impl TextInput {
                 }
             }
         }
-        let killed = self.value[cut..self.cursor].to_string();
-        if !killed.is_empty() {
-            self.kill = killed;
-        }
+        self.save_kill(self.value[cut..self.cursor].to_string());
         self.value.replace_range(cut..self.cursor, "");
         self.cursor = cut;
     }
@@ -543,17 +548,11 @@ impl TextInput {
             Key::Home | Key::CtrlA => self.cursor = 0,
             Key::End | Key::CtrlE => self.cursor_end(),
             Key::CtrlK => {
-                let killed = self.value[self.cursor..].to_string();
-                if !killed.is_empty() {
-                    self.kill = killed;
-                }
+                self.save_kill(self.value[self.cursor..].to_string());
                 self.value.truncate(self.cursor);
             }
             Key::CtrlU => {
-                let killed = self.value[..self.cursor].to_string();
-                if !killed.is_empty() {
-                    self.kill = killed;
-                }
+                self.save_kill(self.value[..self.cursor].to_string());
                 self.value.replace_range(0..self.cursor, "");
                 self.cursor = 0;
             }
@@ -709,6 +708,14 @@ impl TextArea {
             .map(|c| self.col + c.len_utf8())
     }
 
+    /// save_kill stores text removed by a kill key for ctrl+y; an empty kill
+    /// keeps the previous buffer (readline keeps the last non-empty kill).
+    fn save_kill(&mut self, killed: String) {
+        if !killed.is_empty() {
+            self.kill = killed;
+        }
+    }
+
     /// DeleteWordBackward on the current line (bubbles ctrl+w is line-scoped).
     fn delete_word_backward(&mut self) {
         let line = &self.lines[self.row];
@@ -738,10 +745,7 @@ impl TextArea {
                 }
             }
         }
-        let killed = self.lines[self.row][cut..self.col].to_string();
-        if !killed.is_empty() {
-            self.kill = killed;
-        }
+        self.save_kill(self.lines[self.row][cut..self.col].to_string());
         self.lines[self.row].replace_range(cut..self.col, "");
         self.col = cut;
     }
@@ -841,17 +845,11 @@ impl TextArea {
             Key::Home | Key::CtrlA => self.col = 0,
             Key::End | Key::CtrlE => self.col = self.line_len(),
             Key::CtrlK => {
-                let killed = self.lines[self.row][self.col..].to_string();
-                if !killed.is_empty() {
-                    self.kill = killed;
-                }
+                self.save_kill(self.lines[self.row][self.col..].to_string());
                 self.lines[self.row].truncate(self.col);
             }
             Key::CtrlU => {
-                let killed = self.lines[self.row][..self.col].to_string();
-                if !killed.is_empty() {
-                    self.kill = killed;
-                }
+                self.save_kill(self.lines[self.row][..self.col].to_string());
                 self.lines[self.row].replace_range(0..self.col, "");
                 self.col = 0;
             }

@@ -5873,6 +5873,9 @@ impl App {
             }
             w.sugs.push(format!("{}{}", dir, name));
         }
+        // read_dir order is filesystem-dependent; tab cycling and the candidate
+        // window need a stable order (shell.rs sorts its candidates the same way).
+        w.sugs.sort_by_key(|s| s.to_lowercase());
     }
 
     /// keyAnchor drives the & / * name input (Go keyAnchor).

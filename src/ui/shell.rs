@@ -92,8 +92,9 @@ fn completion_token(line: &str) -> (usize, String, bool) {
     }
     let cmd_part = &line[cmd_start..];
     let word_rel = cmd_part
-        .rfind(char::is_whitespace)
-        .map(|i| i + 1)
+        .char_indices()
+        .rfind(|(_, c)| c.is_whitespace())
+        .map(|(i, c)| i + c.len_utf8())
         .unwrap_or(0);
     let token_start = cmd_start + word_rel;
     let token = line[token_start..].to_string();
@@ -137,7 +138,7 @@ fn is_executable_file(path: &Path) -> bool {
 }
 
 fn path_candidates(token: &str) -> Vec<String> {
-    let sep = token.rfind(|c| c == '/' || c == '\\');
+    let sep = token.rfind(['/', '\\']);
     let (dir_part, prefix) = match sep {
         Some(i) => (&token[..=i], &token[i + 1..]),
         None => ("", token),
@@ -147,12 +148,15 @@ fn path_candidates(token: &str) -> Vec<String> {
         return Vec::new();
     };
     let mut out = BTreeSet::new();
+    let lower = prefix.to_lowercase();
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
         if name.starts_with('.') && !prefix.starts_with('.') {
             continue;
         }
-        if !name.starts_with(prefix) {
+        // Case-insensitive like the write-path completion (shell `!` words):
+        // typing `al` should offer `Alpha.txt` too.
+        if !name.to_lowercase().starts_with(&lower) {
             continue;
         }
         let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false)
@@ -368,7 +372,7 @@ pub fn resolve_target(
                 }
                 None if f.kind == Kind::Array
                     && f.items
-                        .map_or(true, |i| schema.nodes[i as usize].kind == Kind::Raw) =>
+                        .is_none_or(|i| schema.nodes[i as usize].kind == Kind::Raw) =>
                 {
                     doc.get(path).and_then(|v| runtime_target(doc, v))
                 }
@@ -421,7 +425,7 @@ pub fn resolve_array_target(
                 || ((f.kind == Kind::Raw
                     || (f.kind == Kind::Array
                         && f.items
-                            .map_or(true, |i| schema.nodes[i as usize].kind == Kind::Raw)))
+                            .is_none_or(|i| schema.nodes[i as usize].kind == Kind::Raw)))
                     && doc
                         .get(path)
                         .and_then(|v| runtime_target(doc, v))
@@ -766,5 +770,28 @@ mod tests {
                 format!("r cat {base}/alpine"),
             ]
         );
+    }
+
+    #[test]
+    fn completion_token_handles_multibyte_whitespace() {
+        // U+00A0 and U+3000 are multi-byte whitespace: advancing one byte
+        // past their start would slice inside the char and panic.
+        for space in ['\u{00A0}', '\u{3000}'] {
+            let line = format!("r cat{space}/tmp/x");
+            let (token_start, token, command_word) = completion_token(&line);
+            assert_eq!(token, "/tmp/x");
+            assert!(!command_word);
+            assert_eq!(token_start, line.find("/tmp/x").unwrap());
+        }
+    }
+
+    #[test]
+    fn path_completion_matches_case_insensitively() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Alpha.txt"), "").unwrap();
+        std::fs::write(dir.path().join("beta"), "").unwrap();
+        let base = dir.path().display().to_string();
+        let got = completion_candidates_in(&format!("r cat {base}/al"), &[]);
+        assert_eq!(got, vec![format!("r cat {base}/Alpha.txt")]);
     }
 }

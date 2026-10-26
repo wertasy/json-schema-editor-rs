@@ -26,7 +26,7 @@ use crate::doc::jsondoc::{parse_path, path_string};
 use crate::doc::{Doc, NodeId, PathSeg, Value};
 use crate::icons::{ERR, WARN};
 use crate::smodel::{FormNode, FormNodeId, Kind, Schema};
-use crate::ui::{Issue, MenuCtx, MenuKind, MenuState, Options, Row, RowKind};
+use crate::ui::{Issue, MenuCtx, MenuKind, MenuState, Row, RowKind};
 
 // --- merge hooks -----------------------------------------------------------
 
@@ -196,24 +196,11 @@ pub fn menu_leaf(schema: &Schema, fn_: FormNodeId) -> bool {
 
 // --- row construction ------------------------------------------------------
 
-/// menuRows builds the row list for the current (top) menu state.
-pub fn menu_rows(
-    schema: &mut Schema,
-    doc: &Doc,
-    opts: &Options,
-    hide_empty: bool,
-    st: &MenuState,
-    env: &mut RowsEnv,
-) -> Vec<Row> {
-    menu_rows_for(schema, doc, opts, hide_empty, st, env)
-}
-
 /// menuRowsFor builds the row list for one menu state: the top one in
-/// menu_rows, any state for cursor bookkeeping during variant flips.
+/// App::menu_rows, any state for cursor bookkeeping during variant flips.
 pub fn menu_rows_for(
     schema: &mut Schema,
     doc: &Doc,
-    _opts: &Options,
     hide_empty: bool,
     st: &MenuState,
     env: &mut RowsEnv,
@@ -3520,11 +3507,10 @@ mod tests {
     /// menuRows over a stack whose top is `states.last()`; is_root mirrors
     /// Go's `lm.stack[0] == st` check.
     fn rows_for(fx: &mut Fx, states: Vec<MenuState>, is_root: bool) -> Vec<Row> {
-        let opts = test_opts();
         let top = states.last().unwrap();
         let mut env = RowsEnv::default();
         env.is_root = is_root;
-        menu_rows_for(&mut fx.schema, &fx.doc, &opts, false, top, &mut env)
+        menu_rows_for(&mut fx.schema, &fx.doc, false, top, &mut env)
     }
 
     fn kinds(rows: &[Row]) -> Vec<RowKind> {

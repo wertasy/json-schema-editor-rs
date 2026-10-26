@@ -303,7 +303,7 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
         desc: "edit the document comment of the focused key (empty text removes it)",
     },
     HelpEntry {
-        keys: "? ",
+        keys: "?",
         desc: "open/close this help",
     },
     HelpEntry {
@@ -902,7 +902,6 @@ impl App {
         let FileState {
             schema,
             doc,
-            opts,
             menu_cache,
             issues_now,
             ..
@@ -915,7 +914,7 @@ impl App {
             merge: &lookup,
             synth: cache,
         };
-        let rows = menu_rows_for(schema, doc, opts, hide_empty, st, &mut env);
+        let rows = menu_rows_for(schema, doc, hide_empty, st, &mut env);
         cache = env.synth;
         *menu_cache = cache;
         rows
