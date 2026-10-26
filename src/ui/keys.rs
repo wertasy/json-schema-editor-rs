@@ -693,22 +693,68 @@ fn parse_paste(
     }
 }
 
+/// plain_paste_doc turns clipboard text that parsed as no structured value
+/// into a single string value. `y`/`Y` copy strings without quotes, so `P`
+/// on a string row must accept that text back in every format (JSON had no
+/// such fallback). One surrounding pair of double quotes is stripped so a
+/// hand-quoted string whose JSON spelling is invalid still lands as its text.
+fn plain_paste_doc(text: &str) -> Option<Doc> {
+    let t = text.trim_matches(['\r', '\n']);
+    if t.trim().is_empty() {
+        return None;
+    }
+    let s = if t.starts_with('"') && t.ends_with('"') && t.len() >= 2 {
+        &t[1..t.len() - 1]
+    } else {
+        t
+    };
+    let mut doc = Doc::new();
+    let n = doc.new_str(s);
+    doc.root = n;
+    Some(doc)
+}
+
+/// schema_accepts_string reports whether a schema node can hold an arbitrary
+/// string: a text scalar (typed or unconstrained), an enum, an unconstrained
+/// raw/any-JSON field, or a oneOf group with such a leaf. `seen` breaks
+/// recursive schema references.
+fn schema_accepts_string(
+    schema: &Schema,
+    node: FormNodeId,
+    seen: &mut HashSet<FormNodeId>,
+) -> bool {
+    if !seen.insert(node) {
+        return false;
+    }
+    let n = &schema.nodes[node as usize];
+    match n.kind {
+        Kind::Scalar => n.json_type.is_empty() || n.json_type == "string",
+        Kind::Enum => true,
+        // A raw field takes any JSON value; null-only raw does not.
+        Kind::Raw => !n.null_only,
+        Kind::OneOf => n
+            .variants
+            .iter()
+            .any(|&v| schema_accepts_string(schema, v, seen)),
+        _ => false,
+    }
+}
+
 /// pasteValueRowOK reports whether the cursor row is a value slot a pasted
 /// single value can replace.
-fn paste_value_row_ok(schema: &Schema, r: &Row) -> bool {
+fn paste_value_row_ok(r: &Row) -> bool {
     match r.kind {
-        RowKind::Field | RowKind::Unknown => !r.path.is_empty(),
+        // The root scalar document is a Field row with an empty path.
+        RowKind::Field => true,
+        RowKind::Unknown => !r.path.is_empty(),
+        // A oneOf picker row still points at the field's value (or the root
+        // document): P replaces the value and the variant is re-inferred.
+        RowKind::Variant => true,
         RowKind::Drill => {
-            if r.path.is_empty() {
-                return false;
-            }
-            if matches!(r.path.last(), Some(PathSeg::Idx(_))) {
-                return true; // a scalar or object array-item row
-            }
-            match r.fn_ {
-                Some(f) => schema.nodes[f as usize].kind != Kind::OneOf,
-                None => false,
-            }
+            // A oneOf/object/array key row is still one value slot: P with a
+            // single value replaces that whole value (the variant is inferred
+            // again from the new value on the next refresh).
+            !r.path.is_empty() && r.fn_.is_some()
         }
         _ => false,
     }
@@ -2878,11 +2924,124 @@ impl App {
         }
     }
 
-    fn read_clipboard_text(&self) -> Result<String, String> {
+    pub(crate) fn read_clipboard_text(&self) -> Result<String, String> {
         match &self.opts().paste {
             Some(r) => r(),
             None => read_clipboard(),
         }
+    }
+
+    /// pasteIntoFocusedInput inserts paste text into the text input that owns
+    /// the keyboard (ctrl+v and terminal bracketed paste). Reports whether an
+    /// input consumed it; list-mode keys are left alone.
+    pub(crate) fn paste_into_focused_input(&mut self, text: &str) -> bool {
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        // The file switcher and the oneOf/enum-array search live outside
+        // `overlay`; their inputs follow the same reset-on-change rule as
+        // typed characters.
+        if let Some(p) = &mut self.file_pick {
+            if p.searching {
+                let before = p.search_ti.value().to_string();
+                p.search_ti.insert_str(&text);
+                if p.search_ti.value() != before {
+                    p.cursor = 0;
+                }
+                return true;
+            }
+        }
+        if let Some(st) = self.top_mut() {
+            if st.searching && matches!(st.kind, MenuKind::OneOf | MenuKind::EnumArray) {
+                let before = st.search_ti.value().to_string();
+                st.search_ti.insert_str(&text);
+                if st.search_ti.value() != before {
+                    st.cursor = 0;
+                    st.offset = 0;
+                }
+                return true;
+            }
+        }
+        let Some(ov) = self.overlay.take() else {
+            return false;
+        };
+        match ov {
+            Overlay::Edit(mut e) => {
+                e.ti.insert_str(&text);
+                self.overlay = Some(Overlay::Edit(e));
+                self.refresh_edit_suggestions();
+            }
+            Overlay::Text(mut s) => {
+                s.ta.insert_paste(&text);
+                self.overlay = Some(Overlay::Text(s));
+            }
+            Overlay::CommentEdit(mut s) => {
+                s.ta.insert_paste(&text);
+                self.overlay = Some(Overlay::CommentEdit(s));
+            }
+            Overlay::Add(mut s) => {
+                s.ti.insert_str(&text);
+                self.overlay = Some(Overlay::Add(s));
+            }
+            Overlay::Write(mut s) => {
+                s.ti.insert_str(&text);
+                self.overlay = Some(Overlay::Write(s));
+                self.refresh_write_suggestions();
+            }
+            Overlay::Anc(mut s) => {
+                s.ti.insert_str(&text);
+                self.overlay = Some(Overlay::Anc(s));
+            }
+            Overlay::Mrg(mut s) => {
+                s.ti.insert_str(&text);
+                s.sug = -1;
+                self.overlay = Some(Overlay::Mrg(s));
+            }
+            Overlay::Search(mut s) => {
+                if s.replace && s.replace_focused {
+                    s.rti.insert_str(&text);
+                } else {
+                    s.ti.insert_str(&text);
+                }
+                self.refilter(&mut s);
+                self.overlay = Some(Overlay::Search(s));
+            }
+            Overlay::Sel(mut s) if s.searching => {
+                let before = s.search_ti.value().to_string();
+                s.search_ti.insert_str(&text);
+                if s.search_ti.value() != before {
+                    s.cursor = 0;
+                }
+                self.overlay = Some(Overlay::Sel(s));
+            }
+            Overlay::Issues(mut s) if s.searching => {
+                let before = s.search_ti.value().to_string();
+                s.search_ti.insert_str(&text);
+                if s.search_ti.value() != before {
+                    s.cursor = 0;
+                }
+                self.overlay = Some(Overlay::Issues(s));
+            }
+            Overlay::Errs(mut s) if s.searching => {
+                let before = s.search_ti.value().to_string();
+                s.search_ti.insert_str(&text);
+                if s.search_ti.value() != before {
+                    s.cursor = 0;
+                }
+                self.overlay = Some(Overlay::Errs(s));
+            }
+            Overlay::RefPick(mut s) if s.searching => {
+                let before = s.search_ti.value().to_string();
+                s.search_ti.insert_str(&text);
+                if s.search_ti.value() != before {
+                    s.cursor = 0;
+                }
+                self.overlay = Some(Overlay::RefPick(s));
+            }
+            other => {
+                self.overlay = Some(other);
+                return false;
+            }
+        }
+        true
     }
 
     /// rowCopyText builds the y/X clipboard text for the row (Go
@@ -3102,6 +3261,62 @@ impl App {
 
     // --- paste -------------------------------------------------------------
 
+    /// pastePlainStringDoc accepts unstructured clipboard text as a string
+    /// when P targets a string value (or a selection containing one). Other
+    /// targets keep the parse error: this is not a general plain-text paste.
+    fn paste_plain_string_doc(&mut self, text: &str, r: &Row, under_cursor: bool) -> Option<Doc> {
+        if !under_cursor || !self.paste_has_plain_string_target(r) {
+            return None;
+        }
+        plain_paste_doc(text)
+    }
+
+    /// pasteHasPlainStringTarget reports whether the cursor row (or one of
+    /// the marked rows) is a string value slot.
+    fn paste_has_plain_string_target(&mut self, r: &Row) -> bool {
+        if self.top().map(|st| !st.sel.is_empty()).unwrap_or(false) {
+            let sel = self.top().map(|st| st.sel.clone()).unwrap_or_default();
+            let rows = self.menu_rows();
+            rows.iter()
+                .any(|row| sel.contains(&sel_key(&row.path)) && self.paste_plain_string_target(row))
+        } else {
+            self.paste_plain_string_target(r)
+        }
+    }
+
+    /// pastePlainStringTarget reports whether a row's value can take plain
+    /// clipboard text as a string: the current runtime value is a string, or
+    /// the row's schema admits an arbitrary string (text scalar, enum, raw
+    /// any-JSON, oneOf with such a leaf). Schema-less keys have no type, so
+    /// only a string (or missing) value counts.
+    fn paste_plain_string_target(&self, r: &Row) -> bool {
+        if !paste_value_row_ok(r) {
+            return false;
+        }
+        if let Some(n) = self.doc().get(&r.path) {
+            if matches!(self.doc().value(n), Value::Str(_)) {
+                return true;
+            }
+        }
+        match r.fn_ {
+            Some(f) => schema_accepts_string(&self.fs().schema, f, &mut HashSet::new()),
+            // A oneOf picker row has no node of its own; the group is the
+            // menu's schema node.
+            None if r.kind == RowKind::Variant => self
+                .top()
+                .filter(|st| st.kind == MenuKind::OneOf)
+                .is_some_and(|st| {
+                    schema_accepts_string(&self.fs().schema, st.node, &mut HashSet::new())
+                }),
+            // A schema-less row has no declared type: only a string (handled
+            // above) or a missing value is a safe plain-text target.
+            None => matches!(
+                self.doc().get(&r.path).map(|n| self.doc().value(n)),
+                None | Some(Value::Null)
+            ),
+        }
+    }
+
     /// pasteClipboard implements p/P smart paste (Go pasteClipboard).
     fn paste_clipboard(&mut self, r: &Row, under_cursor: bool) {
         let text = match self.read_clipboard_text() {
@@ -3114,10 +3329,13 @@ impl App {
         let mode = self.opts().raw.raw_label();
         let (members, items, doc) = match parse_paste(&text, &mode) {
             Ok(x) => x,
-            Err(e) => {
-                self.notice = e;
-                return;
-            }
+            Err(e) => match self.paste_plain_string_doc(&text, r, under_cursor) {
+                Some(doc) => (None, None, Some(doc)),
+                None => {
+                    self.notice = e;
+                    return;
+                }
+            },
         };
         // a single value replaces values
         if members.is_none() && items.is_none() {
@@ -3131,18 +3349,17 @@ impl App {
                 let mut targets: Vec<Row> = Vec::new();
                 if has_sel {
                     let rows = self.menu_rows();
-                    let schema = &self.fs().schema;
                     for sel in rows {
                         if self
                             .top()
                             .map(|st| st.sel.contains(&sel_key(&sel.path)))
                             .unwrap_or(false)
-                            && paste_value_row_ok(schema, &sel)
+                            && paste_value_row_ok(&sel)
                         {
                             targets.push(sel);
                         }
                     }
-                } else if paste_value_row_ok(&self.fs().schema, r) {
+                } else if paste_value_row_ok(r) {
                     targets.push(r.clone());
                 }
                 if !targets.is_empty() {
@@ -3276,9 +3493,21 @@ impl App {
                         }
                         return (r.path.clone(), true, String::new());
                     }
+                    // A oneOf row's container is whatever the current
+                    // variant holds: merge keys/items into that value.
+                    Kind::OneOf => {
+                        if let Some(n) = self.doc().get(&r.path) {
+                            match self.doc().value(n) {
+                                Value::Object(_) => return (r.path.clone(), false, String::new()),
+                                Value::Array(_) => return (r.path.clone(), true, String::new()),
+                                _ => {}
+                            }
+                        }
+                    }
                     _ => {}
                 }
-                // oneOf drill rows fall through to the menu container
+                // a scalar/unset oneOf drill row falls through to the menu
+                // container
             }
         }
         // schema-less keys: only a container value is a paste target

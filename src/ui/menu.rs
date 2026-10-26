@@ -306,6 +306,10 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
         keys: "<",
         desc: "merge keys: merge anchors (space/comma separated; tab completes; empty clears)",
     },
+    HelpEntry {
+        keys: "ctrl+v",
+        desc: "paste the clipboard into the focused text input (terminal ctrl+shift+v / bracketed paste works too)",
+    },
 ];
 
 // --- key messages ------------------------------------------------------------
@@ -1228,6 +1232,20 @@ impl App {
         self.notice.clear();
         // session info notices live until the first key press
         self.fs_mut().startup.clear();
+        // ctrl+v (and terminals that report ctrl+shift+v as ctrl+v) reads the
+        // clipboard and flows through the same paste path as bracketed paste.
+        // Outside a text input it stays an unbound list key.
+        let msg = if msg == Msg::Ctrl('v') && self.typing() {
+            match self.read_clipboard_text() {
+                Ok(text) => Msg::Paste(text),
+                Err(e) => {
+                    self.notice = format!("paste failed: {e}");
+                    return;
+                }
+            }
+        } else {
+            msg
+        };
         if self.macro_control(&msg) {
             return;
         }
@@ -1255,6 +1273,14 @@ impl App {
         // folds it first, then runs normally.
         if self.desc_expanded && msg.key_str() != "c" {
             self.desc_expanded = false;
+        }
+        // Bracketed paste (terminal paste, ctrl+shift+v) only edits focused
+        // text inputs; list mode keeps ignoring it.
+        if let Msg::Paste(text) = &msg {
+            if self.typing() {
+                self.paste_into_focused_input(text);
+            }
+            return;
         }
         if self.list_mode() && self.apply_history_key(&msg) {
             self.cmd_buf.clear(); // a history key breaks any pending g combo

@@ -3664,6 +3664,320 @@ fn paste_value_onto_cursor_row() {
 }
 
 #[test]
+fn paste_plain_string_onto_string_row() {
+    // y/Y copy a string without quotes; P must accept that text back in a
+    // JSON document (it used to be a parse error everywhere but YAML/TOML).
+    let mut m = paste_app(test_doc(), "hello world");
+    press(&mut m, &["P"]);
+    assert_eq!(m.notice, "pasted value into $.name");
+    assert_eq!(str_at(&m.fs().doc, &["name"]), "hello world");
+    press(&mut m, &["u"]);
+    assert!(nodes_equal_doc(&test_doc(), &m.fs().doc));
+
+    // a quoted string whose JSON spelling is invalid keeps its text
+    let mut m = paste_app(test_doc(), r#""C:\Users""#);
+    press(&mut m, &["P"]);
+    assert_eq!(str_at(&m.fs().doc, &["name"]), r#"C:\Users"#);
+
+    // a selection with string values takes the plain text too
+    let mut m = paste_app(test_doc(), "tag");
+    press(&mut m, &["m", "down", "m", "P"]);
+    assert_eq!(m.notice, "pasted value into 2 keys");
+    assert_eq!(str_at(&m.fs().doc, &["name"]), "tag");
+    assert_eq!(str_at(&m.fs().doc, &["mode"]), "tag");
+}
+
+#[test]
+fn paste_plain_string_needs_string_target() {
+    // P on a non-string value keeps the old parse error instead of turning
+    // arbitrary text into a value.
+    let mut m = paste_app(test_doc(), "hello");
+    press(&mut m, &["down", "down", "enter", "P"]); // server/port row
+    assert_eq!(m.notice, "clipboard is not JSON keys or items");
+    assert!(nodes_equal_doc(&test_doc(), &m.fs().doc));
+}
+
+#[test]
+fn edit_ctrl_v_pastes_clipboard() {
+    let mut opts = test_opts();
+    opts.paste = Some(Arc::new(|| Ok("pasted".to_string())));
+    let mut m = app_with(test_schema(), test_doc(), opts);
+    press(&mut m, &["enter"]);
+    m.update(Msg::Ctrl('v'));
+    match &m.overlay {
+        Some(Overlay::Edit(e)) => assert_eq!(e.ti.value(), "webapppasted"),
+        _ => panic!("edit overlay must stay open"),
+    }
+    press(&mut m, &["enter"]);
+    assert_eq!(str_at(&m.fs().doc, &["name"]), "webapppasted");
+}
+
+#[test]
+fn bracketed_paste_fills_raw_textarea() {
+    let mut opts = test_opts();
+    opts.paste = Some(Arc::new(|| Ok("{\n  \"a\": 1\n}".to_string())));
+    let mut m = app_with(test_schema(), test_doc(), opts);
+    m.overlay = Some(Overlay::Text(TextState {
+        path: None,
+        fn_: None,
+        ta: TextArea::new(),
+        err: String::new(),
+        verbatim_str: false,
+    }));
+    m.update(Msg::Ctrl('v'));
+    match &m.overlay {
+        Some(Overlay::Text(s)) => assert_eq!(s.ta.value(), "{\n  \"a\": 1\n}"),
+        _ => panic!("text overlay must stay open"),
+    }
+    press(&mut m, &["ctrl+s"]);
+    assert_eq!(m.fs().doc.get(&path(&["a"])).is_some(), true);
+}
+
+#[test]
+fn bracketed_paste_filters_search() {
+    let mut opts = test_opts();
+    opts.paste = Some(Arc::new(|| Ok("server".to_string())));
+    let mut m = app_with(test_schema(), test_doc(), opts);
+    press(&mut m, &["/"]);
+    m.update(Msg::Paste("server".to_string()));
+    match &m.overlay {
+        Some(Overlay::Search(s)) => {
+            assert_eq!(s.ti.value(), "server");
+            assert!(s.results.iter().all(|r| !r.path.is_empty()));
+            assert!(!s.results.is_empty(), "search results for server");
+        }
+        _ => panic!("search overlay must stay open"),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RuleSetValue {
+    Missing,
+    Str(&'static str),
+    Array(&'static str),
+    Object,
+}
+
+fn oneof_rule_set_schema() -> Schema {
+    schema_build(|b| {
+        let s = b.id(scalar("rule_set", "Rule set", "string"));
+        let arr_items = b.id(scalar("", "", "string"));
+        let arr = b.id(FormNode {
+            key: "rule_set".into(),
+            title: "Rule set".into(),
+            kind: Kind::Array,
+            items: Some(arr_items),
+            ..FormNode::default()
+        });
+        let one = b.id(FormNode {
+            key: "rule_set".into(),
+            title: "Rule set".into(),
+            kind: Kind::OneOf,
+            variants: vec![s, arr],
+            ..FormNode::default()
+        });
+        let item = b.id(FormNode {
+            key: "rules".into(),
+            title: "Rule".into(),
+            kind: Kind::Object,
+            children: vec![one],
+            ..FormNode::default()
+        });
+        let rules = b.id(FormNode {
+            key: "rules".into(),
+            title: "Rules".into(),
+            kind: Kind::Array,
+            items: Some(item),
+            ..FormNode::default()
+        });
+        let dns = b.id(FormNode {
+            key: "dns".into(),
+            title: "DNS".into(),
+            kind: Kind::Object,
+            children: vec![rules],
+            ..FormNode::default()
+        });
+        b.id(FormNode {
+            key: "$".into(),
+            title: "$".into(),
+            kind: Kind::Object,
+            children: vec![dns],
+            ..FormNode::default()
+        })
+    })
+}
+
+fn oneof_rule_set_path() -> Vec<PathSeg> {
+    vec![ks("dns"), ks("rules"), PathSeg::Idx(4), ks("rule_set")]
+}
+
+fn oneof_rule_set_doc(value: RuleSetValue) -> Doc {
+    dbuild(|db| {
+        let items = (0..5)
+            .map(|i| {
+                if i != 4 {
+                    return db.obj(vec![]);
+                }
+                match value {
+                    RuleSetValue::Missing => db.obj(vec![]),
+                    RuleSetValue::Str(s) => db.obj(vec![("rule_set", db.s(s))]),
+                    RuleSetValue::Array(s) => db.obj(vec![("rule_set", db.arr(vec![db.s(s)]))]),
+                    RuleSetValue::Object => {
+                        db.obj(vec![("rule_set", db.obj(vec![("a", db.n("1"))]))])
+                    }
+                }
+            })
+            .collect();
+        db.obj(vec![("dns", db.obj(vec![("rules", db.arr(items))]))])
+    })
+}
+
+fn paste_into_rule_set(clip: &str, doc: Doc) -> App {
+    let mut opts = test_opts();
+    let t = clip.to_string();
+    opts.paste = Some(Arc::new(move || Ok(t.clone())));
+    let mut m = app_with(oneof_rule_set_schema(), doc, opts);
+    m.jump_to_row(&oneof_rule_set_path());
+    m
+}
+
+#[test]
+fn paste_scalar_onto_oneof_string_row() {
+    // sing-box style: rule_set is oneOf string / [string]. The row is a
+    // oneOf drill row, which used to be refused as a single-value target.
+    let target = oneof_rule_set_path();
+    for (clip, value) in [
+        ("this-is-a-new-string", RuleSetValue::Str("geosite-old")),
+        (
+            r#""this-is-a-new-string""#,
+            RuleSetValue::Str("geosite-old"),
+        ),
+        ("this-is-a-new-string", RuleSetValue::Missing),
+        // a string leaf is a valid target even while the current value is
+        // the array variant
+        ("this-is-a-new-string", RuleSetValue::Array("geosite-old")),
+    ] {
+        let mut m = paste_into_rule_set(clip, oneof_rule_set_doc(value));
+        press(&mut m, &["P"]);
+        assert_eq!(
+            m.notice, "pasted value into $.dns.rules[4].rule_set",
+            "clipboard {clip}"
+        );
+        assert_eq!(
+            sget(&m.fs().doc, &target),
+            "this-is-a-new-string",
+            "clipboard {clip}"
+        );
+    }
+}
+
+#[test]
+fn paste_keys_into_oneof_object_value() {
+    // P targets the oneOf row's own container (the current variant's
+    // object), not the enclosing rules[4] object.
+    let mut m = paste_into_rule_set(r#"{"b": 2}"#, oneof_rule_set_doc(RuleSetValue::Object));
+    press(&mut m, &["P"]);
+    let target = oneof_rule_set_path();
+    assert_eq!(m.notice, "pasted 1 keys into $.dns.rules[4].rule_set");
+    assert_eq!(obj_keys(&m.fs().doc, &target), vec!["a", "b"]);
+    assert_eq!(
+        obj_keys(&m.fs().doc, &[ks("dns"), ks("rules"), PathSeg::Idx(4)]),
+        vec!["rule_set"]
+    );
+}
+
+#[test]
+fn paste_items_into_oneof_array_value() {
+    let mut m = paste_into_rule_set(r#"["b"]"#, oneof_rule_set_doc(RuleSetValue::Array("a")));
+    press(&mut m, &["P"]);
+    let target = oneof_rule_set_path();
+    assert_eq!(m.notice, "pasted 1 items into $.dns.rules[4].rule_set");
+    assert_eq!(arr_strs(&m.fs().doc, &target), vec!["a", "b"]);
+    assert_eq!(
+        obj_keys(&m.fs().doc, &[ks("dns"), ks("rules"), PathSeg::Idx(4)]),
+        vec!["rule_set"]
+    );
+}
+
+#[test]
+fn paste_scalar_onto_oneof_picker_row() {
+    // P inside the variant picker still targets the field value; the
+    // string-leaf variant makes plain clipboard text valid there too.
+    let mut m = paste_into_rule_set("picked", oneof_rule_set_doc(RuleSetValue::Array("a")));
+    press(&mut m, &["t"]);
+    assert_eq!(m.top().map(|st| st.kind), Some(MenuKind::OneOf));
+    press(&mut m, &["P"]);
+    assert_eq!(m.notice, "pasted value into $.dns.rules[4].rule_set");
+    assert_eq!(sget(&m.fs().doc, &oneof_rule_set_path()), "picked");
+}
+
+#[test]
+fn paste_plain_string_into_untyped_raw_field() {
+    let schema = schema_build(|b| {
+        let raw = b.id(FormNode {
+            key: "x".into(),
+            title: "X".into(),
+            kind: Kind::Raw,
+            ..FormNode::default()
+        });
+        b.id(FormNode {
+            key: "$".into(),
+            title: "$".into(),
+            kind: Kind::Object,
+            children: vec![raw],
+            ..FormNode::default()
+        })
+    });
+    let mut opts = test_opts();
+    opts.paste = Some(Arc::new(|| Ok("plain-text".to_string())));
+    let mut m = app_with(schema, dbuild(|db| db.obj(vec![])), opts);
+    m.jump_to_row(&path(&["x"]));
+    press(&mut m, &["P"]);
+    assert_eq!(m.notice, "pasted value into $.x");
+    assert_eq!(str_at(&m.fs().doc, &["x"]), "plain-text");
+}
+
+#[test]
+fn paste_value_onto_root_scalar() {
+    for clip in ["plain-root", r#""quoted-root""#] {
+        let schema = schema_build(|b| b.id(scalar("$", "", "string")));
+        let mut opts = test_opts();
+        let t = clip.to_string();
+        opts.paste = Some(Arc::new(move || Ok(t.clone())));
+        let mut m = app_with(schema, dbuild(|db| db.s("old")), opts);
+        press(&mut m, &["P"]);
+        assert_eq!(m.notice, "pasted value into $", "clipboard {clip}");
+        assert_eq!(sget(&m.fs().doc, &[]), clip.trim_matches('"'));
+    }
+}
+
+#[test]
+fn paste_value_onto_root_oneof_picker_row() {
+    let schema = schema_build(|b| {
+        let s = b.id(scalar("$", "", "string"));
+        let arr_items = b.id(scalar("", "", "string"));
+        let arr = b.id(FormNode {
+            key: "$".into(),
+            kind: Kind::Array,
+            items: Some(arr_items),
+            ..FormNode::default()
+        });
+        b.id(FormNode {
+            key: "$".into(),
+            kind: Kind::OneOf,
+            variants: vec![s, arr],
+            ..FormNode::default()
+        })
+    });
+    let mut opts = test_opts();
+    opts.paste = Some(Arc::new(|| Ok("root-pick".to_string())));
+    let mut m = app_with(schema, dbuild(|db| db.s("old")), opts);
+    press(&mut m, &["P"]);
+    assert_eq!(m.notice, "pasted value into $");
+    assert_eq!(sget(&m.fs().doc, &[]), "root-pick");
+}
+
+#[test]
 fn batch_value_paste() {
     let mut m = paste_app(test_doc(), "123");
     press(&mut m, &["m", "down", "m"]);

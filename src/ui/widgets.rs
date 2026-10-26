@@ -647,6 +647,19 @@ impl TextArea {
         self.insert_str(&c.to_string());
     }
 
+    /// Inserts pasted text: newlines split the current line instead of
+    /// becoming literal characters in it (bracketed paste of a document must
+    /// stay multi-line). CRLF and lone CR normalize to LF.
+    pub fn insert_paste(&mut self, s: &str) {
+        let text = s.replace("\r\n", "\n").replace('\r', "\n");
+        for (i, line) in text.split('\n').enumerate() {
+            if i > 0 {
+                self.insert_newline();
+            }
+            self.insert_str(line);
+        }
+    }
+
     /// InsertNewline splits the current line at the cursor.
     pub fn insert_newline(&mut self) {
         let rest = self.lines[self.row].split_off(self.col);
