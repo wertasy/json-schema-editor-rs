@@ -1,5 +1,3 @@
-#![allow(dead_code)] // wired into the menu in later phases
-
 //! Document history for the menu TUI: the key dispatcher snapshots the
 //! document before each key and pushes the snapshot when the key changed
 //! it, so one undo step reverts exactly one key's worth of edits.
@@ -11,7 +9,6 @@
 //! is owned by the menu layer.
 
 use crate::doc::jsondoc::Doc;
-use crate::ui::{MenuState, Row};
 
 /// maxHistory caps each history stack; the oldest snapshot is dropped first.
 pub const MAX_HISTORY: usize = 100;
@@ -80,105 +77,6 @@ impl History {
     }
 }
 
-/// The overlay/inputs flags `typing` and `list_mode` need. The menu layer
-/// fills this from the active `FileState` (Go read the listModel fields
-/// directly); `Overlay`-based callers derive it from the variant.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Inputs {
-    pub edit: bool,
-    pub text: bool,
-    /// a search input has focus (document search, oneOf/enum-array picker,
-    /// enum picker, issues/errors/references/file-picker filter)
-    pub search_active: bool,
-    pub add: bool,
-    pub write: bool,
-    /// `!` shell-command input
-    pub shell: bool,
-    /// scrolling page for a bare `!` command's multi-line output
-    pub shell_out: bool,
-    pub anc: bool,
-    pub mrg: bool,
-    pub confirm: bool,
-    pub issues: bool,
-    pub errs: bool,
-    pub sel: bool,
-    /// gr reference picker
-    pub ref_pick: bool,
-    /// dedicated long-comment page
-    pub comment: bool,
-    pub help: bool,
-    pub file_pick: bool,
-    /// f/F fast move waits for a target character: u/q/@/. are characters
-    pub fast_move: bool,
-}
-
-/// typing reports whether a text input has focus (in-place editor, raw
-/// textarea, search, add-key input, anchor/merge inputs): q/@/. are ordinary
-/// characters there and history keys must not fire.
-pub fn typing(i: &Inputs) -> bool {
-    i.edit
-        || i.text
-        || i.search_active
-        || i.add
-        || i.write
-        || i.shell
-        || i.anc
-        || i.mrg
-        || i.fast_move
-}
-
-/// list_mode reports whether the plain menu key table owns the keyboard.
-pub fn list_mode(i: &Inputs) -> bool {
-    !i.confirm
-        && !i.issues
-        && !i.errs
-        && !i.sel
-        && !i.ref_pick
-        && !i.comment
-        && !i.shell_out
-        && !i.help
-        && !typing(i)
-        && !i.file_pick
-}
-
-/// repairStack drops navigation levels whose path no longer resolves in the
-/// restored document (undo can shrink an array or remove a container the
-/// user is inside) and clamps the cursor of the surviving top level to the
-/// rows `rows_for` lists for it. The root level (empty path) always stays.
-pub fn repair_stack(
-    stack: &mut Vec<MenuState>,
-    doc: &Doc,
-    rows_for: impl Fn(&MenuState) -> Vec<Row>,
-) {
-    while stack.len() > 1 {
-        let path = stack.last().expect("len > 1").path.clone();
-        if path.is_empty() {
-            break;
-        }
-        if doc.get(&path).is_some() {
-            break;
-        }
-        stack.pop();
-    }
-    // clampCursor(menuRows(m)): keep the top cursor inside its row list.
-    if let Some(top) = stack.last_mut() {
-        let max = rows_for(top).len().saturating_sub(1);
-        top.cursor = top.cursor.min(max);
-    }
-}
-
-/// applyHistoryKey handles `u` (undo) and `ctrl+r` (redo). Returns
-/// `Some(result)` when the key was a history key (whether or not it changed
-/// anything); `None` lets the caller route the key elsewhere.
-pub fn apply_history_key(h: &mut History, doc: &mut Doc, key: &str) -> Option<HistoryResult> {
-    let res = match key {
-        "u" => h.undo(doc),
-        "ctrl+r" => h.redo(doc),
-        _ => return None,
-    };
-    Some(res)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,10 +84,6 @@ mod tests {
 
     fn doc(src: &str) -> Doc {
         parse(src).expect("test json")
-    }
-
-    fn plain_rows(_st: &MenuState) -> Vec<Row> {
-        vec![Row::default(), Row::default(), Row::default()]
     }
 
     fn push(h: &mut History, src: &str) {
@@ -256,127 +150,5 @@ mod tests {
         }
         assert_eq!(d.write(), "{\n  \"n\": 5\n}\n");
         assert_eq!(h.undo(&mut d).notice, "nothing to undo");
-    }
-
-    fn st(path: &[&str], cursor: usize) -> MenuState {
-        MenuState {
-            kind: crate::ui::MenuKind::Object,
-            node: 0,
-            path: path
-                .iter()
-                .map(|k| crate::doc::PathSeg::Key((*k).into()))
-                .collect(),
-            cursor,
-            offset: 0,
-            variant_of: None,
-            one_of: None,
-            sel: Default::default(),
-            visual: false,
-            vanchor: 0,
-            search_ti: Default::default(),
-            searching: false,
-            search_cursor: 0,
-        }
-    }
-
-    fn top_path(stack: &[MenuState]) -> String {
-        crate::doc::jsondoc::path_string(&stack.last().expect("survivor").path)
-    }
-
-    #[test]
-    fn repair_stack_drops_dead_levels_and_clamps_cursor() {
-        // doc only has $.a left; stack digs into $.a.b — the dead level above
-        // $.a must go, and the $.a cursor clamps to 3 rows.
-        let d = doc(r#"{"a":{"x":1}}"#);
-        let mut stack = vec![st(&[], 0), st(&["a"], 9), st(&["a", "b"], 1)];
-        repair_stack(&mut stack, &d, plain_rows);
-        assert_eq!(stack.len(), 2);
-        assert_eq!(top_path(&stack), "$.a");
-        assert_eq!(stack.last().expect("survivor").cursor, 2);
-    }
-
-    #[test]
-    fn repair_stack_keeps_root_alive() {
-        // even a single root level with an out-of-range cursor survives:
-        // the root level (empty path) always stays, only the cursor clamps.
-        let d = doc("{}");
-        let mut stack = vec![st(&[], 42)];
-        repair_stack(&mut stack, &d, |_st| vec![Row::default()]);
-        assert_eq!(stack.len(), 1);
-        assert_eq!(stack[0].cursor, 0);
-    }
-
-    #[test]
-    fn typing_and_list_mode() {
-        let base = Inputs::default();
-        assert!(list_mode(&base));
-        assert!(!typing(&base));
-
-        let mut i = base;
-        i.search_active = true;
-        assert!(typing(&i));
-        assert!(!list_mode(&i));
-
-        for flag in ["edit", "text", "add", "write", "anc", "mrg", "fast_move"] {
-            let mut i = Inputs::default();
-            match flag {
-                "edit" => i.edit = true,
-                "text" => i.text = true,
-                "add" => i.add = true,
-                "write" => i.write = true,
-                "anc" => i.anc = true,
-                "mrg" => i.mrg = true,
-                "fast_move" => i.fast_move = true,
-                _ => unreachable!(),
-            }
-            assert!(typing(&i), "{flag} must be typing");
-            assert!(!list_mode(&i));
-        }
-
-        for flag in [
-            "confirm",
-            "issues",
-            "errs",
-            "sel",
-            "ref_pick",
-            "help",
-            "file_pick",
-        ] {
-            let mut i = Inputs::default();
-            match flag {
-                "confirm" => i.confirm = true,
-                "issues" => i.issues = true,
-                "errs" => i.errs = true,
-                "sel" => i.sel = true,
-                "ref_pick" => i.ref_pick = true,
-                "help" => i.help = true,
-                "file_pick" => i.file_pick = true,
-                _ => unreachable!(),
-            }
-            assert!(!typing(&i), "{flag} is not a text input");
-            assert!(!list_mode(&i));
-        }
-    }
-
-    #[test]
-    fn apply_history_key_dispatch() {
-        let mut h = History::default();
-        let mut d = doc("{}");
-        push(&mut h, r#"{"a":1}"#);
-        assert!(apply_history_key(&mut h, &mut d, "x").is_none());
-        assert_eq!(
-            apply_history_key(&mut h, &mut d, "u")
-                .expect("u consumed")
-                .notice,
-            "undone"
-        );
-        assert_eq!(d.write(), "{\n  \"a\": 1\n}\n");
-        assert_eq!(
-            apply_history_key(&mut h, &mut d, "ctrl+r")
-                .expect("ctrl+r consumed")
-                .notice,
-            "redone"
-        );
-        assert_eq!(d.write(), "{}\n");
     }
 }

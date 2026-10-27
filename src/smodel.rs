@@ -9,8 +9,6 @@
 //! live in one [`Doc`] arena addressed by `NodeId`. Go's pointer-identity
 //! memo map becomes a `HashMap<NodeId, FormNodeId>`.
 
-#![allow(dead_code)] // consumed by the UI layer in Phase 4
-
 use std::collections::{HashMap, HashSet};
 
 use url::Url;
@@ -41,20 +39,7 @@ pub enum Kind {
     Raw,
 }
 
-impl Kind {
-    pub fn str(self) -> &'static str {
-        match self {
-            Kind::Scalar => "scalar",
-            Kind::Enum => "enum",
-            Kind::Boolean => "boolean",
-            Kind::Object => "object",
-            Kind::Array => "array",
-            Kind::Map => "map",
-            Kind::OneOf => "oneOf",
-            Kind::Raw => "raw",
-        }
-    }
-}
+impl Kind {}
 
 /// One selectable option. `encoded` is the canonical JSON literal of the
 /// value (numbers "3", booleans "true", strings "\"a\""), so mixed type
@@ -1121,7 +1106,7 @@ impl Parser {
             let bs = bs.clone();
             for &av in &as_ {
                 for &bv in &bs {
-                    if self.encode_value(av) == self.encode_value(bv) {
+                    if self.doc.encode_value(av) == self.doc.encode_value(bv) {
                         out.push(av);
                         break;
                     }
@@ -1132,11 +1117,6 @@ impl Parser {
             value: Value::Array(out),
             ..NodeData::default()
         })
-    }
-
-    /// The canonical JSON literal of a value as a string.
-    fn encode_value(&self, id: NodeId) -> String {
-        serde_json::to_string(&self.doc.to_value(id)).unwrap_or_default()
     }
 
     fn node_num(&self, n: NodeId) -> (f64, bool) {
@@ -1498,7 +1478,7 @@ fn enum_of(doc: &Doc, n: NodeId) -> Option<Vec<EnumOpt>> {
                 vs.iter()
                     .map(|&v| EnumOpt {
                         display: display_value(doc, v),
-                        encoded: encode_value(doc, v),
+                        encoded: doc.encode_value(v),
                         val: v,
                     })
                     .collect(),
@@ -1508,7 +1488,7 @@ fn enum_of(doc: &Doc, n: NodeId) -> Option<Vec<EnumOpt>> {
     field(doc, n, "const")
         .map(|c| EnumOpt {
             display: display_value(doc, c),
-            encoded: encode_value(doc, c),
+            encoded: doc.encode_value(c),
             val: c,
         })
         .map(|o| vec![o])
@@ -1519,13 +1499,8 @@ fn display_value(doc: &Doc, v: NodeId) -> String {
         Value::Str(s) => s.clone(),
         Value::Num(lit) => lit.clone(),
         Value::Bool(b) => if *b { "true" } else { "false" }.into(),
-        _ => encode_value(doc, v),
+        _ => doc.encode_value(v),
     }
-}
-
-/// The canonical JSON literal of a value as a string.
-fn encode_value(doc: &Doc, v: NodeId) -> String {
-    serde_json::to_string(&doc.to_value(v)).unwrap_or_default()
 }
 
 fn append_warn(desc: &str, warn: &str) -> String {

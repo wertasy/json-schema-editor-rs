@@ -6,7 +6,6 @@
 //! the others.
 
 /// Err marks a validation error: U+F057 (fa-times-circle).
-#[allow(dead_code)] // used by the TUI/status line (Phases 4+7)
 pub const ERR: &str = "\u{f057}";
 
 /// Warn marks a warning: U+F071 (fa-exclamation-triangle).

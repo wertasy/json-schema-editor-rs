@@ -1,70 +1,13 @@
-#![allow(dead_code)] // wired into the menu in later phases
 //! Text-input widget layer: handwritten equivalents of the charmbracelet
 //! bubbles `textinput`/`textarea` models scoped to the operations the menu
 //! uses, plus the shared scalar-validation semantics of Go `widgets.go`
 //! (ValidateInput / ShouldOmit / omitOrSet / applyScalar) and the raw-editor
 //! codec helpers of Go `raw.go`.
 
-use crate::doc::jsondoc::{self, Doc, DocError, Member, NodeData, NodeId, PathSeg, Value};
+use crate::doc::jsondoc::{self, CopyMode, Doc, DocError, NodeId, PathSeg, Value};
 use crate::smodel::FormNode;
-use crate::ui::{NodeRef, RawCodec};
 
 // --- raw editors (Go raw.go) ----------------------------------------------------
-
-/// Raw-editor text syntax helpers: JSON by default, the file's own syntax for
-/// YAML and TOML documents. Those codecs supply their own marshal/unmarshal
-/// callbacks because only they know the live format session (comments
-/// included).
-pub trait RawExt {
-    /// rawLabel: the syntax name shown in prompts ("JSON" by default).
-    fn raw_label(&self) -> String;
-    /// rawExt: temp-file extension (".json" by default).
-    fn raw_ext(&self) -> String;
-    /// encodeRawDoc writes the whole live document.
-    fn encode_raw_doc(&self, doc: &Doc) -> Result<String, String>;
-    /// decodeRawDoc parses a whole document (AdoptDoc > UnmarshalDoc >
-    /// jsondoc::parse).
-    fn decode_raw_doc(&self, data: &str) -> Result<Doc, String>;
-    /// encodeRawValue writes one subtree.
-    fn encode_raw_value(&self, doc: &Doc, id: NodeId) -> Result<String, String>;
-    /// decodeRawValue parses one subtree (UnmarshalValue > jsondoc::parse).
-    fn decode_raw_value(&self, data: &str) -> Result<Doc, String>;
-}
-
-impl RawExt for RawCodec {
-    fn raw_label(&self) -> String {
-        if !self.label.is_empty() {
-            return self.label.to_string();
-        }
-        "JSON".to_string()
-    }
-
-    fn raw_ext(&self) -> String {
-        if !self.ext.is_empty() {
-            return self.ext.to_string();
-        }
-        ".json".to_string()
-    }
-
-    fn encode_raw_doc(&self, doc: &Doc) -> Result<String, String> {
-        (self.marshal_doc)(doc)
-    }
-
-    fn decode_raw_doc(&self, data: &str) -> Result<Doc, String> {
-        if let Some(adopt) = &self.adopt_doc {
-            return adopt(data).map(|(doc, _meta)| doc);
-        }
-        (self.unmarshal_doc)(data)
-    }
-
-    fn encode_raw_value(&self, doc: &Doc, id: NodeId) -> Result<String, String> {
-        (self.marshal_value)(NodeRef { doc, id })
-    }
-
-    fn decode_raw_value(&self, data: &str) -> Result<Doc, String> {
-        (self.unmarshal_value)(data)
-    }
-}
 
 // --- scalar validation (Go widgets.go) ------------------------------------------
 
@@ -74,19 +17,10 @@ pub fn should_omit(empty: bool, required: bool, has_default: bool) -> bool {
     empty && !required && !has_default
 }
 
-/// fieldDesc renders the field description: schema desc plus extra suffixes.
-pub fn field_desc(fn_node: &FormNode, extra: &[&str]) -> String {
-    let mut parts: Vec<&str> = Vec::with_capacity(3);
-    if !fn_node.desc.is_empty() {
-        parts.push(fn_node.desc.as_str());
-    }
-    parts.extend_from_slice(extra);
-    parts.join(" ")
-}
-
-/// numStr formats a float like Go strconv.FormatFloat(f, 'g', -1, 64).
+/// numStr formats a float the way ECMAScript `String(x)` does, matching
+/// what JS-based schema tooling shows.
 pub fn num_str(f: f64) -> String {
-    jsondoc::go_format_g(f)
+    jsondoc::number_text(f)
 }
 
 /// ValidateInput validates a raw input string against scalar constraints.
@@ -154,51 +88,6 @@ pub fn validate_input(fn_node: &FormNode, s: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// scalarText renders a current/default scalar node as input text.
-pub fn scalar_text(doc: &Doc, id: Option<NodeId>) -> String {
-    let id = match id {
-        Some(id) => id,
-        None => return String::new(),
-    };
-    match doc.value(id) {
-        Value::Str(s) => s.clone(),
-        Value::Num(lit) => lit.clone(),
-        Value::Bool(true) => "true".to_string(),
-        Value::Bool(false) => "false".to_string(),
-        _ => String::new(),
-    }
-}
-
-/// copyInto deep-copies a node from `src` (the schema document enum/default
-/// values live in) into `doc`, returning the new id. Go hands the schema's
-/// `*jsondoc.Node` to doc.Set directly; the arena model needs an explicit
-/// copy. Anchors and merge refs ride along.
-fn copy_into(doc: &mut Doc, src: &Doc, id: NodeId) -> NodeId {
-    let data = src.node(id);
-    let value = match &data.value {
-        Value::Object(members) => Value::Object(
-            members
-                .iter()
-                .map(|m| Member {
-                    key: m.key.clone(),
-                    val: copy_into(doc, src, m.val),
-                })
-                .collect(),
-        ),
-        Value::Array(items) => {
-            Value::Array(items.iter().map(|i| copy_into(doc, src, *i)).collect())
-        }
-        v => v.clone(),
-    };
-    let merge = data.merge.iter().map(|m| copy_into(doc, src, *m)).collect();
-    doc.push(NodeData {
-        value,
-        anchor: data.anchor.clone(),
-        merge,
-        raw: data.raw.clone(),
-    })
-}
-
 /// omitOrSet applies the empty-input omission rule and sets the value.
 /// An empty input removes the key only when it holds a value: a null
 /// placeholder (a key seeded by a, a null in the source JSON) stays null —
@@ -226,7 +115,7 @@ pub fn omit_or_set(
             return Ok(());
         }
         if let Some(dflt) = fn_node.default_ {
-            let v = copy_into(doc, default_doc, dflt);
+            let v = doc.copy_into(default_doc, dflt, CopyMode::Preserve);
             return doc.set(path, v);
         }
         doc.remove(path);
@@ -317,30 +206,13 @@ fn is_word_delim(c: char) -> bool {
 /// Value / CursorEnd, character insert, backspace/delete, left/right,
 /// home/end (ctrl+a/ctrl+e), ctrl+k/ctrl+u line kills, ctrl+w word kill, and
 /// ctrl+y yank of the last kill.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct TextInput {
     value: String,
     /// Byte offset into `value`, always on a char boundary.
     cursor: usize,
-    placeholder: String,
-    suggestions: Vec<String>,
-    /// Completion cycle position; None until the first complete_* call.
-    sug_idx: Option<usize>,
     /// Last text removed by ctrl+k/u/w, pasted back by ctrl+y.
     kill: String,
-}
-
-impl Default for TextInput {
-    fn default() -> TextInput {
-        TextInput {
-            value: String::new(),
-            cursor: 0,
-            placeholder: String::new(),
-            suggestions: Vec::new(),
-            sug_idx: None,
-            kill: String::new(),
-        }
-    }
 }
 
 impl TextInput {
@@ -357,14 +229,6 @@ impl TextInput {
         self.value[..self.cursor].chars().count()
     }
 
-    pub fn set_placeholder(&mut self, p: impl Into<String>) {
-        self.placeholder = p.into();
-    }
-
-    pub fn placeholder(&self) -> &str {
-        &self.placeholder
-    }
-
     /// SetValue: replaces the buffer and moves the cursor to the end.
     pub fn set_value(&mut self, v: impl Into<String>) {
         self.value = v.into();
@@ -379,48 +243,6 @@ impl TextInput {
     pub fn insert_str(&mut self, s: &str) {
         self.value.insert_str(self.cursor, s);
         self.cursor += s.len();
-    }
-
-    pub fn set_suggestions(&mut self, sugs: Vec<String>) {
-        self.suggestions = sugs;
-        self.sug_idx = None;
-    }
-
-    /// complete_next advances the tab cycle (None → first → … → last →
-    /// first); each accepted suggestion replaces the value with the cursor
-    /// at the end, exactly like the menu layer's SetValue+CursorEnd.
-    pub fn complete_next(&mut self) {
-        if self.suggestions.is_empty() {
-            return;
-        }
-        let n = self.suggestions.len();
-        let idx = match self.sug_idx {
-            None => 0,
-            Some(i) => (i + 1) % n,
-        };
-        self.sug_idx = Some(idx);
-        let sug = self.suggestions[idx].clone();
-        self.set_value(sug);
-    }
-
-    /// complete_prev moves the cycle backward (None → last), wrapping.
-    pub fn complete_prev(&mut self) {
-        if self.suggestions.is_empty() {
-            return;
-        }
-        let n = self.suggestions.len();
-        let idx = match self.sug_idx {
-            None => n - 1,
-            Some(i) => (i + n - 1) % n,
-        };
-        self.sug_idx = Some(idx);
-        let sug = self.suggestions[idx].clone();
-        self.set_value(sug);
-    }
-
-    /// The suggestion the cycle currently points at, if any.
-    pub fn suggestion(&self) -> Option<&str> {
-        self.sug_idx.map(|i| self.suggestions[i].as_str())
     }
 
     /// Byte offset of the char boundary before `cursor` (None at position 0).
@@ -628,10 +450,6 @@ impl TextArea {
 
     pub fn width(&self) -> u16 {
         self.width
-    }
-
-    pub fn height(&self) -> u16 {
-        self.height
     }
 
     pub fn cursor(&self) -> (usize, usize) {
@@ -870,7 +688,6 @@ impl TextArea {
 mod tests {
     use super::*;
     use crate::doc::jsondoc::parse;
-    use std::sync::Arc;
 
     fn seg(path: &[&str]) -> Vec<PathSeg> {
         path.iter().map(|p| PathSeg::key(*p)).collect()
@@ -1032,7 +849,7 @@ mod tests {
     #[test]
     fn validate_input_num_str_go_format() {
         assert_eq!(num_str(1024.0), "1024");
-        assert_eq!(num_str(1000000.0), "1e+06");
+        assert_eq!(num_str(1000000.0), "1000000");
         assert_eq!(num_str(1.5), "1.5");
     }
 
@@ -1118,22 +935,6 @@ mod tests {
         assert_eq!(doc.value(got), &Value::Null);
     }
 
-    // --- scalarText (Go TestScalarText)
-
-    #[test]
-    fn scalar_text_cases() {
-        let mut doc = Doc::new();
-        let s = doc.new_str("s");
-        let n = doc.new_num("1.5");
-        let b = doc.new_bool(true);
-        assert_eq!(scalar_text(&doc, Some(s)), "s");
-        assert_eq!(scalar_text(&doc, Some(n)), "1.5");
-        assert_eq!(scalar_text(&doc, Some(b)), "true");
-        assert_eq!(scalar_text(&doc, None), "");
-        let nul = doc.new_null();
-        assert_eq!(scalar_text(&doc, Some(nul)), "");
-    }
-
     // --- applyScalar
 
     #[test]
@@ -1164,87 +965,6 @@ mod tests {
     }
 
     // --- raw.go helpers
-
-    #[test]
-    fn raw_defaults_are_json() {
-        let codec = RawCodec {
-            label: "",
-            ext: "",
-            marshal_doc: Arc::new(|doc| Ok(doc.write())),
-            unmarshal_doc: Arc::new(|data| jsondoc::parse(data).map_err(|e| e.msg)),
-            adopt_doc: None,
-            marshal_value: Arc::new(|r: NodeRef<'_>| Ok(r.doc.write_subtree(r.id))),
-            unmarshal_value: Arc::new(|data| jsondoc::parse(data).map_err(|e| e.msg)),
-        };
-        assert_eq!(codec.raw_label(), "JSON");
-        assert_eq!(codec.raw_ext(), ".json");
-
-        let doc = jsondoc::parse(r#"{"k": "v"}"#).unwrap();
-        assert_eq!(
-            codec.encode_raw_doc(&doc).unwrap(),
-            "{\n  \"k\": \"v\"\n}\n"
-        );
-        let k = doc.get(&seg(&["k"])).unwrap();
-        assert_eq!(codec.encode_raw_value(&doc, k).unwrap(), "\"v\"\n");
-
-        let back = codec.decode_raw_doc(r#"{"a": 1}"#).unwrap();
-        assert_eq!(
-            back.value(back.root),
-            &Value::Object(vec![Member {
-                key: "a".to_string(),
-                val: back.get(&seg(&["a"])).unwrap(),
-            }])
-        );
-
-        let val = codec.decode_raw_value("\"x\"\n").unwrap();
-        assert_eq!(val.value(val.root), &Value::Str("x".to_string()));
-        assert!(codec.decode_raw_value("{bad").is_err());
-    }
-
-    #[test]
-    fn raw_yaml_codec_overrides() {
-        let codec = RawCodec {
-            label: "YAML",
-            ext: ".yaml",
-            // stand-in YAML codec: identity-ish text round trip through JSON
-            marshal_doc: Arc::new(|doc| Ok(doc.write())),
-            unmarshal_doc: Arc::new(|data| jsondoc::parse(data).map_err(|e| e.msg)),
-            adopt_doc: Some(Arc::new(|data: &str| {
-                jsondoc::parse(data)
-                    .map_err(|e| e.msg)
-                    .map(|d| (d, crate::doc::Meta::default()))
-            })),
-            marshal_value: Arc::new(|r: NodeRef<'_>| Ok(r.doc.write_subtree(r.id))),
-            unmarshal_value: Arc::new(|data| jsondoc::parse(data).map_err(|e| e.msg)),
-        };
-        assert_eq!(codec.raw_label(), "YAML");
-        assert_eq!(codec.raw_ext(), ".yaml");
-        // AdoptDoc supersedes UnmarshalDoc
-        let doc = codec.decode_raw_doc(r#"{"a": 1}"#).unwrap();
-        assert_eq!(
-            doc.value(doc.get(&seg(&["a"])).unwrap()),
-            &Value::Num("1".to_string())
-        );
-    }
-
-    #[test]
-    fn raw_encode_value_subtree() {
-        let codec = RawCodec {
-            label: "",
-            ext: "",
-            marshal_doc: Arc::new(|doc| Ok(doc.write())),
-            unmarshal_doc: Arc::new(|data| jsondoc::parse(data).map_err(|e| e.msg)),
-            adopt_doc: None,
-            marshal_value: Arc::new(|r: NodeRef<'_>| Ok(r.doc.write_subtree(r.id))),
-            unmarshal_value: Arc::new(|data| jsondoc::parse(data).map_err(|e| e.msg)),
-        };
-        let doc = jsondoc::parse(r#"{"outer": {"in": [1, 2]}}"#).unwrap();
-        let outer = doc.get(&seg(&["outer"])).unwrap();
-        assert_eq!(
-            codec.encode_raw_value(&doc, outer).unwrap(),
-            "{\n  \"in\": [\n    1,\n    2\n  ]\n}\n"
-        );
-    }
 
     // --- TextInput
 
@@ -1409,42 +1129,6 @@ mod tests {
         assert_eq!(ti.value(), "abcd");
     }
 
-    #[test]
-    fn text_input_completion_cycle() {
-        let mut ti = TextInput::new();
-        ti.set_suggestions(vec!["alpha".into(), "beta".into(), "gamma".into()]);
-        ti.insert_str("be");
-        ti.complete_next();
-        assert_eq!(ti.value(), "alpha");
-        assert_eq!(ti.cursor(), 5);
-        assert_eq!(ti.suggestion(), Some("alpha"));
-        ti.complete_next();
-        assert_eq!(ti.value(), "beta");
-        ti.complete_next();
-        ti.complete_next(); // wraps to alpha
-        assert_eq!(ti.value(), "alpha");
-        ti.complete_prev();
-        assert_eq!(ti.value(), "gamma");
-        // a fresh cycle from None starts at the last suggestion
-        ti.set_suggestions(vec!["x".into(), "y".into()]);
-        ti.complete_prev();
-        assert_eq!(ti.value(), "y");
-        ti.set_suggestions(vec![]); // reset + empty: no-op
-        ti.set_value("");
-        ti.insert_str("keep");
-        ti.complete_next();
-        ti.complete_prev();
-        assert_eq!(ti.value(), "keep");
-    }
-
-    #[test]
-    fn text_input_placeholder() {
-        let mut ti = TextInput::new();
-        ti.set_placeholder("port");
-        assert_eq!(ti.placeholder(), "port");
-        assert_eq!(ti.value(), "");
-    }
-
     // --- TextArea
 
     #[test]
@@ -1589,7 +1273,7 @@ mod tests {
         let mut ta = TextArea::new();
         ta.set_width(80);
         ta.set_height(24);
-        assert_eq!((ta.width(), ta.height()), (80, 24));
+        assert_eq!((ta.width(), ta.height), (80, 24));
         ta.set_value("a\n\nb\n"); // trailing newline keeps a final empty line
         assert_eq!(ta.value(), "a\n\nb\n");
         assert_eq!(ta.cursor(), (0, 0));

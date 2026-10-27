@@ -11,6 +11,7 @@
 //! delegating to [`super::jsondoc::Doc::write`], so plain JSON output stays
 //! byte-for-byte identical to the historical format.
 
+use super::jsondoc::write_indent;
 use super::jsondoc::{self, Doc, DocError, Member, NodeId, PathSeg, Value};
 use super::{CommentSet, Meta};
 
@@ -708,12 +709,6 @@ fn write_empty_container(out: &mut String, open: char, close: char, foot: &str, 
     write_comments(out, foot, indent + 1);
     write_indent(out, indent);
     out.push(close);
-}
-
-fn write_indent(out: &mut String, level: usize) {
-    for _ in 0..level {
-        out.push_str("  ");
-    }
 }
 
 fn write_value(

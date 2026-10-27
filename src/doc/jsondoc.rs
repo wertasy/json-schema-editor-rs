@@ -74,6 +74,17 @@ fn err<T>(msg: impl Into<String>) -> Result<T, DocError> {
     Err(DocError { msg: msg.into() })
 }
 
+/// Policy for a cross-arena subtree copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CopyMode {
+    /// Keep the source spelling and alias identity: `raw`, merge refs and
+    /// anchor names ride along (schema defaults, values moved between docs).
+    Preserve,
+    /// Materialize the resolved value: merge members become plain members,
+    /// anchors/merge refs are dropped and `raw` is cleared (pasted content).
+    Detached,
+}
+
 impl Doc {
     pub fn new() -> Doc {
         let mut d = Doc {
@@ -455,7 +466,6 @@ impl Doc {
 
     /// Append adds v to the array at path, auto-creating intermediates and
     /// the array itself. Errors if the path resolves to a non-array.
-    #[allow(dead_code)] // the doc-layer mutation API (Go jsondoc parity; tests drive it)
     pub fn append(&mut self, path: &[PathSeg], v: NodeId) -> Result<(), DocError> {
         let arr = match self.get(path) {
             Some(a) => {
@@ -710,42 +720,6 @@ impl Doc {
         }
     }
 
-    /// from_value builds a node tree from a serde_json value. Map keys are
-    /// sorted (Go's FromAny sorts; serde_json's default map may not).
-    #[allow(dead_code)] // the FromAny bridge (Go jsondoc parity; tests drive it)
-    pub fn from_value(&mut self, v: &serde_json::Value) -> NodeId {
-        match v {
-            serde_json::Value::Null => self.new_null(),
-            serde_json::Value::Bool(b) => self.new_bool(*b),
-            serde_json::Value::Number(n) => self.new_num(number_literal(n)),
-            serde_json::Value::String(s) => self.new_str(s.clone()),
-            serde_json::Value::Array(items) => {
-                let arr = self.new_array();
-                let ids: Vec<NodeId> = items.iter().map(|it| self.from_value(it)).collect();
-                if let Value::Array(a) = &mut self.nodes[arr as usize].value {
-                    *a = ids;
-                }
-                arr
-            }
-            serde_json::Value::Object(map) => {
-                let obj = self.new_object();
-                let mut keys: Vec<&String> = map.keys().collect();
-                keys.sort();
-                let members: Vec<Member> = keys
-                    .into_iter()
-                    .map(|k| Member {
-                        key: k.clone(),
-                        val: self.from_value(&map[k]),
-                    })
-                    .collect();
-                if let Value::Object(m) = &mut self.nodes[obj as usize].value {
-                    *m = members;
-                }
-                obj
-            }
-        }
-    }
-
     // --- detached copy ---------------------------------------------------------
 
     /// clone_detached returns a deep copy with alias sharing dissolved: every
@@ -786,6 +760,101 @@ impl Doc {
             merge: Vec::new(),
             raw: self.nodes[id as usize].raw.clone(),
         })
+    }
+
+    /// Deep-copies a subtree from `src` into this arena and returns the new
+    /// root id. Cross-arena copies cannot share `NodeId`s, so every child is
+    /// recreated; `mode` decides whether source spelling and alias identity
+    /// survive (see [`CopyMode`]).
+    pub fn copy_into(&mut self, src: &Doc, id: NodeId, mode: CopyMode) -> NodeId {
+        match mode {
+            CopyMode::Preserve => {
+                let data = src.node(id);
+                let value = match &data.value {
+                    Value::Object(members) => Value::Object(
+                        members
+                            .iter()
+                            .map(|m| Member {
+                                key: m.key.clone(),
+                                val: self.copy_into(src, m.val, mode),
+                            })
+                            .collect(),
+                    ),
+                    Value::Array(items) => Value::Array(
+                        items
+                            .iter()
+                            .map(|&i| self.copy_into(src, i, mode))
+                            .collect(),
+                    ),
+                    v => v.clone(),
+                };
+                let merge = data
+                    .merge
+                    .iter()
+                    .map(|&m| self.copy_into(src, m, mode))
+                    .collect();
+                self.push(NodeData {
+                    value,
+                    anchor: data.anchor.clone(),
+                    merge,
+                    raw: data.raw.clone(),
+                })
+            }
+            CopyMode::Detached => {
+                let value = match &src.node(id).value {
+                    Value::Object(_) => Value::Object(
+                        src.resolved_members(id)
+                            .into_iter()
+                            .map(|m| Member {
+                                key: m.key,
+                                val: self.copy_into(src, m.val, mode),
+                            })
+                            .collect(),
+                    ),
+                    Value::Array(items) => Value::Array(
+                        items
+                            .iter()
+                            .map(|&i| self.copy_into(src, i, mode))
+                            .collect(),
+                    ),
+                    v => v.clone(),
+                };
+                self.push(NodeData {
+                    value,
+                    anchor: String::new(),
+                    merge: Vec::new(),
+                    raw: String::new(),
+                })
+            }
+        }
+    }
+
+    /// The canonical JSON literal of a value (Go smodel.EncodeValue). Numbers
+    /// are canonicalized through `serde_json`, unlike [`Doc::compact`], which
+    /// preserves the source spelling; enum matching relies on this form.
+    pub fn encode_value(&self, id: NodeId) -> String {
+        serde_json::to_string(&self.to_value(id)).unwrap_or_default()
+    }
+
+    /// The editable text of a scalar node, borrowed: strings and numeric
+    /// literals verbatim, booleans as "true"/"false". Containers and null
+    /// have no scalar text (`None`).
+    pub fn scalar_text(&self, id: NodeId) -> Option<&str> {
+        match self.value(id) {
+            Value::Str(s) => Some(s),
+            Value::Num(lit) => Some(lit),
+            Value::Bool(true) => Some("true"),
+            Value::Bool(false) => Some("false"),
+            _ => None,
+        }
+    }
+
+    /// Length of the array at `path`; 0 when absent or not an array.
+    pub fn array_len(&self, path: &[PathSeg]) -> usize {
+        match self.get(path).map(|id| self.value(id)) {
+            Some(Value::Array(items)) => items.len(),
+            _ => 0,
+        }
     }
 
     // --- rendering ---------------------------------------------------------------
@@ -915,43 +984,6 @@ impl Doc {
             Value::Null => "null".to_string(),
         }
     }
-
-    /// ResolveJSONPointer resolves an RFC 6901 pointer (without the leading
-    /// '#') against the document. It percent-decodes the fragment, applies
-    /// ~0/~1 unescaping, and supports array indexes ("-" fails to parse and
-    /// rejects; object keys by name).
-    #[allow(dead_code)] // Go jsondoc parity; smodel resolves pointers through its own path
-    pub fn resolve_json_pointer(&self, ptr: &str) -> Option<NodeId> {
-        let ptr = ptr.strip_prefix('#').unwrap_or(ptr);
-        if ptr.is_empty() {
-            return Some(self.root);
-        }
-        if let Ok(dec) = percent_decode(ptr) {
-            return self.resolve_json_pointer_inner(&dec);
-        }
-        self.resolve_json_pointer_inner(ptr)
-    }
-
-    fn resolve_json_pointer_inner(&self, ptr: &str) -> Option<NodeId> {
-        if ptr.is_empty() {
-            return Some(self.root);
-        }
-        let mut cur = self.root;
-        for raw in ptr.strip_prefix('/').unwrap_or(ptr).split('/') {
-            let tok = raw.replace("~1", "/").replace("~0", "~");
-            match &self.nodes[cur as usize].value {
-                Value::Object(members) => {
-                    cur = members.iter().find(|m| m.key == tok)?.val;
-                }
-                Value::Array(items) => {
-                    let idx: usize = tok.parse().ok()?;
-                    cur = *items.get(idx)?;
-                }
-                _ => return None,
-            }
-        }
-        Some(cur)
-    }
 }
 
 impl Default for Doc {
@@ -989,28 +1021,11 @@ fn num_to_value(lit: &str) -> serde_json::Value {
     serde_json::Value::String(lit.to_string())
 }
 
-/// Canonical literal for a serde_json number: integers exactly, floats via
-/// Go encoding/json's formatting rules.
-#[allow(dead_code)] // reached through from_value (Go json.Marshal parity)
-fn number_literal(n: &serde_json::Number) -> String {
-    if let Some(i) = n.as_i64() {
-        return i.to_string();
-    }
-    if let Some(u) = n.as_u64() {
-        return u.to_string();
-    }
-    match n.as_f64() {
-        Some(f) if f.is_finite() => go_json_float(f),
-        _ => "null".to_string(), // unreachable: serde_json numbers are finite
-    }
-}
-
 /// Go encoding/json float encoding: 'f' (shortest) when 1e-6 <= |f| < 1e21
 /// or f == 0, else 'e' (shortest) with a negative single-digit-exponent
 /// cleanup ("1e-05" → "1e-5"). Non-finite floats cannot be encoded (Go
 /// errors; callers degrade to null).
-#[allow(dead_code)] // Go encoding/json parity helper (used by from_value)
-pub(crate) fn go_json_float(f: f64) -> String {
+pub(crate) fn number_text(f: f64) -> String {
     if !f.is_finite() {
         return String::new();
     }
@@ -1027,55 +1042,6 @@ pub(crate) fn go_json_float(f: f64) -> String {
     } else {
         format_exp_style_json(f)
     }
-}
-
-/// Go strconv.FormatFloat(f, 'g', -1, 64): shortest digits, %e when the
-/// decimal exponent is < -4 or >= 6 (two exponent digits, sign always),
-/// %f otherwise.
-#[allow(dead_code)] // used by the YAML layer (Phase 2)
-pub(crate) fn go_format_g(f: f64) -> String {
-    if !f.is_finite() {
-        return if f.is_nan() {
-            "NaN".into()
-        } else if f > 0.0 {
-            "+Inf".into()
-        } else {
-            "-Inf".into()
-        };
-    }
-    if f == 0.0 {
-        return if f.is_sign_negative() {
-            "-0".into()
-        } else {
-            "0".into()
-        };
-    }
-    let (digits, dp) = shortest_digits(f);
-    let exp = dp - 1; // value = d.ddd × 10^exp
-    let mut out = String::new();
-    if f < 0.0 {
-        out.push('-');
-    }
-    if exp < -4 || exp >= 6 {
-        out.push_str(&digits);
-        if digits.len() > 1 {
-            out.insert(1, '.');
-        }
-        out.push('e');
-        if exp < 0 {
-            out.push('-');
-        } else {
-            out.push('+');
-        }
-        let e = exp.abs();
-        if e < 10 {
-            out.push('0');
-        }
-        out.push_str(&e.to_string());
-    } else {
-        out.push_str(&f_style(digits, dp));
-    }
-    out
 }
 
 /// Shortest round-trip decimal digits of f and the decimal point position
@@ -1122,7 +1088,6 @@ fn f_style(digits: String, dp: i32) -> String {
 }
 
 /// %f style from shortest digits (encoding/json's 'f' branch).
-#[allow(dead_code)] // Go encoding/json parity helper (used by go_json_float)
 fn format_float_style(f: f64) -> String {
     let (digits, dp) = shortest_digits(f);
     let mut out = String::new();
@@ -1133,9 +1098,9 @@ fn format_float_style(f: f64) -> String {
     out
 }
 
-/// %e style from shortest digits (encoding/json's 'e' branch): d[.ddd]e±dd,
-/// then "1e-05" → "1e-5" (exactly one leading zero of a negative exponent
-/// removed, matching encoding/json).
+/// %e style from shortest digits (ECMAScript/JSON exponent form):
+/// d[.ddd]e±dd, then "1e-05" → "1e-5" (exactly one leading zero of a
+/// negative exponent removed).
 fn format_exp_style_json(f: f64) -> String {
     let (digits, dp) = shortest_digits(f);
     let exp = dp - 1;
@@ -1158,7 +1123,7 @@ fn format_exp_style_json(f: f64) -> String {
         out.push('0');
     }
     out.push_str(&e.to_string());
-    // encoding/json cleanup: e-0X → e-X (one leading zero only)
+    // e-0X → e-X (one leading zero only), matching ECMAScript
     let n = out.len();
     let b = out.as_bytes();
     if n >= 4 && b[n - 4] == b'e' && b[n - 3] == b'-' && b[n - 2] == b'0' {
@@ -1195,7 +1160,7 @@ pub(crate) fn write_json_string(out: &mut String, s: &str) {
     out.push('"');
 }
 
-fn write_indent(out: &mut String, level: usize) {
+pub(crate) fn write_indent(out: &mut String, level: usize) {
     for _ in 0..level {
         out.push_str("  ");
     }
@@ -1206,6 +1171,20 @@ fn write_indent(out: &mut String, level: usize) {
 /// PathString renders a document path in the editor's JSON-path style: "$"
 /// for the root, object fields appended with ".", array indexes as "[N]" —
 /// "$.server.port", "$.mounts[0].src", "$[0]".
+/// A copy of `path` with one key segment appended.
+pub fn append_key(path: &[PathSeg], key: &str) -> Vec<PathSeg> {
+    let mut p = path.to_vec();
+    p.push(PathSeg::key(key));
+    p
+}
+
+/// A copy of `path` with one index segment appended.
+pub fn append_idx(path: &[PathSeg], idx: usize) -> Vec<PathSeg> {
+    let mut p = path.to_vec();
+    p.push(PathSeg::Idx(idx));
+    p
+}
+
 pub fn path_string(path: &[PathSeg]) -> String {
     let mut b = String::from("$");
     for seg in path {
@@ -1274,27 +1253,6 @@ pub fn parse_path(s: &str) -> Option<Vec<PathSeg>> {
         }
     }
     Some(path)
-}
-
-/// percent_decode mirrors url.PathUnescape: %XX decodes; a malformed escape
-/// is an error.
-fn percent_decode(s: &str) -> Result<String, ()> {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' {
-            let hex = b.get(i + 1..i + 3).ok_or(())?;
-            let hi = (hex[0] as char).to_digit(16).ok_or(())?;
-            let lo = (hex[1] as char).to_digit(16).ok_or(())?;
-            out.push(((hi << 4) | lo) as u8);
-            i += 3;
-        } else {
-            out.push(b[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).map_err(|_| ())
 }
 
 /// parse reads one strict JSON document, preserving key order and numeric
@@ -1631,19 +1589,13 @@ mod tests {
     }
 
     #[test]
-    fn to_from_any() {
+    fn to_any() {
         let n = doc(r#"{"i": 3, "f": 1.5, "s": "x", "b": false, "n": null, "a": [1, "y"]}"#);
         let v = n.to_value(n.root);
         assert_eq!(v["i"], json!(3));
         assert_eq!(v["f"], json!(1.5));
         assert_eq!(v["s"], json!("x"));
-        let mut d2 = Doc::new();
-        let back = d2.from_value(&v);
-        d2.set(&[], back).unwrap(); // Go's test calls Get on the returned node
-        let got = d2.get(&[Key("i".into())]).unwrap();
-        assert_eq!(d2.value(got), &Value::Num("3".into()));
-        let r = d2.to_value(back);
-        assert!(r.is_object());
+        assert_eq!(v["a"], json!([1, "y"]));
     }
 
     #[test]
@@ -1675,40 +1627,6 @@ mod tests {
             let n = doc(src);
             let got = n.get(&[Key("a".into())]).unwrap();
             assert_eq!(n.summary(got), want, "Summary({src})");
-        }
-    }
-
-    #[test]
-    fn resolve_json_pointer() {
-        let n = doc(r#"{
-  "$defs": {"srv": {"type": "string"}},
-  "a/b": 1,
-  "m~n": 2,
-  "arr": [{"k": "v"}]
-}"#);
-        let cases = [
-            ("", true, "object"),
-            ("/$defs/srv/type", true, "string"),
-            ("/a~1b", true, "1"),
-            ("/m~0n", true, "2"),
-            ("/arr/0/k", true, "v"),
-            ("/arr/9", false, ""),
-            ("/missing", false, ""),
-            ("/m%7E0n", true, "2"), // %7E decodes to ~, then ~0 escape applies
-            ("/arr/-", false, ""),
-            ("/a%2Fb", false, ""), // %2F decodes before split → a separator, not a key char
-        ];
-        for (ptr, ok, want) in cases {
-            let got = n.resolve_json_pointer(ptr);
-            assert_eq!(got.is_some(), ok, "pointer {ptr:?} ok");
-            if let (Some(g), true, w) = (got, ok, want) {
-                match n.value(g) {
-                    Value::Object(_) => assert_eq!(w, "object", "pointer {ptr:?}"),
-                    Value::Str(s) => assert_eq!(s, w, "pointer {ptr:?}"),
-                    Value::Num(l) => assert_eq!(l, w, "pointer {ptr:?}"),
-                    _ => {}
-                }
-            }
         }
     }
 
@@ -1959,21 +1877,23 @@ mod tests {
     }
 
     #[test]
-    fn float_formats_match_go() {
-        // encoding/json and strconv 'g' behavior pins
-        assert_eq!(go_json_float(1.5), "1.5");
-        assert_eq!(go_json_float(80.0), "80");
-        assert_eq!(go_json_float(-0.5), "-0.5");
-        assert_eq!(go_json_float(0.1), "0.1");
-        assert_eq!(go_json_float(100000.0), "100000");
-        assert_eq!(go_json_float(1e21), "1e+21");
-        assert_eq!(go_json_float(1e-7), "1e-7");
-        assert_eq!(go_json_float(1.5e-7), "1.5e-7");
-        assert_eq!(go_format_g(100000.0), "100000");
-        assert_eq!(go_format_g(1000000.0), "1e+06");
-        assert_eq!(go_format_g(1e-5), "1e-05");
-        assert_eq!(go_format_g(0.0001), "0.0001");
-        assert_eq!(go_format_g(8080.0), "8080");
+    fn float_text_matches_ecmascript() {
+        // `String(x)` in JS: the spelling JS-based LSP/format tooling emits.
+        for (f, want) in [
+            (1.5, "1.5"),
+            (80.0, "80"),
+            (-0.5, "-0.5"),
+            (0.1, "0.1"),
+            (100000.0, "100000"),
+            (1_000_000.0, "1000000"),
+            (1e20, "100000000000000000000"),
+            (1e21, "1e+21"),
+            (0.000001, "0.000001"),
+            (1e-7, "1e-7"),
+            (1.5e-7, "1.5e-7"),
+        ] {
+            assert_eq!(number_text(f), want, "{f}");
+        }
     }
 }
 

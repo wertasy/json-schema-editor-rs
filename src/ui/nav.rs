@@ -1,5 +1,3 @@
-#![allow(dead_code)] // wired into the menu in later phases
-
 //! Navigation history for the menu TUI: every relocation — drill-ins into
 //! submenus, level pops, and jumps (gg/G, ga/gr, search/issue/error jumps) —
 //! records the menu stack it leaves behind. ctrl+o walks back through that
@@ -12,7 +10,7 @@
 //! marks explicitly, because the stack and the current file index belong to
 //! the menu layer (`FileState`, src/ui/files.rs).
 //!
-//! Contract of [`nav_restore`] for the caller (menu layer): when it moves
+//! Contract of `App::nav_restore` for the caller (menu layer): when it moves
 //! the session to the returned (stack, file index) it must also
 //!   1. switch the active file if the index differs from the current tab
 //!      (plain swap — `nav_go` already moved the trails before restoring),
@@ -47,7 +45,7 @@ pub struct Nav {
 }
 
 /// Result of [`Nav::go`]: either a status notice (byte-identical to Go) or
-/// the mark to hand to [`nav_restore`].
+/// the mark to hand to `App::nav_restore`.
 #[derive(Clone, Debug)]
 pub enum NavGo {
     Stay(&'static str),
@@ -122,7 +120,7 @@ impl Nav {
     /// navGo moves one step along the navigation trail: back=true is ctrl+o
     /// (older), back=false is ctrl+i (newer). List mode only — overlays and
     /// inputs route keys elsewhere. On `NavGo::Jump` the caller passes the
-    /// mark to [`nav_restore`]; the trails were already updated here.
+    /// mark to `App::nav_restore`; the trails were already updated here.
     pub fn go(&mut self, back: bool, current: &NavMark) -> NavGo {
         let leaving = current.clone();
         if back {
@@ -138,14 +136,6 @@ impl Nav {
         nav_trail_push(&mut self.back, leaving);
         NavGo::Jump(mk)
     }
-}
-
-/// navRestore swaps in a frozen stack: returns the restored stack and the
-/// tab it belongs to. One-level return parks are dropped (see the module
-/// contract: the caller clears `jump_origin`/`jump_return`/`search.parked`/
-/// `issues_back`, switches files when needed, and repairs the stack).
-pub fn nav_restore(mk: NavMark) -> (Vec<MenuState>, usize) {
-    (mk.stack, mk.file)
 }
 
 #[cfg(test)]
@@ -168,9 +158,7 @@ mod tests {
             sel: Default::default(),
             visual: false,
             vanchor: 0,
-            search_ti: Default::default(),
-            searching: false,
-            search_cursor: 0,
+            filter: Default::default(),
         }
     }
 
@@ -323,15 +311,5 @@ mod tests {
         assert_eq!(crate::doc::jsondoc::path_string(&mk.stack[1].path), "$.a");
         assert!(same_mark(&nav.back[0], &list));
         assert!(nav.fwd.is_empty());
-    }
-
-    #[test]
-    fn nav_restore_returns_stack_and_file() {
-        let mk = mark(2, &[(1, &[], 0), (3, &["x", "y"], 2)]);
-        let (stack, file) = nav_restore(mk);
-        assert_eq!(file, 2);
-        assert_eq!(stack.len(), 2);
-        assert_eq!(crate::doc::jsondoc::path_string(&stack[1].path), "$.x.y");
-        assert_eq!(stack[1].cursor, 2);
     }
 }

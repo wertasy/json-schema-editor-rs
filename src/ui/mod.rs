@@ -21,17 +21,13 @@ pub mod history;
 pub mod keys;
 pub mod lineio;
 pub mod menu;
-pub mod merge;
 pub mod nav;
-pub mod paste;
 pub mod rows;
 pub mod schema_picker;
-pub mod search;
-pub mod select;
 pub mod shell;
+pub mod util;
 pub mod widgets;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::doc::{Doc, PathSeg};
@@ -48,69 +44,50 @@ pub enum Res {
     Abort,
 }
 
-/// RawCodec is the text syntax used by raw editors. The default is JSON;
-/// YAML and TOML documents pass a codec backed by their format module.
-/// MarshalDoc writes the whole live document (comments included when the
-/// codec captures the session); MarshalValue writes one subtree.
-#[derive(Clone)]
-pub struct RawCodec {
-    /// "JSON" (default) or "YAML"
-    pub label: &'static str,
-    /// temp-file extension; default ".json"
-    pub ext: &'static str,
-    pub marshal_doc: Arc<dyn Fn(&Doc) -> Result<String, String> + Send + Sync>,
-    pub unmarshal_doc: Arc<dyn Fn(&str) -> Result<Doc, String> + Send + Sync>,
-    /// AdoptDoc parses a whole document and also installs its format
-    /// metadata (comments/directives) in the live session; it supersedes
-    /// UnmarshalDoc.
-    pub adopt_doc:
-        Option<Arc<dyn Fn(&str) -> Result<(Doc, crate::doc::Meta), String> + Send + Sync>>,
-    pub marshal_value: Arc<dyn Fn(NodeRef<'_>) -> Result<String, String> + Send + Sync>,
-    pub unmarshal_value: Arc<dyn Fn(&str) -> Result<Doc, String> + Send + Sync>,
+/// The validator closure a compiled schema installs: one message per
+/// validation error, empty when the document is valid.
+pub type ValidateFn = Arc<dyn Fn(&Doc) -> Vec<String> + Send + Sync>;
+
+/// A schema compiled for one file: the form tree, its validator and the
+/// status lines the load produced. The CLI and the S-key picker both go
+/// through this shape so the UI never compiles schemas itself.
+pub struct LoadedSchema {
+    pub schema: Schema,
+    pub root: FormNodeId,
+    /// None when compilation failed or validation is disabled.
+    pub validate: Option<ValidateFn>,
+    /// Non-fatal status lines (offline cache, compile failure).
+    pub status: String,
+    /// The schema declares a top-level "$schema" property.
+    pub schema_member: bool,
 }
 
-/// A borrowed (doc, node) pair passed to RawCodec value callbacks.
-#[derive(Clone, Copy)]
-pub struct NodeRef<'a> {
-    pub doc: &'a Doc,
-    pub id: crate::doc::NodeId,
-}
-
-/// Options configures a Run.
+/// Options configures a Run. Only genuine environment I/O stays behind a
+/// closure; document state (doc, meta, codec) belongs to [`FileState`].
 #[derive(Clone)]
 pub struct Options {
     pub accessible: bool,
     pub force: bool,
-    /// Raw selects the syntax of raw editors (JSON unless set).
-    pub raw: RawCodec,
     /// Validate checks a config document; None disables save-time validation.
-    pub validate: Option<Arc<dyn Fn(&Doc) -> Vec<String> + Send + Sync>>,
-    /// Save writes the document to its destination. Every save action goes
-    /// through it (TUI ctrl+s, the Save-and-exit row, the accessible save);
-    /// None makes saving impossible.
-    pub save: Option<Arc<dyn Fn(&Doc) -> Result<(), String> + Send + Sync>>,
+    pub validate: Option<ValidateFn>,
+    /// Save writes the document to its destination with the session's
+    /// current meta. Every save action goes through it (TUI ctrl+s, the
+    /// Save-and-exit row, the accessible save); None makes saving impossible.
+    pub save: Option<Arc<dyn Fn(&Doc, &crate::doc::Meta) -> Result<(), String> + Send + Sync>>,
     /// Path is the file the session edits; menu W prefills its write-to
     /// input with it.
     pub path: String,
     /// WriteTo writes the document to an arbitrary path (menu W). None
     /// makes write-to impossible.
-    pub write_to: Option<Arc<dyn Fn(&str, &Doc) -> Result<(), String> + Send + Sync>>,
+    pub write_to:
+        Option<Arc<dyn Fn(&str, &Doc, &crate::doc::Meta) -> Result<(), String> + Send + Sync>>,
     /// Copy writes text to the system clipboard (menu y/Y).
     pub copy: Option<Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>>,
     /// Paste reads the system clipboard (menu p/P).
     pub paste: Option<Arc<dyn Fn() -> Result<String, String> + Send + Sync>>,
-    /// ReplaceSchemaLocation overwrites the document's recorded schema
-    /// location (and format metadata) after the S-key picker chose a new
-    /// schema; `true` means the schema declares a top-level "$schema"
-    /// property. None disables schema switching.
-    pub replace_schema_location: Option<Arc<dyn Fn(&mut Doc, &str, bool) + Send + Sync>>,
-    /// CommentAt returns the document comment attached to a path as plain
-    /// text (markers stripped), or None when there is none.
-    pub comment_at: Option<Arc<dyn Fn(&[PathSeg]) -> Option<String> + Send + Sync>>,
-    /// SetComment replaces the document comment attached to a path; an empty
-    /// text removes it. The caller has already edited the session meta, so a
-    /// later save writes the new comment.
-    pub set_comment: Option<Arc<dyn Fn(&[PathSeg], &str) + Send + Sync>>,
+    /// LoadSchema compiles a schema location for the S picker; None disables
+    /// schema switching.
+    pub load_schema: Option<Arc<dyn Fn(&str) -> Result<LoadedSchema, String> + Send + Sync>>,
     /// Status is a warning line shown on the root screen (e.g. compile
     /// failure).
     pub status: String,
@@ -121,12 +98,33 @@ pub struct Options {
     pub load_errors: Vec<String>,
 }
 
+impl Default for Options {
+    fn default() -> Options {
+        Options {
+            accessible: false,
+            force: false,
+            validate: None,
+            save: None,
+            path: String::new(),
+            write_to: None,
+            copy: None,
+            paste: None,
+            load_schema: None,
+            status: String::new(),
+            startup_notice: String::new(),
+            load_errors: Vec::new(),
+        }
+    }
+}
+
 /// FileSession is one file of an interactive session: its form tree,
-/// document, and editor wiring.
+/// document, format state, and editor wiring.
 pub struct FileSession {
     pub schema: Schema,
     pub root: FormNodeId,
     pub doc: Doc,
+    pub meta: crate::doc::Meta,
+    pub codec: &'static dyn crate::doc::Codec,
     pub opts: Options,
 }
 
@@ -224,14 +222,8 @@ pub struct MenuState {
     pub visual: bool,
     /// row where visual select started
     pub vanchor: usize,
-    /// inline list search (oneOf picker / enum-array toggles): the query is
-    /// empty when the search opens
-    pub search_ti: crate::ui::widgets::TextInput,
-    /// the inline search input has focus
-    pub searching: bool,
-    /// cursor to restore when the search is cancelled (the row the search
-    /// was opened on, which is the current value's row for a fresh picker)
-    pub search_cursor: usize,
+    /// inline list search (oneOf picker / enum-array toggles)
+    pub filter: crate::ui::menu::ListFilter,
 }
 
 /// issue is one validation message with its parsed instance location.
@@ -249,17 +241,11 @@ pub struct Issue {
     pub warn: bool,
 }
 
-/// The context pure menu functions read: everything menuRowsFor and friends
-/// need from the app without owning it. Some fields are part of the contract
-/// even where today's call sites read only a subset.
-#[allow(dead_code)]
+/// The context pure row functions read: the schema and document of the
+/// active file. Kept as a struct so the row layer never takes `App`.
 pub struct MenuCtx<'a> {
     pub schema: &'a Schema,
     pub doc: &'a Doc,
-    pub opts: &'a Options,
-    /// memoized synthesized menu nodes per schema node
-    pub menu_cache: &'a HashMap<FormNodeId, FormNodeId>,
-    pub hide_empty: bool,
 }
 
 // --- run entry points -----------------------------------------------------------

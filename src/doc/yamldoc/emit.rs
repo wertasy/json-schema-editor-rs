@@ -149,7 +149,7 @@ fn scalar_event(
 }
 
 fn typed_scalar_event(id: NodeId, doc: &Doc, anchor: Option<String>, cs: &CommentSet) -> Ev {
-    let text = scalar_text(doc, id);
+    let text = doc.scalar_text(id).unwrap_or("null").to_string();
     scalar_event(
         &text,
         anchor,
@@ -170,6 +170,8 @@ fn typed_scalar_event(id: NodeId, doc: &Doc, anchor: Option<String>, cs: &Commen
 struct Builder<'a> {
     doc: &'a Doc,
     meta: Option<&'a Meta>,
+    /// Subtree to emit (the document root for a full write).
+    root: NodeId,
     emitted: HashSet<String>,
     evs: Vec<Ev>,
 }
@@ -179,7 +181,7 @@ impl<'a> Builder<'a> {
         self.evs.push(Ev::StreamStart);
         self.evs.push(Ev::DocStart);
         let cs = cs_of(self.meta, &[]);
-        self.node(self.doc.root, &[], &cs);
+        self.node(self.root, &[], &cs);
         self.evs.push(Ev::DocEnd);
         self.evs.push(Ev::StreamEnd);
         self.evs
@@ -325,16 +327,6 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-    }
-}
-
-fn scalar_text(doc: &Doc, id: NodeId) -> String {
-    match doc.value(id) {
-        Value::Str(s) => s.clone(),
-        Value::Num(lit) => lit.clone(),
-        Value::Bool(true) => "true".to_string(),
-        Value::Bool(false) => "false".to_string(),
-        _ => "null".to_string(),
     }
 }
 
@@ -1312,6 +1304,23 @@ fn check_aliases(doc: &Doc) -> Result<(), DocError> {
     walk(doc, doc.root, &mut seen, &mut busy)
 }
 
+/// writeValue renders one subtree as a standalone YAML value: anchors are
+/// ignored, merges resolve inline and comments are omitted (the raw value
+/// editor's format). No arena copy is needed; the builder starts at `id`.
+pub fn write_value(doc: &Doc, id: NodeId) -> Result<String, DocError> {
+    let evs = Builder {
+        doc,
+        meta: None,
+        root: id,
+        emitted: HashSet::new(),
+        evs: Vec::new(),
+    }
+    .build();
+    let mut em = Emitter::new();
+    em.run(evs)?;
+    Ok(em.out)
+}
+
 /// write emits the document as YAML with two-space indentation, restoring the
 /// comments recorded in meta. Anchors are written at the first occurrence of
 /// an anchored node and later occurrences become alias references ("*name");
@@ -1326,6 +1335,7 @@ pub fn write(doc: &Doc, meta: Option<&Meta>) -> Result<String, DocError> {
     let evs = Builder {
         doc,
         meta,
+        root: doc.root,
         emitted: HashSet::new(),
         evs: Vec::new(),
     }

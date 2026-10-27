@@ -11,6 +11,7 @@ use std::io::Write as _;
 
 use crate::catalog::Entry;
 use crate::ui::keys::{char_width, clip_display, display_width};
+use crate::ui::util::wrap_cursor;
 use crate::ui::widgets::{Key, TextInput};
 
 /// PickOptions configures pick.
@@ -78,14 +79,6 @@ fn s_sel(s: &str) -> String {
 }
 fn s_crumb(s: &str) -> String {
     format!("\x1b[2m{s}\x1b[0m")
-}
-
-fn wrap_cursor(cursor: i64, delta: i64, len: usize) -> usize {
-    if len == 0 {
-        return 0;
-    }
-    let len = len as i64;
-    (((cursor + delta) % len + len) % len) as usize
 }
 
 /// one_line folds control characters so one catalog field always renders on
@@ -249,7 +242,7 @@ impl PickerModel {
     fn handle_repeat(&mut self, key: &PickerKey, n: usize) -> Option<Option<Entry>> {
         if n > 1 && matches!(key, PickerKey::Up | PickerKey::Down) {
             let delta = if matches!(key, PickerKey::Up) { -1 } else { 1 };
-            self.cursor = wrap_cursor(self.cursor as i64, delta * n as i64, self.filtered.len());
+            self.cursor = wrap_cursor(self.cursor, delta * n as i64, self.filtered.len());
             return None;
         }
         for _ in 0..n {
@@ -265,11 +258,11 @@ impl PickerModel {
             PickerKey::Esc | PickerKey::CtrlC => return Some(None),
             // cursor moves and commit keys are handled before text edits
             PickerKey::Up => {
-                self.cursor = wrap_cursor(self.cursor as i64, -1, self.filtered.len());
+                self.cursor = wrap_cursor(self.cursor, -1, self.filtered.len());
                 return None;
             }
             PickerKey::Down => {
-                self.cursor = wrap_cursor(self.cursor as i64, 1, self.filtered.len());
+                self.cursor = wrap_cursor(self.cursor, 1, self.filtered.len());
                 return None;
             }
             PickerKey::Enter => {

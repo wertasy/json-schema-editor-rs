@@ -8,9 +8,6 @@
 //! `files[cur]`. View rendering keeps Go's string-builder approach: a tiny
 //! `style` layer emits the same ANSI SGR sequences lipgloss produced.
 
-use std::collections::HashMap;
-use std::sync::LazyLock;
-
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use regex::Regex;
@@ -19,7 +16,6 @@ use crate::doc::jsondoc::path_string;
 use crate::doc::{Doc, NodeId, PathSeg, Value};
 use crate::smodel::{EnumOpt, FormNode, FormNodeId};
 use crate::ui::files::new_app;
-use crate::ui::history::{Inputs, list_mode, typing};
 use crate::ui::nav::{Nav, NavGo};
 use crate::ui::rows::{
     MergeView, MergedKey, RowsEnv, SynthKey, dynamic_variants, match_variant_list, menu_rows_for,
@@ -385,20 +381,6 @@ impl Msg {
             Msg::Paste(_) => String::new(),
         }
     }
-
-    /// The runes a Char message carries (Go msg.Runes).
-    #[allow(dead_code)] // kept as the Go-equivalent accessor surface
-    pub fn runes(&self) -> Option<String> {
-        match self {
-            Msg::Char(c, _) => Some(c.to_string()),
-            _ => None,
-        }
-    }
-
-    #[allow(dead_code)] // kept as the Go-equivalent accessor surface
-    pub fn is_esc(&self) -> bool {
-        matches!(self, Msg::Esc)
-    }
 }
 
 /// vertical_delta classifies the keys that move a list cursor one row: the
@@ -450,18 +432,6 @@ pub struct EditState {
     pub sug_idx: i64,
 }
 
-impl EditState {
-    /// The schema node the input validates against.
-    #[allow(dead_code)] // inline editors resolve through the schema directly
-    pub fn node(&self) -> Option<FormNode> {
-        match (self.fn_, &self.synth) {
-            (Some(_id), _) => None, // resolved against the schema by callers
-            (None, Some(n)) => Some(n.clone()),
-            (None, None) => None,
-        }
-    }
-}
-
 /// addState is the key-name input overlay for a: add a schema-less
 /// key-value member under the current object menu.
 pub struct AddState {
@@ -503,20 +473,104 @@ pub struct ShellState {
     pub sug_line: String,
 }
 
+/// Inline '/'-filter state shared by every list overlay.
+#[derive(Clone, Debug, Default)]
+pub struct ListFilter {
+    pub ti: TextInput,
+    /// the filter input has focus
+    pub active: bool,
+    /// list cursor to restore when the filter is cancelled
+    pub restore: usize,
+}
+
+/// The outcome of one key in a focused list filter.
+pub enum FilterAction {
+    /// the filter consumed the key (motion or text edit)
+    Handled,
+    /// esc cancelled the filter and restored the cursor
+    Cancel,
+    /// enter: the caller acts on the current cursor
+    Commit,
+    /// not a filter key
+    Passthrough,
+}
+
+impl ListFilter {
+    /// Focuses the filter with the current list cursor as the restore point.
+    pub fn open(&mut self, cursor: usize) {
+        self.restore = cursor;
+        self.ti = TextInput::default();
+        self.active = true;
+    }
+
+    /// Consumes one key while the filter is focused: text edits the query,
+    /// arrows/tab/page move `cursor` over the `n` matched rows, enter
+    /// commits, esc cancels and restores the cursor against the `total`
+    /// unfiltered rows.
+    pub fn key(
+        &mut self,
+        msg: &Msg,
+        cursor: &mut usize,
+        n: usize,
+        total: usize,
+        page: usize,
+    ) -> FilterAction {
+        use crate::ui::util::{page_cursor, wrap_cursor};
+        match msg {
+            Msg::Esc => {
+                self.active = false;
+                self.ti = TextInput::default();
+                *cursor = self.restore.min(total.saturating_sub(1));
+                FilterAction::Cancel
+            }
+            Msg::Enter => FilterAction::Commit,
+            Msg::Up | Msg::BackTab | Msg::Ctrl('k') => {
+                *cursor = wrap_cursor(*cursor, -1, n);
+                FilterAction::Handled
+            }
+            Msg::Down | Msg::Tab | Msg::Ctrl('j') => {
+                *cursor = wrap_cursor(*cursor, 1, n);
+                FilterAction::Handled
+            }
+            Msg::PageDown | Msg::Ctrl('f') => {
+                *cursor = page_cursor(*cursor, 1, page, n);
+                FilterAction::Handled
+            }
+            Msg::PageUp | Msg::Ctrl('b') => {
+                *cursor = page_cursor(*cursor, -1, page, n);
+                FilterAction::Handled
+            }
+            _ => {
+                let Some(k) = crate::ui::keys::msg_key(msg) else {
+                    return FilterAction::Passthrough;
+                };
+                let before = self.ti.value().to_string();
+                self.ti.handle_key(k);
+                if self.ti.value() != before {
+                    *cursor = 0;
+                }
+                FilterAction::Handled
+            }
+        }
+    }
+}
+
+/// helpState is the "?" keyboard-help page; `scroll` is its first visible row.
+#[derive(Default)]
+pub struct HelpState {
+    pub scroll: usize,
+}
+
 /// selState is the full-screen enum option picker.
 pub struct SelState {
     pub fn_: FormNodeId,
     pub path: Vec<PathSeg>,
     pub opts: Vec<EnumOpt>,
-    /// index into the options matched by `search_ti` (all of them when the
+    /// index into the options matched by the filter (all of them when the
     /// query is empty)
     pub cursor: usize,
-    /// '/'-search query for the option list (text input rules)
-    pub search_ti: TextInput,
-    /// the search input has focus; esc leaves it and restores the full list
-    pub searching: bool,
-    /// option index restored when the search is cancelled
-    pub search_cursor: usize,
+    /// inline '/'-search over the option list
+    pub filter: ListFilter,
     /// set for enum variant editors: t type switch
     pub one_of: Option<FormNodeId>,
 }
@@ -540,9 +594,7 @@ pub struct IssuesState {
     pub items: Vec<Issue>,
     pub cursor: usize,
     /// inline '/'-search over issue messages and paths
-    pub search_ti: TextInput,
-    pub searching: bool,
-    pub search_cursor: usize,
+    pub filter: ListFilter,
 }
 
 /// refPickState is the gr picker.
@@ -551,9 +603,7 @@ pub struct RefPickState {
     pub paths: Vec<Vec<PathSeg>>,
     pub cursor: usize,
     /// inline '/'-search over reference paths and value summaries
-    pub search_ti: TextInput,
-    pub searching: bool,
-    pub search_cursor: usize,
+    pub filter: ListFilter,
 }
 
 /// errsState is the save-time validation error overlay.
@@ -566,9 +616,7 @@ pub struct ErrsState {
     /// write-to path for a W save ("" = the session's own file)
     pub target: String,
     /// inline '/'-search over the error lines
-    pub search_ti: TextInput,
-    pub searching: bool,
-    pub search_cursor: usize,
+    pub filter: ListFilter,
 }
 
 /// confirmState is a y/n question overlay. on_no is optional.
@@ -658,9 +706,7 @@ pub struct FastMoveState {
 pub struct FilePickState {
     pub cursor: usize,
     /// inline '/'-search over file paths
-    pub search_ti: TextInput,
-    pub searching: bool,
-    pub search_cursor: usize,
+    pub filter: ListFilter,
 }
 
 /// externalEdit is the target of a pending $EDITOR run. A non-negative
@@ -725,6 +771,32 @@ pub enum Overlay {
     Mrg(MergeState),
     Comment(CommentState),
     CommentEdit(CommentEditState),
+    Help(HelpState),
+    FilePick(FilePickState),
+}
+
+impl Overlay {
+    /// Whether a text input currently owns the keyboard (q/@/. are literal
+    /// characters there, and history keys must not fire).
+    pub fn typing(&self) -> bool {
+        match self {
+            Overlay::Edit(_)
+            | Overlay::Text(_)
+            | Overlay::CommentEdit(_)
+            | Overlay::Search(_)
+            | Overlay::Add(_)
+            | Overlay::Write(_)
+            | Overlay::Shell(_)
+            | Overlay::Anc(_)
+            | Overlay::Mrg(_) => true,
+            Overlay::Issues(s) => s.filter.active,
+            Overlay::Errs(s) => s.filter.active,
+            Overlay::Sel(s) => s.filter.active,
+            Overlay::RefPick(s) => s.filter.active,
+            Overlay::FilePick(s) => s.filter.active,
+            _ => false,
+        }
+    }
 }
 
 // --- the app ------------------------------------------------------------------
@@ -738,10 +810,6 @@ pub struct App {
     pub overlay: Option<Overlay>,
     /// f/F fast move: waiting for the character
     pub fast_move: Option<FastMoveState>,
-    /// "?" keyboard-help overlay
-    pub help: bool,
-    /// first help row shown by the "?" overlay
-    pub help_scroll: usize,
     /// z filter: hide object keys with no document value
     pub hide_empty: bool,
     /// c: the focused row's description is expanded inline. Any other key
@@ -760,8 +828,6 @@ pub struct App {
     pub macro_buf: Vec<Msg>,
     /// navigation trail (ctrl+o / ctrl+i)
     pub nav: Nav,
-    /// open s-key file switcher overlay
-    pub file_pick: Option<FilePickState>,
     /// the session ended via ctrl+c/EOF abort
     pub aborted: bool,
     /// the session ended cleanly (root quit)
@@ -786,8 +852,6 @@ impl App {
             height: 24,
             overlay: None,
             fast_move: None,
-            help: false,
-            help_scroll: 0,
             hide_empty: false,
             desc_expanded: false,
             notice: String::new(),
@@ -796,7 +860,6 @@ impl App {
             rec_buf: Vec::new(),
             macro_buf: Vec::new(),
             nav: Nav::default(),
-            file_pick: None,
             aborted: false,
             exiting: false,
             exec_editor: false,
@@ -831,12 +894,18 @@ impl App {
 
     /// typing reports whether a text input has focus.
     pub fn typing(&self) -> bool {
-        typing(&self.inputs())
+        if self.overlay.as_ref().is_some_and(Overlay::typing) {
+            return true;
+        }
+        if self.fast_move.is_some() {
+            return true;
+        }
+        self.top().is_some_and(|st| st.filter.active)
     }
 
     /// listMode reports whether the plain menu key table owns the keyboard.
     pub fn list_mode(&self) -> bool {
-        list_mode(&self.inputs())
+        self.overlay.is_none() && !self.typing()
     }
 
     /// plain_motion reports a vertical cursor key in the plain menu. It
@@ -848,49 +917,6 @@ impl App {
         self.overlay.is_none()
             && self.list_mode()
             && (vertical_delta(msg).is_some() || page_delta(msg).is_some())
-    }
-
-    fn inputs(&self) -> Inputs {
-        let mut i = Inputs::default();
-        match &self.overlay {
-            Some(Overlay::Edit(_)) => i.edit = true,
-            Some(Overlay::Text(_)) => i.text = true,
-            Some(Overlay::CommentEdit(_)) => i.text = true,
-            Some(Overlay::Search(_)) => i.search_active = true,
-            Some(Overlay::Add(_)) => i.add = true,
-            Some(Overlay::Write(_)) => i.write = true,
-            Some(Overlay::Shell(_)) => i.shell = true,
-            Some(Overlay::ShellOut(_)) => i.shell_out = true,
-            Some(Overlay::Anc(_)) => i.anc = true,
-            Some(Overlay::Mrg(_)) => i.mrg = true,
-            Some(Overlay::Confirm(_)) => i.confirm = true,
-            Some(Overlay::Issues(s)) => {
-                i.issues = true;
-                i.search_active = s.searching;
-            }
-            Some(Overlay::Errs(s)) => {
-                i.errs = true;
-                i.search_active = s.searching;
-            }
-            Some(Overlay::Sel(s)) => {
-                i.sel = true;
-                i.search_active = s.searching;
-            }
-            Some(Overlay::Comment(_)) => i.comment = true,
-            Some(Overlay::RefPick(s)) => {
-                i.ref_pick = true;
-                i.search_active = s.searching;
-            }
-            _ => {}
-        }
-        i.help = self.help;
-        i.file_pick = self.file_pick.is_some();
-        if let Some(p) = &self.file_pick {
-            i.search_active = p.searching;
-        }
-        i.search_active |= self.top().map_or(false, |st| st.searching);
-        i.fast_move = self.fast_move.is_some();
-        i
     }
 
     // --- rows ---------------------------------------------------------------
@@ -934,14 +960,10 @@ impl App {
 
     /// A MenuCtx for the pure search/summary helpers.
     pub fn ctx(&self) -> MenuCtx<'_> {
-        static EMPTY: LazyLock<HashMap<FormNodeId, FormNodeId>> = LazyLock::new(HashMap::new);
         let f = self.fs();
         MenuCtx {
             schema: &f.schema,
             doc: &f.doc,
-            opts: &f.opts,
-            menu_cache: &EMPTY,
-            hide_empty: self.hide_empty,
         }
     }
 
@@ -1014,9 +1036,7 @@ impl App {
             sel: std::collections::HashSet::new(),
             visual: false,
             vanchor: 0,
-            search_ti: Default::default(),
-            searching: false,
-            search_cursor: 0,
+            filter: Default::default(),
         };
         let val = self.doc().get(&st.path);
         let cands = {
@@ -1387,14 +1407,6 @@ impl App {
     /// routeKey is the overlay dispatch: the innermost open surface consumes
     /// the key.
     fn route_key(&mut self, msg: Msg) {
-        if self.help {
-            self.key_help(&msg);
-            return;
-        }
-        if self.file_pick.is_some() {
-            self.key_file_pick(&msg);
-            return;
-        }
         let Some(ov) = self.overlay.take() else {
             self.key_list(msg);
             return;
@@ -1416,6 +1428,8 @@ impl App {
             Overlay::Mrg(s) => self.key_merge(msg, s),
             Overlay::Comment(s) => self.key_comment(msg, s),
             Overlay::CommentEdit(s) => self.key_comment_edit(msg, s),
+            Overlay::Help(s) => self.key_help(&msg, s),
+            Overlay::FilePick(s) => self.key_file_pick(&msg, s),
         };
     }
 
@@ -1507,9 +1521,7 @@ impl App {
             cursor: 0,
             exit,
             target: target.to_string(),
-            search_ti: TextInput::default(),
-            searching: false,
-            search_cursor: 0,
+            filter: Default::default(),
         }));
     }
 
@@ -1525,7 +1537,7 @@ impl App {
                     return;
                 }
             };
-            if let Err(e) = save(&self.doc()) {
+            if let Err(e) = save(&self.doc(), &self.fs().meta) {
                 self.notice = format!("Write failed: {}", e);
                 return;
             }
@@ -1552,7 +1564,7 @@ impl App {
                 return;
             }
         };
-        if let Err(e) = write_to(target, &self.doc()) {
+        if let Err(e) = write_to(target, &self.doc(), &self.fs().meta) {
             self.notice = format!("Write failed: {}", e);
             return;
         }
@@ -2158,70 +2170,6 @@ pub fn anchor_merge_use_paths(doc: &Doc, n: NodeId) -> Vec<Vec<PathSeg>> {
     }
     walk(doc, doc.root, &[], n, &mut on_path, &mut paths, &mut seen);
     paths
-}
-
-/// Deep-copies a node from `src` into `doc` (Go handed schema-document
-/// nodes and parsed paste documents to doc.Set directly; the arena model
-/// copies across arenas). Anchors and merge refs ride along.
-pub fn copy_from_doc(doc: &mut Doc, src: &Doc, id: NodeId) -> NodeId {
-    let data = src.node(id);
-    let value = match &data.value {
-        Value::Object(mems) => Value::Object(
-            mems.iter()
-                .map(|m| crate::doc::Member {
-                    key: m.key.clone(),
-                    val: copy_from_doc(doc, src, m.val),
-                })
-                .collect(),
-        ),
-        Value::Array(items) => {
-            Value::Array(items.iter().map(|&i| copy_from_doc(doc, src, i)).collect())
-        }
-        v => v.clone(),
-    };
-    let merge = data
-        .merge
-        .iter()
-        .map(|&m| copy_from_doc(doc, src, m))
-        .collect();
-    doc.push(crate::doc::NodeData {
-        value,
-        anchor: data.anchor.clone(),
-        merge,
-        raw: data.raw.clone(),
-    })
-}
-
-/// cloneDetached across arenas: Go's jsondoc.Node.CloneDetached (used by
-/// paste: internal/ui/menu_paste.go:400,411,421 and the single-value path
-/// at :72). Merge members are resolved into plain members and anchor
-/// identity is dropped, so pasted content never shares nodes or anchors
-/// with the source.
-pub fn copy_detached_from_doc(doc: &mut Doc, src: &Doc, id: NodeId) -> NodeId {
-    let value = match &src.node(id).value {
-        Value::Object(_) => Value::Object(
-            src.resolved_members(id)
-                .into_iter()
-                .map(|m| crate::doc::Member {
-                    key: m.key,
-                    val: copy_detached_from_doc(doc, src, m.val),
-                })
-                .collect(),
-        ),
-        Value::Array(items) => Value::Array(
-            items
-                .iter()
-                .map(|&i| copy_detached_from_doc(doc, src, i))
-                .collect(),
-        ),
-        v => v.clone(),
-    };
-    doc.push(crate::doc::NodeData {
-        value,
-        anchor: String::new(),
-        merge: Vec::new(),
-        raw: String::new(),
-    })
 }
 
 // --- terminal plumbing -------------------------------------------------------

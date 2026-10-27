@@ -16,9 +16,9 @@ use std::collections::{HashMap, HashSet};
 use crate::doc::PathSeg;
 use crate::smodel::Schema;
 use crate::ui::history::History;
-use crate::ui::menu::{App, FilePickState, IssuesState, Msg, SearchState};
+use crate::ui::menu::{App, FilePickState, FilterAction, IssuesState, Msg, Overlay, SearchState};
 use crate::ui::rows::{SynthKey, menu_kind_for, seed_variant_cursor};
-use crate::ui::widgets::TextInput;
+use crate::ui::util::wrap_cursor;
 use crate::ui::{FileSession, Issue, MenuState};
 
 /// fileState is the per-file half of the Go listModel: everything that
@@ -26,11 +26,12 @@ use crate::ui::{FileSession, Issue, MenuState};
 pub struct FileState {
     /// the form tree of this file (arena; Go: `model *smodel.FormNode`)
     pub schema: Schema,
-    /// the session's root form node (Go: the `model` pointer itself); the
-    /// spawned root menu captures it, so later code reads the stack instead
-    #[allow(dead_code)]
-    pub root: crate::smodel::FormNodeId,
     pub doc: crate::doc::Doc,
+    /// Format state for a faithful save: comments/directives and the YAML
+    /// alias count. Owned here so one file's state never leaks to another.
+    pub meta: crate::doc::Meta,
+    /// The file's format codec (save, raw editors, schema directive).
+    pub codec: &'static dyn crate::doc::Codec,
     pub opts: crate::ui::Options,
     pub stack: Vec<MenuState>,
     /// at least one successful write this session
@@ -72,12 +73,24 @@ pub struct FileState {
 }
 
 impl FileState {
+    /// Overwrites the document's recorded schema location (S-key picker):
+    /// clear first so a fresh pick replaces the old value, then record it in
+    /// the format's own convention (`schema_member` when the schema declares
+    /// a top-level "$schema").
+    pub fn replace_schema_location(&mut self, loc: &str, schema_member: bool) {
+        self.codec
+            .clear_schema_location(&mut self.doc, &mut self.meta);
+        self.codec
+            .set_schema_location_with(&mut self.doc, &mut self.meta, loc, schema_member);
+    }
+
     /// newFileState builds the per-file init for one session file: the
     /// seeded root menu, the change baseline and the startup notices.
     pub fn new(session: FileSession) -> FileState {
         let schema = session.schema;
         let root = session.root;
         let doc = session.doc;
+        let meta = session.meta;
         let mut stack = vec![MenuState {
             kind: menu_kind_for(&schema, root),
             node: root,
@@ -89,9 +102,7 @@ impl FileState {
             sel: HashSet::new(),
             visual: false,
             vanchor: 0,
-            search_ti: Default::default(),
-            searching: false,
-            search_cursor: 0,
+            filter: Default::default(),
         }];
         // oneOf root: open on the matched variant
         seed_variant_cursor(&schema, stack.last_mut().expect("root pushed"), &doc);
@@ -102,8 +113,9 @@ impl FileState {
         let startup = session.opts.startup_notice.clone();
         FileState {
             schema,
-            root,
             doc,
+            meta,
+            codec: session.codec,
             opts: session.opts,
             stack,
             saved: false,
@@ -176,25 +188,16 @@ impl App {
 
     /// keyFilePick drives the s-key file switcher: enter switches to the
     /// highlighted file, esc closes without moving.
-    pub fn key_file_pick(&mut self, msg: &Msg) {
-        let Some(mut s) = self.file_pick.take() else {
-            return;
-        };
-        if s.searching {
-            self.key_file_pick_search(msg, s);
-            return;
+    pub fn key_file_pick(&mut self, msg: &Msg, mut s: FilePickState) -> Option<Overlay> {
+        if s.filter.active {
+            return self.key_file_pick_search(msg, s);
         }
         let n = self.files.len();
         if self.jump_keys(msg, &mut s.cursor, n) {
-            self.file_pick = Some(s);
-            return;
+            return Some(Overlay::FilePick(s));
         }
         match msg.key_str().as_str() {
-            "/" => {
-                s.search_cursor = s.cursor;
-                s.search_ti = TextInput::default();
-                s.searching = true;
-            }
+            "/" => s.filter.open(s.cursor),
             "up" | "k" | "ctrl+k" => {
                 s.cursor = wrap_cursor(s.cursor, -1, n);
             }
@@ -202,83 +205,45 @@ impl App {
                 s.cursor = wrap_cursor(s.cursor, 1, n);
             }
             "pgdown" | "ctrl+f" => {
-                let page = self.file_pick_page_size(false);
+                let page = self.overlay_page_size(0, false);
                 s.cursor = (s.cursor + page).min(n.saturating_sub(1));
             }
             "pgup" | "ctrl+b" => {
-                let page = self.file_pick_page_size(false);
+                let page = self.overlay_page_size(0, false);
                 s.cursor = s.cursor.saturating_sub(page);
             }
             "enter" => {
                 self.switch_to_file(s.cursor);
-                return;
+                return None;
             }
-            "esc" => return,
-            _ => {
-                self.file_pick = Some(s);
-                return;
-            }
+            "esc" => return None,
+            _ => {}
         }
-        self.file_pick = Some(s);
+        Some(Overlay::FilePick(s))
     }
 
     /// keyFilePickSearch consumes keys while the file-picker filter is
     /// active.
-    fn key_file_pick_search(&mut self, msg: &Msg, mut s: FilePickState) {
-        match msg {
-            Msg::Esc => {
-                s.searching = false;
-                s.search_ti = TextInput::default();
-                s.cursor = s.search_cursor.min(self.files.len().saturating_sub(1));
-            }
-            Msg::Enter => {
-                let idx = self.file_pick_indices(&s).nth(s.cursor);
-                if let Some(i) = idx {
-                    self.switch_to_file(i);
-                    return;
-                }
-            }
-            Msg::Up | Msg::BackTab | Msg::Ctrl('k') => {
-                let n = self.file_pick_indices(&s).count();
-                s.cursor = wrap_cursor(s.cursor, -1, n);
-            }
-            Msg::Down | Msg::Tab | Msg::Ctrl('j') => {
-                let n = self.file_pick_indices(&s).count();
-                s.cursor = wrap_cursor(s.cursor, 1, n);
-            }
-            Msg::PageDown | Msg::Ctrl('f') => {
-                let n = self.file_pick_indices(&s).count();
-                let page = self.file_pick_page_size(true);
-                s.cursor = (s.cursor + page).min(n.saturating_sub(1));
-            }
-            Msg::PageUp | Msg::Ctrl('b') => {
-                let page = self.file_pick_page_size(true);
-                s.cursor = s.cursor.saturating_sub(page);
-            }
-            _ => {
-                let Some(key) = crate::ui::keys::msg_key(msg) else {
-                    self.file_pick = Some(s);
-                    return;
-                };
-                let before = s.search_ti.value().to_string();
-                s.search_ti.handle_key(key);
-                if s.search_ti.value() != before {
-                    s.cursor = 0;
-                }
+    fn key_file_pick_search(&mut self, msg: &Msg, mut s: FilePickState) -> Option<Overlay> {
+        let n = self.file_pick_indices(&s).count();
+        let total = self.files.len();
+        let page = self.overlay_page_size(0, true);
+        if matches!(
+            s.filter.key(msg, &mut s.cursor, n, total, page),
+            FilterAction::Commit
+        ) {
+            let idx = self.file_pick_indices(&s).nth(s.cursor);
+            if let Some(i) = idx {
+                self.switch_to_file(i);
+                return None;
             }
         }
-        self.file_pick = Some(s);
-    }
-
-    fn file_pick_page_size(&self, searching: bool) -> usize {
-        self.height
-            .saturating_sub(2 + usize::from(searching))
-            .max(1)
+        Some(Overlay::FilePick(s))
     }
 
     /// filePickIndices lists the files matching the picker query.
     pub(crate) fn file_pick_indices(&self, s: &FilePickState) -> impl Iterator<Item = usize> + '_ {
-        let q = s.search_ti.value().to_lowercase();
+        let q = s.filter.ti.value().to_lowercase();
         self.files
             .iter()
             .enumerate()
@@ -376,18 +341,4 @@ impl App {
         }
         (saved, forced, paths)
     }
-}
-
-/// wrapCursor advances cur by delta over n items, wrapping at both ends (a
-/// non-positive list stays at 0).
-pub fn wrap_cursor(cur: usize, delta: i64, n: usize) -> usize {
-    if n == 0 {
-        return 0;
-    }
-    let n = n as i64;
-    let mut c = (cur as i64 + delta) % n;
-    if c < 0 {
-        c += n;
-    }
-    c as usize
 }

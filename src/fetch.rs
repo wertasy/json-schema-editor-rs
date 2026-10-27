@@ -48,14 +48,14 @@ fn memo() -> &'static parking_lot::Mutex<HashMap<String, MemoEntry>> {
 }
 
 /// Drops the per-process memo, simulating a fresh jse run (test surface).
-#[allow(dead_code)] // test seam: no production caller
+#[cfg(test)]
 pub fn reset_memo() {
     memo().lock().clear();
 }
 
 /// Sets the cache root override (test surface); empty restores the default
 /// resolution order.
-#[allow(dead_code)] // test seam: production resolves through env/defaults
+#[cfg(test)]
 pub fn set_cache_dir(dir: Option<String>) {
     *CACHE_DIR_OVERRIDE.lock() = dir;
 }

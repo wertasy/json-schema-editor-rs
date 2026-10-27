@@ -82,7 +82,8 @@ redundant_clone = "warn"                 # a clone whose original is never used 
 rc_buffer = "warn"                       # Rc<String> / Rc<Vec<T>>: use Rc<str> / Rc<[T]>
 
 # Idioms.
-string_add = "warn"                      # build strings with format! or push_str, not +
+string_add = "warn"                       # build strings with format! or push_str, not +
+too_many_lines = "warn"                  # functions over clippy.toml's threshold need a split                      # build strings with format! or push_str, not +
 wildcard_imports = "warn"                # no glob imports (use super::* in tests is allowed)
 
 # Output and debugging leftovers.

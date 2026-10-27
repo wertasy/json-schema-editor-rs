@@ -1,4 +1,3 @@
-#![allow(dead_code)] // wired into the menu in later phases
 //! One line per read: Rust port of Go `internal/ui/lineio.go`.
 //!
 //! huh's accessible prompts each read the form input greedily; with a pipe

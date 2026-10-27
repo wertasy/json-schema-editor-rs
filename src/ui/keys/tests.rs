@@ -8,10 +8,10 @@ use std::sync::Arc;
 
 use super::*;
 use crate::doc::jsondoc::Member;
-use crate::doc::{Doc, NodeData, NodeId, PathSeg, Value};
+use crate::doc::{Doc, Meta, NodeData, NodeId, PathSeg, Value};
 use crate::smodel::{EnumOpt, FormNode, FormNodeId, Kind, Schema};
 use crate::ui::menu::{alias_at, same_menu_row};
-use crate::ui::{FileSession, Issue, NodeRef, Options, RawCodec};
+use crate::ui::{FileSession, Issue, Options};
 
 // --- fixtures ---------------------------------------------------------------
 
@@ -117,7 +117,7 @@ fn tenum(b: &mut TB, vals: &[&str]) -> Vec<EnumOpt> {
     vals.iter()
         .map(|&v| {
             let val = b.s(v);
-            let encoded = encode_value(&b.doc, val);
+            let encoded = b.doc.encode_value(val);
             EnumOpt {
                 display: v.into(),
                 encoded,
@@ -285,33 +285,8 @@ fn test_doc() -> Doc {
 
 fn test_opts() -> Options {
     Options {
-        accessible: false,
-        force: false,
-        raw: RawCodec {
-            label: "",
-            ext: ".json",
-            marshal_doc: Arc::new(|d: &Doc| Ok(d.write())),
-            unmarshal_doc: Arc::new(|s: &str| {
-                crate::doc::jsondoc::parse(s).map_err(|e| e.to_string())
-            }),
-            adopt_doc: None,
-            marshal_value: Arc::new(|r: NodeRef<'_>| Ok(r.doc.write_subtree(r.id))),
-            unmarshal_value: Arc::new(|s: &str| {
-                crate::doc::jsondoc::parse(s).map_err(|e| e.to_string())
-            }),
-        },
-        validate: None,
-        save: None,
         path: String::new(),
-        write_to: None,
-        copy: None,
-        paste: None,
-        replace_schema_location: None,
-        comment_at: None,
-        set_comment: None,
-        status: String::new(),
-        startup_notice: String::new(),
-        load_errors: vec![],
+        ..Options::default()
     }
 }
 
@@ -380,15 +355,15 @@ fn press(app: &mut App, keys: &[&str]) {
     }
 }
 
+fn help_scroll(m: &App) -> usize {
+    match &m.overlay {
+        Some(Overlay::Help(h)) => h.scroll,
+        _ => panic!("help page is not open"),
+    }
+}
+
 fn mk_app(doc: Doc, opts: Options) -> App {
-    let schema = test_schema();
-    let root = schema.root;
-    App::new(vec![FileSession {
-        schema,
-        root,
-        doc,
-        opts,
-    }])
+    app_with(test_schema(), doc, opts)
 }
 
 fn path(segs: &[&str]) -> Vec<PathSeg> {
@@ -427,13 +402,37 @@ fn bool_at(doc: &Doc, segs: &[&str]) -> bool {
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn app_with(schema: Schema, doc: Doc, opts: Options) -> App {
+    app_with_meta(schema, doc, opts, crate::doc::Meta::default())
+}
+
+fn session(schema: Schema, doc: Doc, opts: Options) -> FileSession {
     let root = schema.root;
-    App::new(vec![FileSession {
+    let codec = crate::doc::codec_for(&opts.path);
+    FileSession {
         schema,
         root,
         doc,
+        meta: crate::doc::Meta::default(),
+        codec,
         opts,
-    }])
+    }
+}
+
+fn app_with_meta(schema: Schema, doc: Doc, opts: Options, meta: crate::doc::Meta) -> App {
+    let mut s = session(schema, doc, opts);
+    s.meta = meta;
+    App::new(vec![s])
+}
+
+fn app_with_codec(
+    schema: Schema,
+    doc: Doc,
+    opts: Options,
+    codec: &'static dyn crate::doc::Codec,
+) -> App {
+    let mut s = session(schema, doc, opts);
+    s.codec = codec;
+    App::new(vec![s])
 }
 
 /// schema_build builds an arena schema from node constructors.
@@ -568,7 +567,7 @@ fn counting_opts() -> (Options, Arc<AtomicUsize>) {
     let mut opts = test_opts();
     let n = Arc::new(AtomicUsize::new(0));
     let c = Arc::clone(&n);
-    opts.save = Some(Arc::new(move |_| {
+    opts.save = Some(Arc::new(move |_, _| {
         c.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }));
@@ -673,8 +672,8 @@ fn menu_enum_overlay_search_filters_and_selects() {
     press(&mut m, &["/", "G", "R"]); // case-insensitive query
     match &m.overlay {
         Some(Overlay::Sel(s)) => {
-            assert!(s.searching);
-            assert_eq!(s.search_ti.value(), "GR");
+            assert!(s.filter.active);
+            assert_eq!(s.filter.ti.value(), "GR");
             assert_eq!(sel_match_count(s), 1, "only grpc matches");
             let view = m.sel_view(s);
             assert!(view.contains("grpc"));
@@ -709,8 +708,8 @@ fn menu_enum_overlay_search_cancel_and_no_match() {
     press(&mut m, &["esc"]); // leave search, keep the picker
     match &m.overlay {
         Some(Overlay::Sel(s)) => {
-            assert!(!s.searching);
-            assert_eq!(s.search_ti.value(), "");
+            assert!(!s.filter.active);
+            assert_eq!(s.filter.ti.value(), "");
             assert_eq!(sel_match_count(s), 3, "the full option list is back");
         }
         _ => panic!("esc must only cancel the search"),
@@ -736,8 +735,8 @@ fn menu_enum_overlay_search_takes_q_literally() {
     press(&mut m, &["/", "q"]);
     match &m.overlay {
         Some(Overlay::Sel(s)) => {
-            assert!(s.searching, "q must be a query character, not esc");
-            assert_eq!(s.search_ti.value(), "q");
+            assert!(s.filter.active, "q must be a query character, not esc");
+            assert_eq!(s.filter.ti.value(), "q");
             assert_eq!(sel_match_count(s), 1);
         }
         _ => panic!("enum picker should stay open"),
@@ -838,9 +837,7 @@ fn overlay_help_rows_pin_to_the_terminal_bottom() {
         name: "x".into(),
         paths: vec![sp(&["name"])],
         cursor: 0,
-        search_ti: Default::default(),
-        searching: false,
-        search_cursor: 0,
+        filter: Default::default(),
     }));
     assert_hint_bottom(&mut m, "enter jump");
 
@@ -850,9 +847,7 @@ fn overlay_help_rows_pin_to_the_terminal_bottom() {
         cursor: 0,
         exit: false,
         target: String::new(),
-        search_ti: Default::default(),
-        searching: false,
-        search_cursor: 0,
+        filter: Default::default(),
     }));
     assert_hint_bottom(&mut m, "pgup/pgdn page");
 
@@ -877,12 +872,10 @@ fn overlay_help_rows_pin_to_the_terminal_bottom() {
     assert_hint_bottom(&mut m, "ctrl+s apply");
 
     m.overlay = None;
-    m.file_pick = Some(FilePickState {
+    m.overlay = Some(Overlay::FilePick(FilePickState {
         cursor: 0,
-        search_ti: Default::default(),
-        searching: false,
-        search_cursor: 0,
-    });
+        filter: Default::default(),
+    }));
     assert_hint_bottom(&mut m, "enter switch");
 }
 
@@ -914,8 +907,8 @@ fn search_opens_empty_on_the_current_value() {
     press(&mut m, &["t"]);
     assert_eq!(m.top().unwrap().cursor, 1, "seeded on Beta");
     press(&mut m, &["/"]);
-    assert!(m.top().unwrap().searching);
-    assert_eq!(m.top().unwrap().search_ti.value(), "", "empty query");
+    assert!(m.top().unwrap().filter.active);
+    assert_eq!(m.top().unwrap().filter.ti.value(), "", "empty query");
     assert_eq!(m.top().unwrap().cursor, 1, "cursor keeps the value row");
     press(&mut m, &["a", "l"]);
     press(&mut m, &["esc"]);
@@ -940,10 +933,10 @@ fn search_opens_empty_on_the_current_value() {
     press(&mut m, &["/"]);
     match &m.overlay {
         Some(Overlay::Sel(s)) => {
-            assert!(s.searching);
-            assert_eq!(s.search_ti.value(), "");
+            assert!(s.filter.active);
+            assert_eq!(s.filter.ti.value(), "");
             assert_eq!(s.cursor, 2, "cursor stays on the current value");
-            assert_eq!(s.search_cursor, 2);
+            assert_eq!(s.filter.restore, 2);
         }
         _ => panic!("enum picker should stay open"),
     }
@@ -968,17 +961,17 @@ fn enum_array_search_filters_toggles() {
     assert_eq!(m.menu_rows().len(), 3);
 
     press(&mut m, &["/", "g", "a"]);
-    assert!(m.top().unwrap().searching);
-    assert_eq!(m.top().unwrap().search_ti.value(), "ga");
+    assert!(m.top().unwrap().filter.active);
+    assert_eq!(m.top().unwrap().filter.ti.value(), "ga");
     assert_eq!(m.menu_rows().len(), 1, "only gamma matches");
     assert!(!matches!(m.overlay, Some(Overlay::Search(_))));
 
     press(&mut m, &["enter"]); // toggles the only match, filter stays
     assert_eq!(arr_strs(&m.fs().doc, &sp(&["levels"])), ["beta", "gamma"]);
-    assert!(m.top().unwrap().searching);
+    assert!(m.top().unwrap().filter.active);
 
     press(&mut m, &["esc"]);
-    assert!(!m.top().unwrap().searching);
+    assert!(!m.top().unwrap().filter.active);
     assert_eq!(m.menu_rows().len(), 3);
 }
 
@@ -1010,8 +1003,8 @@ fn issues_list_search_and_cancel() {
     press(&mut m, &["esc"]);
     match &m.overlay {
         Some(Overlay::Issues(s)) => {
-            assert!(!s.searching);
-            assert_eq!(s.search_ti.value(), "");
+            assert!(!s.filter.active);
+            assert_eq!(s.filter.ti.value(), "");
             assert_eq!(s.cursor, 1, "cancel restores the row");
         }
         _ => panic!("issues overlay should stay open"),
@@ -1034,9 +1027,7 @@ fn save_error_list_search() {
         cursor: 0,
         exit: false,
         target: String::new(),
-        search_ti: Default::default(),
-        searching: false,
-        search_cursor: 0,
+        filter: Default::default(),
     }));
 
     press(&mut m, &["/", "w", "o", "r"]);
@@ -1057,9 +1048,7 @@ fn reference_list_search() {
         name: "x".into(),
         paths: vec![sp(&["name"]), sp(&["server", "host"])],
         cursor: 0,
-        search_ti: Default::default(),
-        searching: false,
-        search_cursor: 0,
+        filter: Default::default(),
     }));
 
     press(&mut m, &["/", "h", "o", "s", "t"]);
@@ -1078,31 +1067,17 @@ fn file_picker_search() {
         o
     };
     let schema1 = test_schema();
-    let root1 = schema1.root;
     let schema2 = test_schema();
-    let root2 = schema2.root;
     let mut m = App::new(vec![
-        FileSession {
-            schema: schema1,
-            root: root1,
-            doc: test_doc(),
-            opts: opts("alpha.json"),
-        },
-        FileSession {
-            schema: schema2,
-            root: root2,
-            doc: test_doc(),
-            opts: opts("beta.json"),
-        },
+        session(schema1, test_doc(), opts("alpha.json")),
+        session(schema2, test_doc(), opts("beta.json")),
     ]);
     m.width = 80;
     m.height = 12;
-    m.file_pick = Some(FilePickState {
+    m.overlay = Some(Overlay::FilePick(FilePickState {
         cursor: 0,
-        search_ti: Default::default(),
-        searching: false,
-        search_cursor: 0,
-    });
+        filter: Default::default(),
+    }));
 
     press(&mut m, &["/", "b", "e", "t", "a"]);
     let view = m.view();
@@ -1110,7 +1085,7 @@ fn file_picker_search() {
     assert!(!view.contains("alpha.json"), "{view}");
     press(&mut m, &["enter"]);
     assert_eq!(m.cur, 1);
-    assert!(m.file_pick.is_none());
+    assert!(!matches!(m.overlay, Some(Overlay::FilePick(_))));
 }
 
 #[test]
@@ -1510,21 +1485,9 @@ fn document_comment_and_schema_help_render_together_and_c_edits_comment() {
         r#"{"type":"object","properties":{"port":{"type":"number","description":"schema port help"}}}"#,
     );
     let doc = dbuild(|db| db.obj(vec![("port", db.n("8080"))]));
-    let meta = Arc::new(parking_lot::Mutex::new(crate::doc::Meta::default()));
-    {
-        let mut g = meta.lock();
-        g.set_comment_text(&sp(&["port"]), "port doc note", "//");
-    }
-    let mut opts = test_opts();
-    opts.comment_at = Some({
-        let m = Arc::clone(&meta);
-        Arc::new(move |p: &[PathSeg]| m.lock().comment_text(p))
-    });
-    opts.set_comment = Some({
-        let m = Arc::clone(&meta);
-        Arc::new(move |p: &[PathSeg], t: &str| m.lock().set_comment_text(p, t, "//"))
-    });
-    let mut m = app_with(schema, doc, opts);
+    let mut meta = crate::doc::Meta::default();
+    meta.set_comment_text(&sp(&["port"]), "port doc note", "//");
+    let mut m = app_with_meta(schema, doc, test_opts(), meta);
     m.width = 90;
     m.height = 24;
     set_cursor_path(&mut m, &sp(&["port"]));
@@ -1560,7 +1523,7 @@ fn document_comment_and_schema_help_render_together_and_c_edits_comment() {
     press(&mut m, &["ctrl+s"]);
     assert!(m.overlay.is_none());
     assert_eq!(
-        meta.lock().comment_text(&sp(&["port"])).as_deref(),
+        m.fs().meta.comment_text(&sp(&["port"])).as_deref(),
         Some("edited note")
     );
     assert!(m.view().contains("edited note"));
@@ -1596,17 +1559,8 @@ fn text_area_view_draws_the_cursor() {
 fn c_adds_and_removes_a_document_comment() {
     let schema = schema_from_json(r#"{"type":"object","properties":{"port":{"type":"number"}}}"#);
     let doc = dbuild(|db| db.obj(vec![("port", db.n("8080"))]));
-    let meta = Arc::new(parking_lot::Mutex::new(crate::doc::Meta::default()));
-    let mut opts = test_opts();
-    opts.comment_at = Some({
-        let m = Arc::clone(&meta);
-        Arc::new(move |p: &[PathSeg]| m.lock().comment_text(p))
-    });
-    opts.set_comment = Some({
-        let m = Arc::clone(&meta);
-        Arc::new(move |p: &[PathSeg], t: &str| m.lock().set_comment_text(p, t, "//"))
-    });
-    let mut m = app_with(schema, doc, opts);
+    let mut meta = crate::doc::Meta::default();
+    let mut m = app_with_meta(schema, doc, test_opts(), meta);
     set_cursor_path(&mut m, &sp(&["port"]));
 
     press(&mut m, &["C"]);
@@ -1619,7 +1573,7 @@ fn c_adds_and_removes_a_document_comment() {
     }
     press(&mut m, &["ctrl+s"]);
     assert_eq!(
-        meta.lock().comment_text(&sp(&["port"])).as_deref(),
+        m.fs().meta.comment_text(&sp(&["port"])).as_deref(),
         Some("new note")
     );
 
@@ -1629,7 +1583,7 @@ fn c_adds_and_removes_a_document_comment() {
         _ => panic!("C must reopen the comment editor"),
     }
     press(&mut m, &["ctrl+s"]);
-    assert!(meta.lock().comment_text(&sp(&["port"])).is_none());
+    assert!(m.fs().meta.comment_text(&sp(&["port"])).is_none());
 }
 
 #[test]
@@ -1665,30 +1619,18 @@ fn comment_edit_requires_a_document_value() {
 fn applying_an_unchanged_comment_keeps_metadata_and_dirty_state() {
     let schema = schema_from_json(r#"{"type":"object","properties":{"port":{"type":"number"}}}"#);
     let doc = dbuild(|db| db.obj(vec![("port", db.n("8080"))]));
-    let meta = Arc::new(parking_lot::Mutex::new(crate::doc::Meta::default()));
-    {
-        let mut g = meta.lock();
-        let mut cs = crate::doc::CommentSet::default();
-        cs.head = "/* keep me */".into();
-        g.comments.insert(sp(&["port"]), cs);
-    }
-    let before = meta.lock().comments.clone();
-    let mut opts = test_opts();
-    opts.comment_at = Some({
-        let m = Arc::clone(&meta);
-        Arc::new(move |p: &[PathSeg]| m.lock().comment_text(p))
-    });
-    opts.set_comment = Some({
-        let m = Arc::clone(&meta);
-        Arc::new(move |p: &[PathSeg], t: &str| m.lock().set_comment_text(p, t, "//"))
-    });
-    let mut m = app_with(schema, doc, opts);
+    let mut meta = crate::doc::Meta::default();
+    let mut cs = crate::doc::CommentSet::default();
+    cs.head = "/* keep me */".into();
+    meta.comments.insert(sp(&["port"]), cs);
+    let before = meta.comments.clone();
+    let mut m = app_with_meta(schema, doc, test_opts(), meta);
     set_cursor_path(&mut m, &sp(&["port"]));
     press(&mut m, &["C"]);
     assert!(matches!(m.overlay, Some(Overlay::CommentEdit(_))));
     press(&mut m, &["ctrl+s"]);
     assert!(m.overlay.is_none());
-    assert_eq!(meta.lock().comments, before, "no-op apply rewrote metadata");
+    assert_eq!(m.fs().meta.comments, before, "no-op apply rewrote metadata");
     assert!(!m.dirty());
 }
 
@@ -1698,17 +1640,9 @@ fn both_description_sources_fold_independently_at_two_lines() {
         r#"{"type":"object","properties":{"port":{"type":"number","description":"S1\nS2\nS3"}}}"#,
     );
     let doc = dbuild(|db| db.obj(vec![("port", db.n("8080"))]));
-    let meta = Arc::new(parking_lot::Mutex::new(crate::doc::Meta::default()));
-    {
-        let mut g = meta.lock();
-        g.set_comment_text(&sp(&["port"]), "C1\nC2\nC3", "//");
-    }
-    let mut opts = test_opts();
-    opts.comment_at = Some({
-        let m = Arc::clone(&meta);
-        Arc::new(move |p: &[PathSeg]| m.lock().comment_text(p))
-    });
-    let mut m = app_with(schema, doc, opts);
+    let mut meta = crate::doc::Meta::default();
+    meta.set_comment_text(&sp(&["port"]), "C1\nC2\nC3", "//");
+    let mut m = app_with_meta(schema, doc, test_opts(), meta);
     m.width = 60;
     m.height = 24;
     set_cursor_path(&mut m, &sp(&["port"]));
@@ -1983,17 +1917,17 @@ fn help_page_scrolls_when_taller_than_the_screen() {
     m.width = 80;
     m.height = 24;
     press(&mut m, &["?"]);
-    assert!(m.help);
+    assert!(matches!(m.overlay, Some(Overlay::Help(_))));
     assert!(!m.view().contains("merge keys: merge anchors"));
 
     press(&mut m, &["pgdown"]);
-    assert_eq!(m.help_scroll, 21, "one full help screen");
+    assert_eq!(help_scroll(&m), 21, "one full help screen");
     assert!(m.view().contains("merge keys: merge anchors"));
 
     press(&mut m, &["pgup"]);
-    assert_eq!(m.help_scroll, 0);
+    assert_eq!(help_scroll(&m), 0);
     press(&mut m, &["q"]);
-    assert!(!m.help, "q must close the help page");
+    assert!(m.overlay.is_none(), "q must close the help page");
 }
 
 #[test]
@@ -2189,17 +2123,17 @@ fn type_picker_search_filters_variants_inline() {
     // "/" opens an empty search and keeps the cursor on the selected type
     press(&mut m, &["/"]);
     assert!(m.overlay.is_none());
-    assert!(m.top().unwrap().searching);
-    assert_eq!(m.top().unwrap().search_ti.value(), "");
+    assert!(m.top().unwrap().filter.active);
+    assert_eq!(m.top().unwrap().filter.ti.value(), "");
     assert_eq!(m.top().unwrap().cursor, before);
-    assert_eq!(m.top().unwrap().search_cursor, before);
+    assert_eq!(m.top().unwrap().filter.restore, before);
 
     // "u" is a filter character, not undo
     press(&mut m, &["u"]);
-    assert_eq!(m.top().unwrap().search_ti.value(), "u");
+    assert_eq!(m.top().unwrap().filter.ti.value(), "u");
     press(&mut m, &["x"]);
-    assert_eq!(m.top().unwrap().search_ti.value(), "ux");
-    assert!(m.top().unwrap().searching);
+    assert_eq!(m.top().unwrap().filter.ti.value(), "ux");
+    assert!(m.top().unwrap().filter.active);
 
     // no match keeps search mode alive so backspace can undo the query
     let rows = m.menu_rows();
@@ -2207,10 +2141,10 @@ fn type_picker_search_filters_variants_inline() {
     assert_eq!(rows[0].kind, RowKind::NoItems);
     assert!(rows[0].label.contains("no matching"));
     press(&mut m, &["backspace", "backspace"]);
-    assert_eq!(m.top().unwrap().search_ti.value(), "");
+    assert_eq!(m.top().unwrap().filter.ti.value(), "");
     press(&mut m, &["esc"]);
-    assert!(!m.top().unwrap().searching);
-    assert!(m.top().unwrap().search_ti.value().is_empty());
+    assert!(!m.top().unwrap().filter.active);
+    assert!(m.top().unwrap().filter.ti.value().is_empty());
 
     // a fresh search narrows to the schema-defined type
     press(&mut m, &["/", "S", "e", "r", "v", "e", "r"]);
@@ -2614,7 +2548,7 @@ fn menu_save_flow() {
     fopts.force = true;
     {
         let c = Arc::new(AtomicUsize::new(0));
-        fopts.save = Some(Arc::new(move |_| {
+        fopts.save = Some(Arc::new(move |_, _| {
             c.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }));
@@ -2780,7 +2714,7 @@ fn jump_keys_overlays() {
         "at '$.mode': bad mode".into(),
     ]);
     eopts.force = true;
-    eopts.save = Some(Arc::new(|_| Ok(())));
+    eopts.save = Some(Arc::new(|_, _| Ok(())));
     let mut m2 = mk_app(test_doc(), eopts);
     press(&mut m2, &["ctrl+s"]);
     press(&mut m2, &["G"]);
@@ -3047,66 +2981,18 @@ fn paste_app(doc: Doc, text: &str) -> App {
     app_with(test_schema(), doc, opts)
 }
 
-fn yaml_codec() -> RawCodec {
-    RawCodec {
-        label: "YAML",
-        ext: ".yaml",
-        marshal_doc: Arc::new(|d: &Doc| {
-            crate::doc::yamldoc::write(d, None).map_err(|e| e.to_string())
-        }),
-        unmarshal_doc: Arc::new(|s: &str| {
-            crate::doc::yamldoc::parse(s)
-                .map(|(d, _)| d)
-                .map_err(|e| e.to_string())
-        }),
-        adopt_doc: None,
-        marshal_value: Arc::new(|_| Err("unused".into())),
-        unmarshal_value: Arc::new(|s: &str| {
-            crate::doc::yamldoc::parse(s)
-                .map(|(d, _)| d)
-                .map_err(|e| e.to_string())
-        }),
-    }
-}
-
 fn yaml_paste_app(doc: Doc, text: &str) -> App {
     let mut opts = test_opts();
-    opts.raw = yaml_codec();
     let t = text.to_string();
     opts.paste = Some(Arc::new(move || Ok(t.clone())));
-    app_with(test_schema(), doc, opts)
-}
-
-fn toml_codec() -> RawCodec {
-    RawCodec {
-        label: "TOML",
-        ext: ".toml",
-        marshal_doc: Arc::new(|d: &Doc| {
-            crate::doc::tomldoc::write(d, &crate::doc::Meta::default()).map_err(|e| e.to_string())
-        }),
-        unmarshal_doc: Arc::new(|s: &str| {
-            crate::doc::tomldoc::parse(s)
-                .map(|(d, _)| d)
-                .map_err(|e| e.to_string())
-        }),
-        adopt_doc: None,
-        marshal_value: Arc::new(|r| {
-            crate::doc::tomldoc::write_value(r.doc, r.id).map_err(|e| e.to_string())
-        }),
-        unmarshal_value: Arc::new(|s: &str| {
-            crate::doc::tomldoc::parse_value(s)
-                .map(|(d, _)| d)
-                .map_err(|e| e.to_string())
-        }),
-    }
+    app_with_codec(test_schema(), doc, opts, crate::doc::codec_for("a.yaml"))
 }
 
 fn toml_paste_app(doc: Doc, text: &str) -> App {
     let mut opts = test_opts();
-    opts.raw = toml_codec();
     let t = text.to_string();
     opts.paste = Some(Arc::new(move || Ok(t.clone())));
-    app_with(test_schema(), doc, opts)
+    app_with_codec(test_schema(), doc, opts, crate::doc::codec_for("a.toml"))
 }
 
 fn two_mount_doc() -> Doc {
@@ -5919,9 +5805,7 @@ fn mstate(kind: MenuKind, node: FormNodeId, path: Vec<PathSeg>) -> MenuState {
         sel: Default::default(),
         visual: false,
         vanchor: 0,
-        search_ti: Default::default(),
-        searching: false,
-        search_cursor: 0,
+        filter: Default::default(),
     }
 }
 
@@ -5947,6 +5831,7 @@ fn body_val(f: impl FnOnce(&DB) -> NodeId) -> (Doc, NodeId) {
 #[test]
 fn matching_variants() {
     let (schema, one_of, _) = infer_schema();
+    let variants = schema.nodes[one_of as usize].variants.clone();
     let cases: Vec<(&str, Option<(Doc, NodeId)>, &str)> = vec![
         ("nil value", None, "variant 1,variant 2"),
         (
@@ -5978,11 +5863,11 @@ fn matching_variants() {
         let got = match &val {
             None => variant_titles(
                 &schema,
-                &crate::ui::rows::matching_variants(&schema, one_of, &Doc::new(), None),
+                &crate::ui::rows::match_variant_list(&schema, &variants, &Doc::new(), None),
             ),
             Some((doc, v)) => variant_titles(
                 &schema,
-                &crate::ui::rows::matching_variants(&schema, one_of, doc, Some(*v)),
+                &crate::ui::rows::match_variant_list(&schema, &variants, doc, Some(*v)),
             ),
         };
         assert_eq!(got, want, "{name}");
@@ -8437,11 +8322,11 @@ use parking_lot::Mutex;
 fn write_opts(path: &str, save: Arc<AtomicUsize>, paths: Arc<Mutex<Vec<String>>>) -> Options {
     let mut opts = test_opts();
     opts.path = path.to_string();
-    opts.save = Some(Arc::new(move |_| {
+    opts.save = Some(Arc::new(move |_, _| {
         save.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }));
-    opts.write_to = Some(Arc::new(move |p: &str, _: &Doc| {
+    opts.write_to = Some(Arc::new(move |p: &str, _: &Doc, _: &Meta| {
         paths.lock().push(p.to_string());
         Ok(())
     }));
@@ -8547,7 +8432,7 @@ fn write_to_validation_gates_and_forces() {
     opts.path = "/origin/f.json".into();
     opts.validate = Some(Arc::new(|_: &Doc| vec!["x is required".into()]));
     opts.force = true;
-    opts.write_to = Some(Arc::new(move |path: &str, _: &Doc| {
+    opts.write_to = Some(Arc::new(move |path: &str, _: &Doc, _: &Meta| {
         p.lock().push(path.to_string());
         Ok(())
     }));
@@ -8573,7 +8458,9 @@ fn write_to_validation_gates_and_forces() {
 fn write_to_error_is_reported() {
     let mut opts = test_opts();
     opts.path = "/origin/f.json".into();
-    opts.write_to = Some(Arc::new(|_: &str, _: &Doc| Err("disk full".to_string())));
+    opts.write_to = Some(Arc::new(|_: &str, _: &Doc, _: &Meta| {
+        Err("disk full".to_string())
+    }));
     let mut m = mk_app(test_doc(), opts);
     press(&mut m, &["W"]);
     press(&mut m, &["ctrl+u"]);
@@ -8594,7 +8481,7 @@ fn write_to_error_is_reported() {
 fn save_error_is_reported_as_write_failure() {
     let mut opts = test_opts();
     opts.path = "/origin/f.json".into();
-    opts.save = Some(Arc::new(|_: &Doc| Err("disk full".to_string())));
+    opts.save = Some(Arc::new(|_: &Doc, _: &Meta| Err("disk full".to_string())));
     let mut m = mk_app(test_doc(), opts);
     press(&mut m, &["ctrl+s"]);
     assert!(
@@ -8616,7 +8503,7 @@ fn write_to_path_completion() {
     let p = Arc::clone(&paths);
     let mut opts = test_opts();
     opts.path = root.join("alpha.json").to_string_lossy().to_string();
-    opts.write_to = Some(Arc::new(move |path: &str, _: &Doc| {
+    opts.write_to = Some(Arc::new(move |path: &str, _: &Doc, _: &Meta| {
         p.lock().push(path.to_string());
         Ok(())
     }));
@@ -10150,44 +10037,6 @@ fn raw_textarea_view_is_windowed() {
 // quoted values their quotes. Strings now open as their own content and apply
 // verbatim; mappings/sequences still open as YAML.
 
-fn yaml_value_codec() -> RawCodec {
-    let mut c = yaml_codec();
-    c.marshal_value = Arc::new(|r: NodeRef<'_>| {
-        let mut sub = Doc::new();
-        sub.root = copy_subtree(r.doc, r.id, &mut sub);
-        crate::doc::yamldoc::write(&sub, None).map_err(|e| e.to_string())
-    });
-    c
-}
-
-fn copy_subtree(src: &Doc, id: NodeId, dst: &mut Doc) -> NodeId {
-    use crate::doc::{Member, Value as V};
-    let merge: Vec<NodeId> = src
-        .node(id)
-        .merge
-        .iter()
-        .map(|&m| copy_subtree(src, m, dst))
-        .collect();
-    let value = match src.value(id) {
-        V::Object(ms) => V::Object(
-            ms.iter()
-                .map(|m| Member {
-                    key: m.key.clone(),
-                    val: copy_subtree(src, m.val, dst),
-                })
-                .collect(),
-        ),
-        V::Array(is) => V::Array(is.iter().map(|&i| copy_subtree(src, i, dst)).collect()),
-        v => v.clone(),
-    };
-    dst.push(NodeData {
-        value,
-        anchor: String::new(),
-        merge,
-        raw: String::new(),
-    })
-}
-
 fn raw_field_schema() -> Schema {
     schema_build(|b| {
         let msg = b.id(fnode("msg", "Msg", Kind::Raw));
@@ -10200,10 +10049,8 @@ fn raw_field_schema() -> Schema {
     })
 }
 
-fn open_msg_textarea(schema: Schema, doc: Doc, codec: RawCodec) -> App {
-    let mut opts = test_opts();
-    opts.raw = codec;
-    let mut m = app_with(schema, doc, opts);
+fn open_msg_textarea(schema: Schema, doc: Doc, codec: &'static dyn crate::doc::Codec) -> App {
+    let mut m = app_with_codec(schema, doc, test_opts(), codec);
     // t opens the type picker; the JSON variant is the explicit
     // raw-textarea escape hatch
     press(&mut m, &["t"]);
@@ -10252,7 +10099,7 @@ fn untyped_field_with_value_edits_directly() {
 #[test]
 fn yaml_multiline_string_opens_as_plain_text() {
     let (doc, _) = crate::doc::yamldoc::parse("msg: |\n  hello\n  world\n").unwrap();
-    let m = open_msg_textarea(raw_field_schema(), doc, yaml_value_codec());
+    let m = open_msg_textarea(raw_field_schema(), doc, crate::doc::codec_for("a.yaml"));
     assert_eq!(
         textarea_text(&m),
         "hello\nworld\n",
@@ -10263,7 +10110,7 @@ fn yaml_multiline_string_opens_as_plain_text() {
 #[test]
 fn yaml_string_edits_apply_verbatim() {
     let (doc, _) = crate::doc::yamldoc::parse("msg: |\n  hello\n  world\n").unwrap();
-    let mut m = open_msg_textarea(raw_field_schema(), doc, yaml_value_codec());
+    let mut m = open_msg_textarea(raw_field_schema(), doc, crate::doc::codec_for("a.yaml"));
     // unchanged text keeps the value (no YAML re-parse surprises)
     press(&mut m, &["ctrl+s"]);
     assert_eq!(str_at(&m.fs().doc, &["msg"]), "hello\nworld\n");
@@ -10271,7 +10118,7 @@ fn yaml_string_edits_apply_verbatim() {
     let mut m2 = open_msg_textarea(
         raw_field_schema(),
         crate::doc::yamldoc::parse("msg: hello\n").unwrap().0,
-        yaml_value_codec(),
+        crate::doc::codec_for("a.yaml"),
     );
     if let Some(Overlay::Text(s)) = &mut m2.overlay {
         s.ta.set_value("  spaced\nline2");
@@ -10283,7 +10130,7 @@ fn yaml_string_edits_apply_verbatim() {
 #[test]
 fn yaml_mapping_values_still_open_as_yaml() {
     let (doc, _) = crate::doc::yamldoc::parse("msg:\n  a: 1\n  b: two\n").unwrap();
-    let m = open_msg_textarea(raw_field_schema(), doc, yaml_value_codec());
+    let m = open_msg_textarea(raw_field_schema(), doc, crate::doc::codec_for("a.yaml"));
     assert_eq!(textarea_text(&m), "a: 1\nb: two\n");
 }
 
@@ -10294,7 +10141,7 @@ fn json_string_values_open_as_plain_text_too() {
         let v = db.push(Value::Str("v".into()));
         db.obj(vec![("msg", v)])
     });
-    let m = open_msg_textarea(raw_field_schema(), doc, test_opts().raw);
+    let m = open_msg_textarea(raw_field_schema(), doc, crate::doc::codec_for("a.json"));
     assert_eq!(textarea_text(&m), "v");
 }
 
@@ -11171,5 +11018,42 @@ fn candidate_overlay_hides_a_long_shared_prefix() {
         lines[0].contains("…ad") && lines[1].contains("…ai"),
         "the differing tails must stay visible: {:?}",
         lines
+    );
+}
+
+#[test]
+fn repair_stack_pops_levels_whose_path_disappeared() {
+    let schema = test_schema();
+    let doc = test_doc();
+    let mut app = app_with(schema, doc, test_opts());
+    let server = child(&app.fs().schema, app.fs().schema.root, "server");
+    app.push(server, sp(&["server"]));
+    assert_eq!(app.fs().stack.len(), 2);
+    // the container the stack is inside disappears from the document
+    app.fs_mut().doc.remove(&[ks("server")]);
+    app.repair_stack();
+    assert_eq!(app.fs().stack.len(), 1);
+    assert!(app.fs().stack[0].path.is_empty());
+}
+
+#[test]
+fn whole_document_raw_edit_adopts_format_meta() {
+    // A whole-document raw edit replaces the body; the format metadata must
+    // be re-parsed with it or the comments in the new text are lost.
+    let mut m = mk_app(test_doc(), test_opts());
+    let mut ta = TextArea::new();
+    ta.set_value("{\n  \"name\": \"x\" // keep me\n}\n");
+    m.overlay = Some(Overlay::Text(TextState {
+        path: None,
+        fn_: None,
+        ta,
+        err: String::new(),
+        verbatim_str: false,
+    }));
+    press(&mut m, &["ctrl+s"]);
+    assert!(m.overlay.is_none(), "{:?}", m.notice);
+    assert_eq!(
+        m.fs().meta.comment_text(&sp(&["name"])).as_deref(),
+        Some("keep me")
     );
 }

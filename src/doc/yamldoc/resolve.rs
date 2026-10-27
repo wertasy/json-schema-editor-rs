@@ -185,7 +185,7 @@ pub(crate) fn resolve_plain(in_: &str) -> PlainTag {
                 return PlainTag::Timestamp;
             }
             let plain: String = in_.replace('_', "");
-            if parse_go_int(&plain).is_some() || parse_go_uint(&plain).is_some() {
+            if parse_int_str(&plain).is_some() || parse_uint_str(&plain).is_some() {
                 return PlainTag::Int;
             }
             if yaml_style_float(&plain) && plain.parse::<f64>().is_ok() {
@@ -230,7 +230,7 @@ fn split_prefix(rest: &str) -> (&str, u32) {
 }
 
 /// strconv.ParseInt(s, 0, 64).
-pub(crate) fn parse_go_int(s: &str) -> Option<i64> {
+pub(crate) fn parse_int_str(s: &str) -> Option<i64> {
     let (neg, rest) = match s.as_bytes().first() {
         Some(b'-') => (true, &s[1..]),
         Some(b'+') => (false, &s[1..]),
@@ -248,7 +248,7 @@ pub(crate) fn parse_go_int(s: &str) -> Option<i64> {
 }
 
 /// strconv.ParseUint(s, 0, 64).
-fn parse_go_uint(s: &str) -> Option<u64> {
+fn parse_uint_str(s: &str) -> Option<u64> {
     let rest = s.strip_prefix('+').unwrap_or(s);
     if rest.starts_with('-') || rest.is_empty() {
         return None;
@@ -307,7 +307,7 @@ fn is_json_number(s: &str) -> bool {
 
 /// normalizeNum turns a YAML numeric literal into a JSON numeric literal:
 /// valid JSON passes through; ints decode via Go's base-0 parsing; floats
-/// format with Go's 'g' shortest form; inf/nan are refused.
+/// use the ECMAScript shortest spelling (`1e6` → `1000000`); inf/nan are refused.
 pub(crate) fn normalize_num(tag: &str, raw: &str) -> Result<String, DocError> {
     if is_json_number(raw) {
         return Ok(raw.to_string());
@@ -315,10 +315,10 @@ pub(crate) fn normalize_num(tag: &str, raw: &str) -> Result<String, DocError> {
     let clean: String = raw.replace('_', "");
     match tag {
         "!!int" => {
-            if let Some(i) = parse_go_int(&clean) {
+            if let Some(i) = parse_int_str(&clean) {
                 return Ok(i.to_string());
             }
-            if let Some(u) = parse_go_uint(&clean) {
+            if let Some(u) = parse_uint_str(&clean) {
                 return Ok(u.to_string());
             }
             Err(DocError {
@@ -335,7 +335,7 @@ pub(crate) fn normalize_num(tag: &str, raw: &str) -> Result<String, DocError> {
                 });
             }
             match clean.parse::<f64>() {
-                Ok(f) => Ok(crate::doc::jsondoc::go_format_g(f)),
+                Ok(f) => Ok(crate::doc::jsondoc::number_text(f)),
                 Err(_) => Err(DocError {
                     msg: format!("unsupported YAML float {raw:?}"),
                 }),

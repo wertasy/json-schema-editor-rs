@@ -24,12 +24,13 @@
 
 use std::io::{BufRead, Write};
 
-use crate::doc::jsondoc::{Doc, NodeData, NodeId, PathSeg, Value};
+use crate::doc::jsondoc::{CopyMode, Doc, PathSeg, Value};
+use crate::doc::{append_idx, append_key};
 use crate::smodel::{FormNodeId, Kind, Schema};
 
 use crate::ui::lineio::LineReader;
 use crate::ui::rows::display_title;
-use crate::ui::widgets::{RawExt, apply_scalar, omit_or_set, scalar_text, validate_input};
+use crate::ui::widgets::{apply_scalar, omit_or_set, validate_input};
 use crate::ui::{FileSession, Options, Outcome, Res};
 
 /// run_accessible drives one sequential accessible session per file over
@@ -58,11 +59,15 @@ fn run_io<R: BufRead, W: Write>(files: Vec<FileSession>, input: R, out: &mut W) 
             schema,
             root,
             mut doc,
+            mut meta,
+            codec,
             opts,
         } = f;
         let mut s = Sess {
             schema: &schema,
             doc: &mut doc,
+            meta: &mut meta,
+            codec,
             opts: &opts,
             saved_with_errors: false,
             save_err: None,
@@ -112,6 +117,8 @@ fn run_io<R: BufRead, W: Write>(files: Vec<FileSession>, input: R, out: &mut W) 
 struct Sess<'a> {
     schema: &'a Schema,
     doc: &'a mut Doc,
+    meta: &'a mut crate::doc::Meta,
+    codec: &'static dyn crate::doc::Codec,
     opts: &'a Options,
     /// a --force save that skipped validation errors
     saved_with_errors: bool,
@@ -135,64 +142,6 @@ fn eof_result<R: BufRead>(reader: &LineReader<R>, root: bool) -> (Res, bool) {
     } else {
         (Res::Pop, true)
     }
-}
-
-/// arrayLen returns the current length of the array at path (0 if absent).
-fn array_len(doc: &Doc, path: &[PathSeg]) -> usize {
-    match doc.get(path) {
-        Some(id) => match doc.value(id) {
-            Value::Array(items) => items.len(),
-            _ => 0,
-        },
-        None => 0,
-    }
-}
-
-fn path_for(path: &[PathSeg], key: &str) -> Vec<PathSeg> {
-    let mut p = path.to_vec();
-    p.push(PathSeg::Key(key.to_string()));
-    p
-}
-
-fn path_idx(path: &[PathSeg], idx: usize) -> Vec<PathSeg> {
-    let mut p = path.to_vec();
-    p.push(PathSeg::Idx(idx));
-    p
-}
-
-/// The canonical JSON literal of a value (Go smodel.EncodeValue).
-fn encode_value(doc: &Doc, id: NodeId) -> String {
-    serde_json::to_string(&doc.to_value(id)).unwrap_or_default()
-}
-
-/// copyInto deep-copies a node from `src` (the schema document the
-/// enum/default values live in, or a freshly decoded raw document) into
-/// `doc`. Mirrors widgets.rs's private copy_into (Go hands pointers over
-/// directly; the arena model needs an explicit copy).
-fn copy_into(doc: &mut Doc, src: &Doc, id: NodeId) -> NodeId {
-    let data = src.node(id);
-    let value = match &data.value {
-        Value::Object(members) => Value::Object(
-            members
-                .iter()
-                .map(|m| crate::doc::jsondoc::Member {
-                    key: m.key.clone(),
-                    val: copy_into(doc, src, m.val),
-                })
-                .collect(),
-        ),
-        Value::Array(items) => {
-            Value::Array(items.iter().map(|i| copy_into(doc, src, *i)).collect())
-        }
-        v => v.clone(),
-    };
-    let merge = data.merge.iter().map(|m| copy_into(doc, src, *m)).collect();
-    doc.push(NodeData {
-        value,
-        anchor: data.anchor.clone(),
-        merge,
-        raw: data.raw.clone(),
-    })
 }
 
 // --- huh accessible prompts (internal/accessibility.go) --------------------------
@@ -235,7 +184,7 @@ fn prompt_string<R: BufRead, W: Write>(
 }
 
 /// Go accessibility.atoi: an empty (whitespace) string is -1, not an error.
-fn atoi_go(s: &str) -> Option<i64> {
+fn parse_int_default(s: &str) -> Option<i64> {
     let t = s.trim();
     if t.is_empty() {
         return Some(-1);
@@ -263,7 +212,7 @@ fn prompt_int<R: BufRead, W: Write>(
             if s.trim().is_empty() && default_str.is_some() {
                 return Ok(());
             }
-            match atoi_go(s) {
+            match parse_int_default(s) {
                 Some(v) if v >= low && v <= high => Ok(()),
                 _ => Err(if low == high {
                     format!("Invalid: must be {low}")
@@ -497,7 +446,7 @@ impl Entry {
                     f,
                     &schema.doc,
                     |doc| match val_id {
-                        Some(id) => copy_into(doc, &schema.doc, id),
+                        Some(id) => doc.copy_into(&schema.doc, id, CopyMode::Preserve),
                         None => doc.new_null(),
                     },
                 );
@@ -516,7 +465,7 @@ impl Entry {
                 let mut items = Vec::with_capacity(sel.len());
                 for enc in sel {
                     if let Some(o) = options.iter().find(|o| &o.encoded == enc) {
-                        items.push(copy_into(doc, &schema.doc, o.val));
+                        items.push(doc.copy_into(&schema.doc, o.val, CopyMode::Preserve));
                     }
                 }
                 let arr = doc.new_array();
@@ -530,10 +479,10 @@ impl Entry {
                     let _ = omit_or_set(doc, path, true, f, &schema.doc, |d| d.root);
                     return;
                 }
-                match s.opts.raw.decode_raw_value(s_) {
+                match s.codec.parse_value(s_) {
                     Ok(d2) => {
                         let _ = omit_or_set(doc, path, false, f, &schema.doc, |doc| {
-                            copy_into(doc, &d2, d2.root)
+                            doc.copy_into(&d2, d2.root, CopyMode::Preserve)
                         });
                     }
                     Err(_) => {} // unreachable: the prompt validated the text
@@ -553,10 +502,13 @@ fn scalar_entry<R: BufRead, W: Write>(
 ) -> Entry {
     let f = &s.schema.nodes[fn_id as usize];
     let cur = s.doc.get(path);
-    let mut bind = scalar_text(s.doc, cur);
+    let mut bind = cur
+        .and_then(|id| s.doc.scalar_text(id))
+        .unwrap_or_default()
+        .to_string();
     if bind.is_empty() {
         if let Some(d) = f.default_ {
-            bind = scalar_text(&s.schema.doc, Some(d));
+            bind = s.schema.doc.scalar_text(d).unwrap_or_default().to_string();
         }
     }
     let has_validator = !f.json_type.is_empty()
@@ -602,7 +554,7 @@ fn enum_entry<R: BufRead, W: Write>(
     let mut bind = String::new();
     if let Some(cur) = s.doc.get(path) {
         if !matches!(s.doc.value(cur), Value::Null) {
-            let enc = encode_value(s.doc, cur);
+            let enc = s.doc.encode_value(cur);
             if f.enum_.iter().any(|o| o.encoded == enc) {
                 bind = enc;
             }
@@ -610,7 +562,7 @@ fn enum_entry<R: BufRead, W: Write>(
     }
     if bind.is_empty() {
         if let Some(d) = f.default_ {
-            let enc = encode_value(&s.schema.doc, d);
+            let enc = s.schema.doc.encode_value(d);
             if !enc.is_empty() {
                 bind = enc;
             }
@@ -679,7 +631,7 @@ fn multi_enum_entry<R: BufRead, W: Write>(
     if let Some(cur) = s.doc.get(path) {
         if let Value::Array(items) = s.doc.value(cur) {
             for it in items {
-                bind.push(encode_value(s.doc, *it));
+                bind.push(s.doc.encode_value(*it));
             }
         }
     }
@@ -711,17 +663,17 @@ fn raw_entry<R: BufRead, W: Write>(
     out: &mut W,
 ) -> Entry {
     let f = &s.schema.nodes[fn_id as usize];
-    let label = s.opts.raw.raw_label();
+    let label = s.codec.label();
     let mut prefill = String::new();
     if let Some(cur) = s.doc.get(path) {
         if !matches!(s.doc.value(cur), Value::Null) {
-            if let Ok(t) = s.opts.raw.encode_raw_value(s.doc, cur) {
+            if let Ok(t) = s.codec.write_value(s.doc, cur) {
                 prefill = t;
             }
         }
     }
     let required = f.required;
-    let codec = s.opts.raw.clone();
+    let codec = s.codec;
     let text = run_input(
         out,
         reader,
@@ -735,7 +687,7 @@ fn raw_entry<R: BufRead, W: Write>(
                 }
                 return Ok(());
             }
-            match codec.decode_raw_value(t) {
+            match codec.parse_value(t) {
                 Ok(_) => Ok(()),
                 Err(e) => Err(format!("invalid {label}: {e}")),
             }
@@ -800,7 +752,7 @@ fn section<R: BufRead, W: Write>(
         }
         let children = n.children.clone();
         for cid in children {
-            let cpath = path_for(path, &s.schema.nodes[cid as usize].key);
+            let cpath = append_key(path, &s.schema.nodes[cid as usize].key);
             let c = &s.schema.nodes[cid as usize];
             match c.kind {
                 Kind::Scalar => {
@@ -824,7 +776,7 @@ fn section<R: BufRead, W: Write>(
                 _ => {
                     // KObject / KArray / KOneOf → drill down
                     let label = if c.kind == Kind::Array {
-                        format!("Edit items ({}) ▸", array_len(s.doc, &cpath))
+                        format!("Edit items ({}) ▸", s.doc.array_len(&cpath))
                     } else {
                         format!("Edit {} ▸", c.title)
                     };
@@ -848,7 +800,7 @@ fn section<R: BufRead, W: Write>(
             });
             navs.push(NavOpt {
                 key: "raw".to_string(),
-                label: format!("Edit raw {}", s.opts.raw.raw_label()),
+                label: format!("Edit raw {}", s.codec.label()),
             });
         } else {
             navs.insert(
@@ -903,7 +855,7 @@ fn section<R: BufRead, W: Write>(
             }
             let Some(child) = child else { continue };
             let key = s.schema.nodes[child as usize].key.clone();
-            let cpath = path_for(path, &key);
+            let cpath = append_key(path, &key);
             let r = match s.schema.nodes[child as usize].kind {
                 Kind::Object => section(s, child, &cpath, false, reader, out),
                 Kind::Array => array_manager(s, child, &cpath, false, reader, out),
@@ -930,7 +882,7 @@ fn array_manager<R: BufRead, W: Write>(
         if eof {
             return r;
         }
-        let n = array_len(s.doc, path);
+        let n = s.doc.array_len(path);
         let mut opts = vec![NavOpt {
             key: "add".to_string(),
             label: "< Add item".to_string(),
@@ -1038,7 +990,7 @@ fn remove_item<R: BufRead, W: Write>(
     if !confirm {
         return;
     }
-    s.doc.remove(&path_idx(path, idx));
+    s.doc.remove(&append_idx(path, idx));
 }
 
 /// moveItem relocates one array element up (-1) or down (+1): pick the
@@ -1094,9 +1046,9 @@ fn edit_item<R: BufRead, W: Write>(
 ) {
     let Some(items) = items else { return };
     let item_path = if idx == usize::MAX {
-        path_idx(parent_path, array_len(s.doc, parent_path))
+        append_idx(parent_path, s.doc.array_len(parent_path))
     } else {
-        path_idx(parent_path, idx)
+        append_idx(parent_path, idx)
     };
     match s.schema.nodes[items as usize].kind {
         Kind::Object => {
@@ -1155,7 +1107,7 @@ fn raw_editor<R: BufRead, W: Write>(
     reader: &mut LineReader<R>,
     out: &mut W,
 ) {
-    let label = s.opts.raw.raw_label();
+    let label = s.codec.label();
     let cur = match path {
         None => Some(s.doc.root),
         Some(p) => s.doc.get(p),
@@ -1164,15 +1116,15 @@ fn raw_editor<R: BufRead, W: Write>(
     if let Some(cur) = cur {
         if !matches!(s.doc.value(cur), Value::Null) {
             let r = match path {
-                None => s.opts.raw.encode_raw_doc(s.doc),
-                Some(_) => s.opts.raw.encode_raw_value(s.doc, cur),
+                None => s.codec.write(s.doc, s.meta),
+                Some(_) => s.codec.write_value(s.doc, cur),
             };
             if let Ok(t) = r {
                 prefill = t;
             }
         }
     }
-    let codec = s.opts.raw.clone();
+    let codec = s.codec;
     // Go rawEditor validates the whole document through decodeRawDoc (nil
     // path) and a subtree through decodeRawValue; the two differ only for
     // YAML (adopt vs value codec).
@@ -1189,9 +1141,9 @@ fn raw_editor<R: BufRead, W: Write>(
                 return Ok(());
             }
             let r = if is_whole {
-                codec.decode_raw_doc(t)
+                codec.parse(t).map(|_| ())
             } else {
-                codec.decode_raw_value(t)
+                codec.parse_value(t).map(|_| ())
             };
             match r {
                 Ok(_) => Ok(()),
@@ -1207,14 +1159,20 @@ fn raw_editor<R: BufRead, W: Write>(
         return;
     }
     let decoded = match path {
-        None => s.opts.raw.decode_raw_doc(s_),
-        Some(_) => s.opts.raw.decode_raw_value(s_),
+        None => match s.codec.parse(s_) {
+            Ok(crate::doc::Parsed { doc, meta }) => {
+                *s.meta = meta;
+                Ok(doc)
+            }
+            Err(e) => Err(e),
+        },
+        Some(_) => s.codec.parse_value(s_),
     };
     let Ok(d2) = decoded else { return };
     match path {
         None => *s.doc = d2,
         Some(p) => {
-            let v = copy_into(s.doc, &d2, d2.root);
+            let v = s.doc.copy_into(&d2, d2.root, CopyMode::Preserve);
             let _ = s.doc.set(p, v);
         }
     }
@@ -1242,7 +1200,7 @@ fn save_flow<R: BufRead, W: Write>(s: &mut Sess, reader: &mut LineReader<R>, out
         }
     }
     if let Some(save) = &s.opts.save {
-        if let Err(e) = save(s.doc) {
+        if let Err(e) = save(s.doc, s.meta) {
             s.save_err = Some(format!("write: {e}"));
         }
     }
@@ -1324,28 +1282,11 @@ fn simple_root<R: BufRead, W: Write>(
 mod tests {
     use super::*;
     use crate::doc::{Meta, codec_for};
-    use crate::ui::{NodeRef, RawCodec};
     use parking_lot::Mutex;
     use std::io::Cursor;
     use std::sync::Arc;
 
     const GO: &str = env!("CARGO_MANIFEST_DIR");
-
-    fn json_raw() -> RawCodec {
-        RawCodec {
-            label: "",
-            ext: "",
-            marshal_doc: Arc::new(|d: &Doc| Ok(d.write())),
-            unmarshal_doc: Arc::new(|s: &str| {
-                crate::doc::jsondoc::parse(s).map_err(|e| e.to_string())
-            }),
-            adopt_doc: None,
-            marshal_value: Arc::new(|r: NodeRef<'_>| Ok(r.doc.write_subtree(r.id))),
-            unmarshal_value: Arc::new(|s: &str| {
-                crate::doc::jsondoc::parse(s).map_err(|e| e.to_string())
-            }),
-        }
-    }
 
     /// A JSON session wired like main.rs: codec save, save-time validation,
     /// and the -s schema location recorded in the document.
@@ -1367,11 +1308,10 @@ mod tests {
             Ok(v) => Some(Arc::new(move |doc: &Doc| v.check(doc)) as _),
             Err(_) => None,
         };
-        let meta = parsed.meta;
         let save = {
             let saved = Arc::clone(saved);
-            Some(Arc::new(move |doc: &Doc| {
-                let text = codec.write(doc, &meta).map_err(|e| e.to_string())?;
+            Some(Arc::new(move |doc: &Doc, meta: &Meta| {
+                let text = codec.write(doc, meta).map_err(|e| e.to_string())?;
                 *saved.lock() = Some(text);
                 Ok(())
             }) as _)
@@ -1380,109 +1320,28 @@ mod tests {
             schema: model,
             root: 0, // replaced below
             doc: parsed.doc,
+            meta: parsed.meta,
+            codec,
             opts: Options {
                 accessible: true,
-                force: false,
-                raw: json_raw(),
                 validate,
                 save,
                 path: cfg_path.to_string(),
-                write_to: None,
-                copy: None,
-                paste: None,
-                replace_schema_location: None,
-                comment_at: None,
-                set_comment: None,
-                status: String::new(),
-                startup_notice: String::new(),
-                load_errors: Vec::new(),
+                ..Options::default()
             },
         }
         .with_root()
     }
 
-    /// A YAML session wired like main.rs's YAML branch: the raw codec
-    /// adopts comment state, and save renders through the live meta.
+    /// A YAML/TOML session is the same wiring: the codec owns the format, so
+    /// there is no separate raw-codec branch to mirror.
     fn yaml_session(
         schema_loc: &str,
         cfg_text: &str,
         cfg_path: &str,
         saved: &Arc<Mutex<Option<String>>>,
     ) -> FileSession {
-        let model = crate::smodel::load(schema_loc).expect("load schema");
-        let codec = codec_for(cfg_path);
-        let mut parsed = codec.parse(cfg_text).expect("parse config");
-        codec.set_schema_location(&mut parsed.doc, &mut parsed.meta, schema_loc);
-        let validate = match crate::validate::new(schema_loc) {
-            Ok(v) => Some(Arc::new(move |doc: &Doc| v.check(doc)) as _),
-            Err(_) => None,
-        };
-        let shared_meta: Arc<Mutex<Meta>> = Arc::new(Mutex::new(parsed.meta.clone()));
-        let raw = RawCodec {
-            label: "YAML",
-            ext: ".yaml",
-            marshal_doc: {
-                let shared_meta = Arc::clone(&shared_meta);
-                Arc::new(move |doc: &Doc| {
-                    let meta = shared_meta.lock();
-                    codec.write(doc, &meta).map_err(|e| e.to_string())
-                })
-            },
-            unmarshal_doc: Arc::new(|s: &str| {
-                crate::doc::yamldoc::parse(s)
-                    .map(|(d, _)| d)
-                    .map_err(|e| e.to_string())
-            }),
-            adopt_doc: Some({
-                let shared_meta = Arc::clone(&shared_meta);
-                Arc::new(move |data: &str| {
-                    let p = codec.parse(data).map_err(|e| e.to_string())?;
-                    *shared_meta.lock() = p.meta.clone();
-                    Ok((p.doc, p.meta))
-                })
-            }),
-            marshal_value: Arc::new(|r: NodeRef<'_>| {
-                serde_json::to_string(&r.doc.to_value(r.id)).map_err(|e| e.to_string())
-            }),
-            unmarshal_value: Arc::new(|s: &str| {
-                crate::doc::yamldoc::parse(s)
-                    .map(|(d, _)| d)
-                    .map_err(|e| e.to_string())
-            }),
-        };
-        let save = {
-            let saved = Arc::clone(saved);
-            let shared_meta = Arc::clone(&shared_meta);
-            Some(Arc::new(move |doc: &Doc| {
-                let meta = shared_meta.lock();
-                let text = codec.write(doc, &meta).map_err(|e| e.to_string())?;
-                *saved.lock() = Some(text);
-                Ok(())
-            }) as _)
-        };
-        FileSession {
-            schema: model,
-            root: 0,
-            doc: parsed.doc,
-            opts: Options {
-                accessible: true,
-                force: false,
-                raw,
-                validate,
-                save,
-                path: cfg_path.to_string(),
-                write_to: None,
-                copy: None,
-                paste: None,
-                replace_schema_location: None,
-                comment_at: None,
-                set_comment: None,
-                status: String::new(),
-                startup_notice: String::new(),
-                load_errors: Vec::new(),
-            },
-        }
-        .with_root()
+        json_session(schema_loc, cfg_text, cfg_path, saved)
     }
 
     /// Fill in the model's real root id (FileSession carries it separately

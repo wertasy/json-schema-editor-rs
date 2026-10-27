@@ -14,11 +14,13 @@ Guidance for coding agents and contributors working on this repository. Read thi
 
 ```sh
 cargo test                          # full suite: unit + accessible/pty + schemastore e2e
+cargo test --test arch              # A1–A8 architecture invariants (fast)
 cargo test pty_multi_file_session   # one test by name
 cargo build --release
 cargo run -- -s examples/server.schema.json examples/server.config.json
 cargo fmt                           # keep formatting local to touched code
 cargo clippy --all-targets --all-features  # lint gate; lints live in [lints] (Cargo.toml) + clippy.toml
+cargo clippy --all-targets --all-features -- -D clippy::too_many_lines  # CI's architecture gate
 ```
 
 The e2e tests spawn the built binary. They isolate the schema cache with `JSE_CACHE_DIR`; never let tests touch the user's real cache or the public network. pty tests skip when no pty is available.
@@ -28,22 +30,42 @@ Before finishing any behavioral change: run the specific test covering it, then 
 ## Architecture map
 
 ```
-src/main.rs          CLI parsing, session assembly, schema resolution, atomic write
-src/doc/
+src/main.rs          entry point: module wiring, exit-code mapping, main_test
+src/cli.rs           getopt-style flags, Invocation/Flags, usage text (std only)
+src/paths.rs         lexical Go-filepath-compatible helpers (std only)
+src/session.rs       config load, schema resolution/compilation, save wiring
+src/icons.rs         severity glyphs shared by UI/CLI/model
+src/doc/             leaf layer (may only use crate::doc and crate::paths)
   jsondoc.rs         arena document tree; order-preserving; exact numeric literals
+                     (CopyMode, append_key/idx, encode_value, scalar_text)
   jsoncdoc.rs        JSONC parse + comment capture/write
   yamldoc/           YAML parse (comments, anchors, merge keys) + block emitter
   tomldoc/           TOML parse (tables, dotted keys, table arrays, comments) + emitter
-  mod.rs             Codec trait, format registry (FORMATS), Meta, schema pointer helpers
+  mod.rs             Codec trait (label/raw_ext/parse_value/write_value + defaults), FORMATS, Meta
 src/fetch.rs         local/http(s)/file loading, 24h cache, conditional requests, offline fallback
 src/catalog.rs       SchemaStore catalog load + fileMatch glob matching
 src/smodel.rs        JSON Schema -> form tree (FormNode arena); degradation to raw
 src/validate.rs      save-time validation via jsonschema; document-path error rendering
 src/ui/
-  mod.rs             FileSession/Options/Outcome, menu state types
-  menu.rs            App state, event loop, overlay routing, styles, help text
-  keys.rs            large key dispatcher + rendering of menus/overlays
-  rows.rs            pure row model: menus, summaries, variants, search index, stack rebuild
+  mod.rs             FileSession/Options/Outcome, FileState types, MenuState, ValidateFn
+  menu.rs            App state, event loop, overlay enum/routing, styles, help text
+  keys/              key dispatcher split by feature:
+    mod.rs           input bursts, schema switching, list mode, motions, selection
+    edit.rs          field editing, arrays, oneOf, value completion
+    clipboard.rs     copy/cut + paste
+    search.rs        jumps, document search, anchors, merge keys
+    overlays.rs      overlay handlers, macros, external $EDITOR
+    render.rs        list/overlay rendering
+  rows/              pure row model split by feature:
+    mod.rs           kinds, row construction, merge hooks
+    summary.rs       value summaries
+    variant.rs       oneOf signatures/matching
+    stack.rs         navigation-stack rebuild
+    search.rs        search index
+    issues.rs        unknown-key issues
+    filter.rs        search filtering
+    issue_parse.rs   validator-message parsing
+  util.rs            wrap_cursor/page_cursor shared by every list
   files.rs           per-file state, multi-file switching, batch save
   history.rs         undo/redo snapshots (100 steps)
   nav.rs             back/forward location history (100 steps)
@@ -52,8 +74,8 @@ src/ui/
   lineio.rs          one-line-per-read stdin reader
   schema_picker.rs   SchemaStore picker (TUI + accessible)
   shell.rs           vi-style `!` modes: `r` stdout insert, `a` line append, `w` document-to-stdin, bare execute; tab completion
-  merge.rs paste.rs search.rs select.rs   placeholders; actual logic lives elsewhere
 tests/
+  arch.rs            A1–A6 architecture invariants (source scan)
   common/mod.rs      pty + run helpers
   e2e.rs             CLI, accessible scripts, pty flows, YAML anchors/merge, multi-file
   schemastore.rs     catalog matching and picker against tiny_http
@@ -62,6 +84,7 @@ tests/
 ## Data-model invariants
 
 - `Doc` is an arena: nodes are addressed by `NodeId`, objects keep member order, numbers keep their exact literal text. Never round-trip a number through `f64` or rebuild a document just to move it.
+- When a number is *synthesized* (quick `+`/`-`, a YAML scalar that is not valid JSON), spell it the way ECMAScript `Number::toString` does (`1000000`, `0.000001`, `1e-7`, `1e+21`): that is what JS-based LSP/format tooling emits. Untouched literals are never rewritten, so this only applies to values the user actually edits. `jsondoc::number_text` is the single implementation.
 - `NodeData::raw` is the exact TOML source spelling for values whose Doc form is canonicalized (non-decimal/underlined integers, date/time literals). It is empty for other formats. Writing through a value replaces the node (dropping the old spelling); copying a subtree preserves it.
 - `Doc::clone()` preserves alias sharing: YAML aliases and merge refs are the same `NodeId` in multiple places. Undo snapshots rely on this. Use `detach`/`copy` only when the user explicitly materializes a copy.
 - A YAML `<<` member is represented as a null-valued node carrying `merge` refs. It is not an ordinary null value; keep merge handling in edges/rows.
@@ -88,6 +111,19 @@ tests/
 - `q` aliases `esc` outside text inputs; inside inputs it is a literal character.
 - The TUI drains a whole terminal input burst and repaints once per burst (`menu.rs::read_event_burst`); runs of identical `j`/`k`/`up`/`down` collapse through `App::update_repeat`/`move_plain`. That fast path must stay side-effect free (no document mutation, history push or menu-stack change); inputs, overlays and macro recording fall back to one update per key. `KeyEventKind::Repeat` acts like a press; only `Release` is ignored.
 
+## Architecture invariants (enforced by `tests/arch.rs`)
+
+These are mechanical gates, not suggestions. A change that violates one fails `cargo test`.
+
+- **A1 `doc` is a leaf.** `src/doc/**` may reference only `crate::doc` and `crate::paths`. Formats never know about the UI, schema model, fetch layer or session.
+- **A2 the UI never loads or compiles schemas.** `src/ui/**` must not call `smodel::load`, `validate::new`, `crate::fetch` or `crate::session`; schema switching goes through `Options::load_schema` and the `LoadedSchema` shape. The catalog picker may query `catalog::` (terminal I/O).
+- **A3 core modules never depend on the UI.** `fetch`, `validate`, `catalog`, `smodel` must not name `crate::ui`.
+- **A4 `cli`/`paths` are std-only.** Flag parsing and lexical path helpers do not import other crate modules.
+- **A5 one definition per helper.** `copy_into`, `append_key`, `append_idx`, `wrap_cursor`, `page_cursor`, `write_indent`, `encode_value`, `array_len` are defined once. The legacy names `path_for`, `path_idx`, `doc_array_len` must not reappear. No `go_*` identifiers: Go semantics live in doc comments, not names. No module-wide `#![allow(dead_code)]`.
+- **A6 per-file state lives in `FileState`.** The document, its `Meta`, its `Codec` and its `Options` are owned per file; no `Arc<Mutex<Meta>>` or other shared mutable document state. `Options` holds only environment I/O (save/write-to targets, clipboard, schema loader).
+- **A7 one open surface.** `App.overlay: Option<Overlay>` is the only overlay switch: help and the file picker are variants, and `route_key` matches every variant exhaustively. Adding a surface means adding a variant plus its `typing()` arm, never a new `App` flag.
+- **A8 no monoliths.** `clippy::too_many_lines` (threshold 250 in `clippy.toml`) blocks new 250+ line functions; move a feature into its `keys/`/`rows/` submodule instead of appending.
+
 ## Behavioral contracts
 
 Treat these as public API; tests and docs assert them:
@@ -100,6 +136,11 @@ Treat these as public API; tests and docs assert them:
 - Saves are atomic (same-directory temp + rename) and preserve the existing file mode, key order, numeric literals, unknown keys, and `$schema`.
 - Do not expand YAML aliases on save; do not drop anchors or `<<`.
 - Error/notice strings are user-visible. If you change one intentionally, update tests and the relevant `docs/*.md` page.
+
+## Error types
+
+- Use `thiserror` enums where the caller branches on the cause (the CLI load path uses `session::LoadError` to map usage/runtime failures to exit codes 2/1; `DocError`/`SmodelError` mark the doc/model boundaries).
+- Everywhere else keep `Result<_, String>`: those strings are the user-visible message contract (`editor: invalid YAML: …`, validation rows, notices). Do not wrap a message in a single-variant enum just to say "typed"; add a variant only when a caller matches on it.
 
 ## Changing behavior
 

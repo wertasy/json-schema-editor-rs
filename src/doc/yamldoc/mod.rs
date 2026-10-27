@@ -34,7 +34,7 @@ type P<'a> = Parser<std::str::Chars<'a>>;
 use crate::doc::jsondoc::{self, Doc, DocError, Member, NodeId, PathSeg, Value};
 use crate::doc::{CommentSet, Meta};
 
-pub use emit::write;
+pub use emit::{write, write_value};
 
 pub(crate) use resolve::{PlainTag, normalize_num, resolve_plain};
 
@@ -928,5 +928,3 @@ pub fn clear_schema_directive(doc: &Doc, meta: &mut Meta) {
         }
     }
 }
-#[cfg(test)]
-mod difftest;

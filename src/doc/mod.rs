@@ -7,12 +7,16 @@
 
 use std::collections::HashMap;
 
+use crate::paths::file_ext;
+
 pub mod jsoncdoc;
 pub mod jsondoc;
 pub mod tomldoc;
 pub mod yamldoc;
 
-pub use jsondoc::{Doc, DocError, Member, NodeData, NodeId, PathSeg, Value};
+pub use jsondoc::{
+    CopyMode, Doc, DocError, Member, NodeData, NodeId, PathSeg, Value, append_idx, append_key,
+};
 
 /// commentSet holds the comments attached to one key/value pair. Key* belong
 /// to the object key, Head/Line/Foot to the value (for an array item or the
@@ -238,29 +242,6 @@ fn format_comment(text: &str, prefix: &str) -> String {
         .join("\n")
 }
 
-/// pathKey encodes a document path as a unique map key, mirroring Go's
-/// json.Marshal of the []any path: nil → "null", ["a"] → `["a"]`, [0] →
-/// `[0]`. Keys are JSON-escaped, so keys with dots/quotes stay apart.
-#[allow(dead_code)] // the Go-equivalent path-key helper; exercised by tests
-pub fn path_key(path: &[PathSeg]) -> String {
-    if path.is_empty() {
-        // Go marshals a nil []any as "null"
-        return "null".to_string();
-    }
-    let mut out = String::from("[");
-    for (i, seg) in path.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        match seg {
-            PathSeg::Key(k) => jsondoc::write_json_string(&mut out, k),
-            PathSeg::Idx(i) => out.push_str(&i.to_string()),
-        }
-    }
-    out.push(']');
-    out
-}
-
 // --- codec registry ---------------------------------------------------------
 
 /// Parsed is one loaded document: the tree plus its format state.
@@ -275,22 +256,55 @@ pub trait Codec: Sync {
     /// Extensions lists the lower-case, dot-prefixed file extensions this
     /// format handles (".yaml", ".yml", …).
     fn extensions(&self) -> &'static [&'static str];
+    /// Display name of the raw editor's syntax.
+    fn label(&self) -> &'static str;
+    /// Temp-file extension the raw editor uses for this syntax.
+    fn raw_ext(&self) -> &'static str;
+    /// Line-comment marker for document comments.
+    fn comment_prefix(&self) -> &'static str {
+        "//"
+    }
+
     /// Parse one document.
     fn parse(&self, text: &str) -> Result<Parsed, DocError>;
     /// Write the document back.
     fn write(&self, doc: &Doc, meta: &Meta) -> Result<String, DocError>;
+    /// Parse one standalone value (the raw value editor).
+    fn parse_value(&self, text: &str) -> Result<Doc, DocError>;
+    /// Render one subtree as a standalone value.
+    fn write_value(&self, doc: &Doc, id: NodeId) -> Result<String, DocError>;
+
     /// The session for a file that does not exist yet: an empty object
-    /// document.
-    fn empty(&self) -> Parsed;
+    /// document. Every format starts the same way.
+    fn empty(&self) -> Parsed {
+        let mut doc = Doc::new();
+        let obj = doc.new_object();
+        doc.set(&[], obj).expect("root set");
+        Parsed {
+            doc,
+            meta: Meta::default(),
+        }
+    }
+
     /// The schema location recorded in the file's own convention.
-    fn schema_location(&self, doc: &Doc, meta: &Meta) -> Option<String>;
+    fn schema_location(&self, doc: &Doc, meta: &Meta) -> Option<String> {
+        schema_from_doc(doc).or_else(|| self.schema_directive(doc, meta))
+    }
+
     /// Records loc when no non-empty location exists yet; an existing value
     /// is kept.
-    fn set_schema_location(&self, doc: &mut Doc, meta: &mut Meta, loc: &str);
+    fn set_schema_location(&self, doc: &mut Doc, meta: &mut Meta, loc: &str) {
+        if self.schema_location(doc, meta).is_some() {
+            return;
+        }
+        self.record_schema_location(doc, meta, loc);
+    }
+
     /// set_schema_location_with records loc for a schema that declares a
-    /// top-level "$schema" property (`schema_member`). Formats whose idiomatic
-    /// location is a comment (YAML) write the member instead, so the field
-    /// the schema defines is the single source of truth.
+    /// top-level "$schema" property (`schema_member`). Formats whose
+    /// idiomatic location is a comment write the member instead, so the
+    /// field the schema defines is the single source of truth; any directive
+    /// is removed so only one source remains.
     fn set_schema_location_with(
         &self,
         doc: &mut Doc,
@@ -298,14 +312,39 @@ pub trait Codec: Sync {
         loc: &str,
         schema_member: bool,
     ) {
-        let _ = schema_member;
-        self.set_schema_location(doc, meta, loc);
+        if !schema_member {
+            return self.set_schema_location(doc, meta, loc);
+        }
+        let existing = self.schema_location(doc, meta);
+        match existing {
+            Some(existing) => set_schema_member(doc, &existing),
+            None => set_schema_member(doc, loc),
+        }
+        self.clear_schema_directive(doc, meta);
     }
+
     /// Removes any recorded location; a fresh --pick must overwrite the old
     /// value.
-    fn clear_schema_location(&self, doc: &mut Doc, meta: &mut Meta);
+    fn clear_schema_location(&self, doc: &mut Doc, meta: &mut Meta) {
+        clear_schema_member(doc);
+        self.clear_schema_directive(doc, meta);
+    }
+
     /// Session status lines; empty when there is nothing to report.
-    fn notices(&self, doc: &Doc, meta: &Meta) -> Vec<String>;
+    fn notices(&self, _doc: &Doc, _meta: &Meta) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// The format's comment-based schema pointer, when it has one.
+    fn schema_directive(&self, _doc: &Doc, _meta: &Meta) -> Option<String> {
+        None
+    }
+    /// Writes loc in the format's own convention (a comment directive).
+    fn record_schema_location(&self, doc: &mut Doc, _meta: &mut Meta, loc: &str) {
+        set_schema_member(doc, loc);
+    }
+    /// Removes the format's comment-based schema pointer.
+    fn clear_schema_directive(&self, _doc: &Doc, _meta: &mut Meta) {}
 }
 
 /// JSONC codec: .json/.jsonc. JSONC is a superset of JSON, so it is also the
@@ -316,6 +355,14 @@ pub struct JsoncCodec;
 impl Codec for JsoncCodec {
     fn extensions(&self) -> &'static [&'static str] {
         &[".json", ".jsonc"]
+    }
+
+    fn label(&self) -> &'static str {
+        "JSON"
+    }
+
+    fn raw_ext(&self) -> &'static str {
+        ".json"
     }
 
     fn parse(&self, text: &str) -> Result<Parsed, DocError> {
@@ -331,40 +378,33 @@ impl Codec for JsoncCodec {
         Ok(jsoncdoc::write(doc, meta))
     }
 
-    fn empty(&self) -> Parsed {
-        let mut doc = Doc::new();
-        let obj = doc.new_object();
-        doc.set(&[], obj).expect("root set");
-        Parsed {
-            doc,
-            meta: Meta::default(),
-        }
+    fn parse_value(&self, text: &str) -> Result<Doc, DocError> {
+        jsondoc::parse(text)
     }
 
-    fn schema_location(&self, doc: &Doc, _meta: &Meta) -> Option<String> {
-        schema_from_doc(doc)
-    }
-
-    fn set_schema_location(&self, doc: &mut Doc, _meta: &mut Meta, loc: &str) {
-        set_schema_member(doc, loc);
-    }
-
-    fn clear_schema_location(&self, doc: &mut Doc, _meta: &mut Meta) {
-        clear_schema_member(doc);
-    }
-
-    fn notices(&self, _doc: &Doc, _meta: &Meta) -> Vec<String> {
-        Vec::new()
+    fn write_value(&self, doc: &Doc, id: NodeId) -> Result<String, DocError> {
+        Ok(doc.write_subtree(id))
     }
 }
 
-/// YAML codec: .yaml/.yml (behavior lands with the YAML phase; the registry
-/// entry and its extension dispatch exist from the start).
+/// YAML codec: .yaml/.yml.
 pub struct YamlCodec;
 
 impl Codec for YamlCodec {
     fn extensions(&self) -> &'static [&'static str] {
         &[".yaml", ".yml"]
+    }
+
+    fn label(&self) -> &'static str {
+        "YAML"
+    }
+
+    fn raw_ext(&self) -> &'static str {
+        ".yaml"
+    }
+
+    fn comment_prefix(&self) -> &'static str {
+        "#"
     }
 
     fn parse(&self, text: &str) -> Result<Parsed, DocError> {
@@ -375,56 +415,12 @@ impl Codec for YamlCodec {
         yamldoc::write(doc, Some(meta))
     }
 
-    fn empty(&self) -> Parsed {
-        let mut doc = Doc::new();
-        let obj = doc.new_object();
-        doc.set(&[], obj).expect("root set");
-        Parsed {
-            doc,
-            meta: Meta::default(),
-        }
+    fn parse_value(&self, text: &str) -> Result<Doc, DocError> {
+        yamldoc::parse(text).map(|(doc, _)| doc)
     }
 
-    fn schema_location(&self, doc: &Doc, meta: &Meta) -> Option<String> {
-        // prefers an explicit "$schema" member over the directive comment
-        schema_from_doc(doc).or_else(|| yamldoc::schema_directive(doc, meta))
-    }
-
-    fn set_schema_location(&self, doc: &mut Doc, meta: &mut Meta, loc: &str) {
-        // keeps YAML idiomatic: writes a yaml-language-server comment and
-        // never creates or fills a "$schema" member
-        if schema_from_doc(doc).is_some() {
-            return;
-        }
-        yamldoc::set_schema_directive(doc, meta, loc);
-    }
-
-    fn set_schema_location_with(
-        &self,
-        doc: &mut Doc,
-        meta: &mut Meta,
-        loc: &str,
-        schema_member: bool,
-    ) {
-        if !schema_member {
-            return self.set_schema_location(doc, meta, loc);
-        }
-        // The schema declares "$schema" as a real property: record the
-        // location there instead of adding the directive comment. An
-        // existing location (member or directive) keeps precedence, matching
-        // set_schema_location's keep-existing rule; a directive is migrated
-        // into the member and then removed so only one source remains.
-        let existing = self.schema_location(doc, meta);
-        match existing {
-            Some(existing) => crate::doc::set_schema_member(doc, &existing),
-            None => crate::doc::set_schema_member(doc, loc),
-        }
-        yamldoc::clear_schema_directive(doc, meta);
-    }
-
-    fn clear_schema_location(&self, doc: &mut Doc, meta: &mut Meta) {
-        clear_schema_member(doc);
-        yamldoc::clear_schema_directive(doc, meta);
+    fn write_value(&self, doc: &Doc, id: NodeId) -> Result<String, DocError> {
+        yamldoc::write_value(doc, id)
     }
 
     fn notices(&self, _doc: &Doc, meta: &Meta) -> Vec<String> {
@@ -436,6 +432,18 @@ impl Codec for YamlCodec {
             "yaml: {n} {noun} kept: edits write through to the anchored object (< Expand > detaches a copy)",
             n = meta.aliases
         )]
+    }
+
+    fn schema_directive(&self, doc: &Doc, meta: &Meta) -> Option<String> {
+        yamldoc::schema_directive(doc, meta)
+    }
+
+    fn record_schema_location(&self, doc: &mut Doc, meta: &mut Meta, loc: &str) {
+        yamldoc::set_schema_directive(doc, meta, loc);
+    }
+
+    fn clear_schema_directive(&self, doc: &Doc, meta: &mut Meta) {
+        yamldoc::clear_schema_directive(doc, meta);
     }
 }
 
@@ -449,6 +457,18 @@ impl Codec for TomlCodec {
         &[".toml"]
     }
 
+    fn label(&self) -> &'static str {
+        "TOML"
+    }
+
+    fn raw_ext(&self) -> &'static str {
+        ".toml"
+    }
+
+    fn comment_prefix(&self) -> &'static str {
+        "#"
+    }
+
     fn parse(&self, text: &str) -> Result<Parsed, DocError> {
         tomldoc::parse(text).map(|(doc, meta)| Parsed { doc, meta })
     }
@@ -457,78 +477,35 @@ impl Codec for TomlCodec {
         tomldoc::write(doc, meta)
     }
 
-    fn empty(&self) -> Parsed {
-        let mut doc = Doc::new();
-        let obj = doc.new_object();
-        doc.set(&[], obj).expect("root set");
-        Parsed {
-            doc,
-            meta: Meta::default(),
-        }
+    fn parse_value(&self, text: &str) -> Result<Doc, DocError> {
+        tomldoc::parse_value(text).map(|(doc, _)| doc)
     }
 
-    fn schema_location(&self, doc: &Doc, meta: &Meta) -> Option<String> {
-        // an explicit "$schema" member wins over the header directive
-        schema_from_doc(doc).or_else(|| tomldoc::schema_directive(doc, meta))
+    fn write_value(&self, doc: &Doc, id: NodeId) -> Result<String, DocError> {
+        tomldoc::write_value(doc, id)
     }
 
-    fn set_schema_location(&self, doc: &mut Doc, meta: &mut Meta, loc: &str) {
-        // keeps TOML idiomatic: `#:schema <loc>` in the header, never a
-        // "$schema" member unless the schema itself declares one
-        if schema_from_doc(doc).is_some() {
-            return;
-        }
+    fn schema_directive(&self, doc: &Doc, meta: &Meta) -> Option<String> {
+        tomldoc::schema_directive(doc, meta)
+    }
+
+    fn record_schema_location(&self, doc: &mut Doc, meta: &mut Meta, loc: &str) {
         tomldoc::set_schema_directive(doc, meta, loc);
     }
 
-    fn set_schema_location_with(
-        &self,
-        doc: &mut Doc,
-        meta: &mut Meta,
-        loc: &str,
-        schema_member: bool,
-    ) {
-        if !schema_member {
-            return self.set_schema_location(doc, meta, loc);
-        }
-        // The schema declares "$schema" as a property: record the location
-        // there and drop any header directive so only one source remains.
-        let existing = self.schema_location(doc, meta);
-        match existing {
-            Some(existing) => crate::doc::set_schema_member(doc, &existing),
-            None => crate::doc::set_schema_member(doc, loc),
-        }
+    fn clear_schema_directive(&self, doc: &Doc, meta: &mut Meta) {
         tomldoc::clear_schema_directive(doc, meta);
-    }
-
-    fn clear_schema_location(&self, doc: &mut Doc, meta: &mut Meta) {
-        clear_schema_member(doc);
-        tomldoc::clear_schema_directive(doc, meta);
-    }
-
-    fn notices(&self, _doc: &Doc, _meta: &Meta) -> Vec<String> {
-        Vec::new()
     }
 }
 
 /// The registered formats, in dispatch order.
 static FORMATS: [&dyn Codec; 3] = [&JsoncCodec, &YamlCodec, &TomlCodec];
 
-/// go_ext mirrors filepath.Ext: the suffix beginning at the final dot of the
-/// final element (".cshrc" → ".cshrc", "a.b.json" → ".json", "a" → "").
-fn go_ext(path: &str) -> &str {
-    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
-    match name.rfind('.') {
-        Some(i) => &name[i..],
-        None => "",
-    }
-}
-
 /// ForFormat returns the first registered format whose Extensions contains
 /// the lower-cased extension of path. No match falls back to the JSONC
 /// default; it never returns none.
 pub fn codec_for(path: &str) -> &'static dyn Codec {
-    let ext = go_ext(path).to_ascii_lowercase();
+    let ext = file_ext(path).to_ascii_lowercase();
     for f in FORMATS {
         if f.extensions().contains(&ext.as_str()) {
             return f;
@@ -747,18 +724,6 @@ mod tests {
         let jsonc: &dyn Codec = codec_for("a.json");
         let p = jsonc.empty();
         assert_eq!(write_session(jsonc, &p), "{}\n");
-    }
-
-    #[test]
-    fn path_key_shapes() {
-        assert_eq!(path_key(&[]), "null");
-        assert_eq!(path_key(&[Key("a".into())]), r#"["a"]"#);
-        assert_eq!(path_key(&[Idx(0)]), "[0]");
-        assert_eq!(
-            path_key(&[Key("a".into()), Key("b".into()), Idx(3)]),
-            r#"["a","b",3]"#
-        );
-        assert_eq!(path_key(&[Key("a\"b".into())]), r#"["a\"b"]"#);
     }
 
     #[test]
