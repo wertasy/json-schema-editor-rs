@@ -154,6 +154,29 @@ pub fn new_app(files: Vec<FileSession>) -> App {
     app
 }
 
+/// What a multi-file save does after writing every dirty file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaveMode {
+    /// `wa`: stay in the session
+    Stay,
+    /// `wa!`: stay in the session, skip validation
+    StayForced,
+    /// `waq`: write and end the session
+    Quit,
+    /// `waq!`: write, skip validation, end the session
+    QuitForced,
+}
+
+impl SaveMode {
+    fn quits(self) -> bool {
+        matches!(self, SaveMode::Quit | SaveMode::QuitForced)
+    }
+
+    fn forced(self) -> bool {
+        matches!(self, SaveMode::StayForced | SaveMode::QuitForced)
+    }
+}
+
 impl App {
     /// The active file's state (Go: the listModel fields themselves).
     pub fn fs(&self) -> &FileState {
@@ -294,34 +317,61 @@ impl App {
     }
 
     /// saveDirtyFilesAndExit writes every dirty file (active first) and ends
-    /// the session. The active file always writes (rewritten identically);
-    /// inactive tabs write only when dirty.
-    /// Validation errors open the errs overlay with exit armed (y
-    /// --force-saves and quits; n/esc cancels the exit); a failed write
-    /// leaves the session open with the notice.
+    /// the session (root exit). See [`App::save_dirty_files`].
     pub fn save_dirty_files_and_exit(&mut self) {
+        self.save_dirty_files(SaveMode::Quit);
+    }
+
+    /// save_dirty_files writes every dirty file, active first, then either
+    /// returns to the file that was active (`w`/`wa`) or ends the session
+    /// (`wq`/`waq`, root exit). `Force` modes skip save-time validation.
+    /// The active file always writes at exit (rewritten identically); a
+    /// non-quitting save with nothing dirty only reports it.
+    /// Validation errors open the errs overlay with exit armed as requested
+    /// (y --force-saves; n/esc cancels); a failed write leaves the session
+    /// open with the notice.
+    pub fn save_dirty_files(&mut self, mode: SaveMode) {
+        let exit = mode.quits();
         let mut order = self.dirty_files();
-        if order.is_empty() || order[0] != self.cur {
+        if exit && (order.is_empty() || order[0] != self.cur) {
             order.insert(0, self.cur);
         }
+        if order.is_empty() {
+            self.notice = "No changes to save".to_string();
+            return;
+        }
+        let count = order.len();
+        let origin = self.cur;
         for i in order {
             if i != self.cur {
-                self.switch_file_state(i); // plain swap: the session is ending
+                self.switch_file_state(i);
             }
-            let validate = self.fs().opts.validate.clone();
-            if let Some(validate) = validate {
-                let errs = validate(&self.fs().doc);
-                if !errs.is_empty() {
-                    self.open_errs_overlay(errs, true, "");
-                    return;
+            if !mode.forced() {
+                let validate = self.fs().opts.validate.clone();
+                if let Some(validate) = validate {
+                    let errs = validate(&self.fs().doc);
+                    if !errs.is_empty() {
+                        // leave the failing file active: the error list's
+                        // paths and jumps belong to it
+                        self.open_errs_overlay(errs, exit, "");
+                        return;
+                    }
                 }
             }
-            self.write_to(false, false, "");
+            self.write_to(false, mode.forced(), "");
             if self.dirty() {
                 return; // the write failed; the notice explains
             }
         }
-        self.exiting = true;
+        if self.cur != origin {
+            self.switch_file_state(origin);
+        }
+        if exit {
+            self.exiting = true;
+        } else {
+            let noun = if count == 1 { "file" } else { "files" };
+            self.notice = format!("Saved {count} {noun}");
+        }
     }
 
     /// saveReport aggregates per-file write results (paths in file order).

@@ -101,7 +101,7 @@ pub mod style {
 }
 
 pub const MENU_HELP: &str =
-    "↑/↓ move · enter edit/open · esc back · ctrl+s/w save · / search · ! shell · ? help";
+    "↑/↓ move · enter edit/open · esc back · ctrl+s/w save · / search · : command · ? help";
 pub const OVERLAY_HELP: &str = "enter select · / search · esc cancel";
 /// Collapsed description cap per source: the schema help and the document
 /// comment each show at most this many wrapped lines; a cut block gets an
@@ -323,8 +323,8 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
         desc: "expand: materialize the referenced value (cursor row or menu) into a copy",
     },
     HelpEntry {
-        keys: "!",
-        desc: "shell: r <cmd> inserts stdout into the focused value, a <cmd> appends stdout lines to a string array, w <cmd> pipes the document to stdin (vi :w !cmd), bare <cmd> only runs; candidates appear automatically above the prompt and filter as you type; tab/↑/↓ select (↑/↓ are history until a candidate is selected); ! then enter repeats the last input (the prompt shows the first !); a bare command's multi-line output opens a scrollable page (j/k, PgUp/PgDn, q/esc)",
+        keys: ":",
+        desc: "command line: w saves, wa saves all dirty files, wq saves and quits, waq saves all and quits (append ! to force), q quits, q! discards and quits; r !<cmd> inserts stdout into the focused value, a !<cmd> appends stdout lines to a string array, w !<cmd> pipes the document to stdin, !<cmd> only runs; tab completes builtins or (after !) PATH commands and paths, % expands to the session file path; candidates appear automatically and filter as you type; ↑/↓ are history until a candidate is selected; !!+enter repeats the last shell command; multi-line output stays an inline multi-line notice when it fits the blank rows above the help bar, else opens a scrollable page (j/k, PgUp/PgDn, q/esc)",
     },
 ];
 
@@ -430,6 +430,9 @@ pub struct EditState {
     pub sugs: Vec<String>,
     /// tab cycle position (-1 = none)
     pub sug_idx: i64,
+    /// display column of the caret when the current suggestion list was
+    /// built; the candidate window's left edge is anchored there
+    pub sug_col: usize,
 }
 
 /// addState is the key-name input overlay for a: add a schema-less
@@ -455,22 +458,27 @@ pub struct WriteState {
     pub sug_idx: i64,
 }
 
-/// shellState is the `!` command input: one line at the bottom, with up/down
-/// walking this session's executed commands.
-pub struct ShellState {
+/// CommandState is the `:` command input: one line at the bottom, with
+/// up/down walking the executed command history. Completion candidates
+/// replace the word before the cursor only; `sug_start..sug_end` records the
+/// text the current cycle owns so repeated tab presses do not rescan it.
+pub struct CommandState {
     pub ti: TextInput,
-    /// index into App::shell_history while browsing; None at the prompt
+    /// index into App::cmd_history while browsing; None at the prompt
     pub hist_idx: Option<usize>,
     /// input saved before the first history recall
     pub draft: String,
-    /// input line the current completion list was built from
+    /// word being completed (shown in the candidate window)
     pub sug_prefix: String,
-    /// whole-line tab-completion candidates for the current token
+    /// tab-completion candidates for the word before the cursor
     pub sug: Vec<String>,
     /// cycle position in `sug`; None when no completion has been applied
     pub sug_idx: Option<usize>,
-    /// input value produced by the current completion cycle
+    /// line produced by the current completion cycle
     pub sug_line: String,
+    /// byte range of the current line owned by the selected candidate
+    pub sug_start: usize,
+    pub sug_end: usize,
 }
 
 /// Inline '/'-filter state shared by every list overlay.
@@ -731,9 +739,9 @@ pub struct CommentState {
     pub scroll: usize,
 }
 
-/// ShellOutState is the scrolling page for a bare `!` command's multi-line
-/// stdout. `lines` are already wrapped to the terminal width; `scroll` is the
-/// first visible line.
+/// ShellOutState is the scrolling page for a bare `!<cmd>` command's
+/// multi-line stdout. `lines` are already wrapped to the terminal width;
+/// `scroll` is the first visible line.
 pub struct ShellOutState {
     /// the executed command line, shown in the page title
     pub command: String,
@@ -765,7 +773,7 @@ pub enum Overlay {
     Edit(EditState),
     Add(AddState),
     Write(WriteState),
-    Shell(ShellState),
+    Command(CommandState),
     ShellOut(ShellOutState),
     Anc(AnchorState),
     Mrg(MergeState),
@@ -786,7 +794,7 @@ impl Overlay {
             | Overlay::Search(_)
             | Overlay::Add(_)
             | Overlay::Write(_)
-            | Overlay::Shell(_)
+            | Overlay::Command(_)
             | Overlay::Anc(_)
             | Overlay::Mrg(_) => true,
             Overlay::Issues(s) => s.filter.active,
@@ -837,8 +845,8 @@ pub struct App {
     pub exec_editor: bool,
     /// pending $EDITOR target stashed for the event loop (or tests)
     pub pending_edit: Option<ExternalEdit>,
-    /// commands executed through the `!` overlay, oldest first
-    pub shell_history: Vec<String>,
+    /// `:` command lines executed this session, oldest first
+    pub cmd_history: Vec<String>,
 }
 
 impl App {
@@ -864,7 +872,7 @@ impl App {
             exiting: false,
             exec_editor: false,
             pending_edit: None,
-            shell_history: Vec::new(),
+            cmd_history: Vec::new(),
         }
     }
 
@@ -1422,7 +1430,7 @@ impl App {
             Overlay::Edit(s) => self.key_edit(msg, s),
             Overlay::Add(s) => self.key_add(msg, s),
             Overlay::Write(s) => self.key_write(msg, s),
-            Overlay::Shell(s) => self.key_shell(msg, s),
+            Overlay::Command(s) => self.key_command(msg, s),
             Overlay::ShellOut(s) => self.key_shell_out(msg, s),
             Overlay::Anc(s) => self.key_anchor(msg, s),
             Overlay::Mrg(s) => self.key_merge(msg, s),

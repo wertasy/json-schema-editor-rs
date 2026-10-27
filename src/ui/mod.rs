@@ -16,6 +16,7 @@
 //! the file state with `NodeId`s into it.
 
 pub mod accessible;
+pub mod command;
 pub mod files;
 pub mod history;
 pub mod keys;

@@ -90,11 +90,12 @@ impl App {
                 self.overlay = Some(Overlay::Write(s));
                 self.refresh_write_suggestions();
             }
-            Overlay::Shell(mut s) => {
+            Overlay::Command(mut s) => {
                 // the prompt is one line: pasted newlines become spaces
                 s.ti.insert_str(&text.replace('\n', " "));
-                shell_sug_refresh(&mut s);
-                self.overlay = Some(Overlay::Shell(s));
+                let path = self.opts().path.clone();
+                cmd_sug_refresh(&mut s, &path);
+                self.overlay = Some(Overlay::Command(s));
             }
             Overlay::Anc(mut s) => {
                 s.ti.insert_str(&text);

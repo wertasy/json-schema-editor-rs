@@ -15,11 +15,12 @@ use crate::doc::jsondoc;
 use crate::doc::{CopyMode, Doc, Member, NodeData, NodeId, PathSeg, Value, append_idx, append_key};
 use crate::icons::{ERR, WARN};
 use crate::smodel::{EnumOpt, FormNode, FormNodeId, Kind, Schema};
+use crate::ui::command;
 use crate::ui::menu::{
-    AddState, AnchorMode, AnchorState, App, CommentEditState, CommentState, ConfirmState,
-    DESC_BLOCK_PREVIEW_LINES, DescLine, DescSource, EditState, ErrsState, ExternalEdit,
-    FastMoveState, FilePickState, FilterAction, HelpState, IssuesState, ListFilter, MergeState,
-    Msg, Overlay, RefPickState, SearchState, SelState, ShellOutState, ShellState, TextState,
+    AddState, AnchorMode, AnchorState, App, CommandState, CommentEditState, CommentState,
+    ConfirmState, DESC_BLOCK_PREVIEW_LINES, DescLine, DescSource, EditState, ErrsState,
+    ExternalEdit, FastMoveState, FilePickState, FilterAction, HelpState, IssuesState, ListFilter,
+    MergeState, Msg, Overlay, RefPickState, SearchState, SelState, ShellOutState, TextState,
     WriteState, anchor_defs, anchor_holder, anchor_holder_path, anchor_merge_use_paths,
     anchor_role, count_anchor_uses, cursor_ancestor, cursor_by_path, cursor_for_row, cursor_prefix,
     is_path_prefix, merge_ref_uses, nodes_equal, nodes_equal_doc, page_delta, read_clipboard,
@@ -36,11 +37,13 @@ use crate::ui::util::{page_cursor, wrap_cursor};
 use crate::ui::widgets::{Key, TextArea, TextInput, apply_scalar};
 use crate::ui::{Issue, MenuKind, MenuState, Row, RowKind};
 
-/// maxShellHistory caps the `!` history ring; the oldest command drops first.
-pub const MAX_SHELL_HISTORY: usize = 100;
+/// MAX_CMD_HISTORY caps the `:` command history ring; the oldest entry
+/// drops first.
+pub const MAX_CMD_HISTORY: usize = 100;
 
-/// shellSugWindow caps the visible tab-completion candidates above the prompt.
-pub const SHELL_SUG_WINDOW: usize = 8;
+/// CMD_SUG_WINDOW caps the visible tab-completion candidates above the
+/// command prompt.
+pub const CMD_SUG_WINDOW: usize = 8;
 
 /// Candidate overlays size to their content with a readable floor; the
 /// terminal's available width is the only ceiling.
@@ -49,34 +52,43 @@ pub const SUG_MIN_WIDTH: usize = 24;
 /// prefix (shown as a leading `…`) so their differing tails stay visible.
 pub const SUG_STRIP_PREFIX_MIN: usize = 8;
 
-/// shell_sug_refresh rebuilds the auto-completion list for the current input
-/// without choosing a candidate; tab/arrows select from it.
-fn shell_sug_refresh(s: &mut ShellState) {
-    s.sug_prefix = s.ti.value().to_string();
-    s.sug = shell::completion_candidates(s.ti.value());
+/// cmd_sug_refresh rebuilds the auto-completion list for the word before
+/// the cursor without choosing a candidate; tab/arrows select from it.
+fn cmd_sug_refresh(s: &mut CommandState, file_path: &str) {
+    let line = s.ti.value().to_string();
+    let cursor = s.ti.cursor_byte();
+    let done = command::completion_candidates(&line, cursor, file_path);
+    s.sug_prefix = done.prefix;
+    s.sug = done.candidates;
     s.sug_idx = None;
     s.sug_line.clear();
+    s.sug_start = done.start;
+    s.sug_end = cursor;
 }
 
-/// shell_complete applies the next/previous whole-line completion. A fresh
-/// cycle scans the current token (PATH command or filesystem path); repeated
-/// tab presses walk the same candidate list.
-fn shell_complete(s: &mut ShellState, forward: bool) {
+/// cmd_complete applies the next/previous completion. A fresh cycle scans the
+/// word before the cursor (builtin command, PATH command or filesystem path)
+/// and inserts the candidate there, leaving the text after the cursor alone;
+/// repeated tab presses walk the same candidate list.
+fn cmd_complete(s: &mut CommandState, forward: bool, file_path: &str) {
     let value = s.ti.value().to_string();
-    // A directory completion enters that directory on the next tab instead
-    // of cycling the old candidate list.
-    if s.sug_idx.is_none() || value != s.sug_line || value.ends_with('/') || value.ends_with('\\') {
-        s.sug_prefix = value.clone();
-        s.sug = shell::completion_candidates(&value);
-        s.sug_idx = None;
+    let inserted = &value[s.sug_start.min(value.len())..s.sug_end.min(value.len())];
+    // Entering a directory or the shell marker needs a fresh scan, not a
+    // cycle over the single applied candidate.
+    if s.sug_idx.is_none()
+        || value != s.sug_line
+        || inserted.ends_with(['/', '\\'])
+        || inserted == "!"
+    {
+        cmd_sug_refresh(s, file_path);
         if s.sug.is_empty() {
             return;
         }
         let idx = if forward { 0 } else { s.sug.len() - 1 };
-        shell_apply_sug(s, idx);
+        cmd_apply_sug(s, idx);
         return;
     }
-    shell_complete_step(s, forward);
+    cmd_complete_step(s, forward);
 }
 
 /// cycle_text_sugs moves a TextInput completion cursor over a stored candidate
@@ -98,15 +110,15 @@ fn cycle_text_sugs(ti: &mut TextInput, sugs: &[String], idx: &mut i64, delta: i6
     true
 }
 
-/// shell_completion_active reports whether the input still holds a candidate
+/// cmd_completion_active reports whether the input still holds a candidate
 /// from the current completion list (so arrows should move within it).
-fn shell_completion_active(s: &ShellState) -> bool {
-    s.sug_idx.is_some() && s.ti.value() == s.sug_line
+fn cmd_completion_active(s: &CommandState) -> bool {
+    s.sug_idx.is_some() && s.ti.value() == s.sug_line && s.ti.cursor_byte() == s.sug_end
 }
 
-/// shell_complete_step moves the candidate cursor without rescanning the
+/// cmd_complete_step moves the candidate cursor without rescanning the
 /// token; tab and, while active, the arrow keys use this.
-fn shell_complete_step(s: &mut ShellState, forward: bool) {
+fn cmd_complete_step(s: &mut CommandState, forward: bool) {
     let Some(i) = s.sug_idx else { return };
     let n = s.sug.len();
     if n == 0 {
@@ -117,13 +129,14 @@ fn shell_complete_step(s: &mut ShellState, forward: bool) {
     } else {
         (i + n - 1) % n
     };
-    shell_apply_sug(s, idx);
+    cmd_apply_sug(s, idx);
 }
 
-fn shell_apply_sug(s: &mut ShellState, idx: usize) {
+fn cmd_apply_sug(s: &mut CommandState, idx: usize) {
     let candidate = s.sug[idx].clone();
-    s.ti.set_value(candidate.clone());
-    s.sug_line = candidate;
+    s.ti.replace_range(s.sug_start, s.sug_end, &candidate);
+    s.sug_end = s.sug_start + candidate.len();
+    s.sug_line = s.ti.value().to_string();
     s.sug_idx = Some(idx);
     s.hist_idx = None;
 }
@@ -1129,7 +1142,7 @@ impl App {
                     + desc_lines
                     + summary_lines
                     + self.status_lines().len()
-                    + usize::from(!self.notice.is_empty())
+                    + self.notice_lines().len()
                     + usize::from(self.hide_empty),
             )
             .max(1)
@@ -1473,7 +1486,7 @@ impl App {
             "S" => self.open_schema_picker(),
             "ctrl+s" | "w" => self.save(),
             "W" => self.open_write_to(),
-            "!" => self.open_shell(),
+            ":" => self.open_command(),
             _ => {}
         }
     }

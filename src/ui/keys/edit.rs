@@ -287,6 +287,7 @@ impl App {
                     sug_prefix: String::new(),
                     sugs: Vec::new(),
                     sug_idx: -1,
+                    sug_col: 0,
                 }));
                 self.refresh_edit_suggestions();
             }
@@ -1117,6 +1118,11 @@ impl App {
         let Some(Overlay::Edit(e)) = &mut self.overlay else {
             return;
         };
+        // Anchor the candidate window at the caret that triggered this list.
+        // Cycling a candidate (tab/arrows) does not refresh, so the window
+        // stays where completion was invoked instead of jumping with the
+        // replacement text.
+        e.sug_col = display_width(&e.ti.value()[..e.ti.cursor_byte()]);
         let prefix = e.ti.value().to_string();
         e.sug_prefix = prefix.clone();
         if let Some(src) = src {

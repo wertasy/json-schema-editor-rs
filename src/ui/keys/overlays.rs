@@ -182,12 +182,12 @@ impl App {
             "up" | "k" | "ctrl+k" => s.cursor = wrap_cursor(s.cursor, -1, s.items.len()),
             "down" | "j" | "ctrl+j" => s.cursor = wrap_cursor(s.cursor, 1, s.items.len()),
             "pgdown" | "ctrl+f" => {
-                let extra = usize::from(!self.notice.is_empty());
+                let extra = self.notice_lines().len();
                 let page = self.overlay_page_size(extra, false);
                 s.cursor = page_cursor(s.cursor, 1, page, s.items.len());
             }
             "pgup" | "ctrl+b" => {
-                let extra = usize::from(!self.notice.is_empty());
+                let extra = self.notice_lines().len();
                 let page = self.overlay_page_size(extra, false);
                 s.cursor = page_cursor(s.cursor, -1, page, s.items.len());
             }
@@ -624,9 +624,9 @@ impl App {
         }
     }
 
-    /// openShell arms the `!` command input at the bottom of the screen.
-    pub(super) fn open_shell(&mut self) {
-        let mut s = ShellState {
+    /// open_command arms the `:` command input at the bottom of the screen.
+    pub(super) fn open_command(&mut self) {
+        let mut s = CommandState {
             ti: TextInput::new(),
             hist_idx: None,
             draft: String::new(),
@@ -634,91 +634,77 @@ impl App {
             sug: Vec::new(),
             sug_idx: None,
             sug_line: String::new(),
+            sug_start: 0,
+            sug_end: 0,
         };
-        shell_sug_refresh(&mut s);
-        self.overlay = Some(Overlay::Shell(s));
+        let path = self.opts().path.clone();
+        cmd_sug_refresh(&mut s, &path);
+        self.overlay = Some(Overlay::Command(s));
     }
 
-    /// keyShell drives the `!` line: enter runs the command and writes its
-    /// output at the cursor row; up/down walk the session history. The prompt
-    /// already shows one `!`, so enter on `!` (visible `!!`) or `!!` reruns
-    /// the previous input; esc cancels.
-    pub fn key_shell(&mut self, msg: Msg, mut s: ShellState) -> Option<Overlay> {
+    /// key_command drives the `:` line: enter runs a builtin or a `!` shell
+    /// escape; up/down walk the session history (or the active completion
+    /// list). `!!` reruns the last shell command; esc cancels.
+    pub fn key_command(&mut self, msg: Msg, mut s: CommandState) -> Option<Overlay> {
+        let path = self.opts().path.clone();
         match msg.key_str().as_str() {
             "enter" => {
-                let cmd = s.ti.value().trim().to_string();
-                if cmd.is_empty() {
-                    return Some(Overlay::Shell(s));
+                let line = s.ti.value().trim().to_string();
+                if line.is_empty() {
+                    return Some(Overlay::Command(s));
                 }
-                // The prompt itself already shows one `!`: typing one more
-                // (visible `!!`) or two (`!!!`) both mean "repeat the last
-                // input" on enter, never a literal `!` shell command.
-                if cmd == "!" || cmd == "!!" {
-                    return self.shell_rerun_last();
+                // `!!` repeats the previous shell command without adding a
+                // history entry of its own.
+                if line != "!!" {
+                    self.cmd_history.push(line.clone());
+                    if self.cmd_history.len() > MAX_CMD_HISTORY {
+                        self.cmd_history.remove(0);
+                    }
                 }
-                self.shell_history.push(cmd.clone());
-                if self.shell_history.len() > MAX_SHELL_HISTORY {
-                    self.shell_history.remove(0);
-                }
-                self.execute_shell_input(&cmd);
+                self.execute_command(&line);
                 // a bare command's multi-line output installs its page here
                 self.overlay.take()
             }
             "esc" => None,
             "up" => {
-                if shell_completion_active(&s) {
-                    shell_complete_step(&mut s, false);
+                if cmd_completion_active(&s) {
+                    cmd_complete_step(&mut s, false);
                 } else {
-                    self.shell_history_up(&mut s);
+                    self.cmd_history_up(&mut s);
                 }
-                Some(Overlay::Shell(s))
+                Some(Overlay::Command(s))
             }
             "down" => {
-                if shell_completion_active(&s) {
-                    shell_complete_step(&mut s, true);
+                if cmd_completion_active(&s) {
+                    cmd_complete_step(&mut s, true);
                 } else {
-                    self.shell_history_down(&mut s);
+                    self.cmd_history_down(&mut s);
                 }
-                Some(Overlay::Shell(s))
+                Some(Overlay::Command(s))
             }
             "tab" | "ctrl+n" => {
-                shell_complete(&mut s, true);
-                Some(Overlay::Shell(s))
+                cmd_complete(&mut s, true, &path);
+                Some(Overlay::Command(s))
             }
             "shift+tab" | "ctrl+p" => {
-                shell_complete(&mut s, false);
-                Some(Overlay::Shell(s))
+                cmd_complete(&mut s, false, &path);
+                Some(Overlay::Command(s))
             }
             _ => {
                 if let Some(k) = msg_key(&msg) {
                     s.hist_idx = None;
                     s.ti.handle_key(k);
-                    shell_sug_refresh(&mut s);
+                    cmd_sug_refresh(&mut s, &path);
                 }
-                Some(Overlay::Shell(s))
+                Some(Overlay::Command(s))
             }
         }
     }
 
-    /// shell_rerun_last repeats the most recent `!` input line, mode
-    /// included (`r`/`a`/`w`/bare), like vi's `!!`.
-    pub(super) fn shell_rerun_last(&mut self) -> Option<Overlay> {
-        match self.shell_history.last().cloned() {
-            Some(line) => {
-                self.execute_shell_input(&line);
-                self.overlay.take()
-            }
-            None => {
-                self.notice = "! no previous command".to_string();
-                None
-            }
-        }
-    }
-
-    /// shell_history_up recalls the previous command, remembering the draft
+    /// cmd_history_up recalls the previous command, remembering the draft
     /// that was being typed before the first recall.
-    pub(super) fn shell_history_up(&self, s: &mut ShellState) {
-        let len = self.shell_history.len();
+    pub(super) fn cmd_history_up(&self, s: &mut CommandState) {
+        let len = self.cmd_history.len();
         if len == 0 {
             return;
         }
@@ -731,40 +717,92 @@ impl App {
             Some(i) => i - 1,
         };
         s.hist_idx = Some(idx);
-        s.ti.set_value(self.shell_history[idx].clone());
-        shell_sug_refresh(s);
+        s.ti.set_value(self.cmd_history[idx].clone());
+        cmd_sug_refresh(s, &self.opts().path);
     }
 
-    /// shell_history_down moves toward the draft; stepping past the newest
+    /// cmd_history_down moves toward the draft; stepping past the newest
     /// entry restores the original input.
-    pub(super) fn shell_history_down(&self, s: &mut ShellState) {
+    pub(super) fn cmd_history_down(&self, s: &mut CommandState) {
         let Some(i) = s.hist_idx else { return };
-        if i + 1 < self.shell_history.len() {
+        if i + 1 < self.cmd_history.len() {
             s.hist_idx = Some(i + 1);
-            s.ti.set_value(self.shell_history[i + 1].clone());
+            s.ti.set_value(self.cmd_history[i + 1].clone());
         } else {
             s.hist_idx = None;
             s.ti.set_value(s.draft.clone());
         }
-        shell_sug_refresh(s);
+        cmd_sug_refresh(s, &self.opts().path);
     }
 
-    /// execute_shell_input applies one `!` input line: `r <cmd>` inserts the
-    /// command's stdout at the cursor value, `w <cmd>` streams the document
-    /// to the command's stdin, and a bare command only runs (vi's `:!`).
-    pub(super) fn execute_shell_input(&mut self, line: &str) {
-        let (mode, cmd) = match shell::parse_input(line) {
+    /// execute_command runs one `:` line: builtins (`w`, `wa`, `wq`, `waq`,
+    /// `q`, `q!`) or a `!` shell escape. `%` in a shell command expands to
+    /// the session file path.
+    pub(super) fn execute_command(&mut self, line: &str) {
+        let command = match command::parse_command(line) {
             Ok(parsed) => parsed,
             Err(e) => {
-                self.notice = format!("! {e}");
+                self.notice = format!(": {e}");
                 return;
             }
         };
-        match mode {
-            shell::ShellMode::Read => self.shell_read(&cmd),
-            shell::ShellMode::AppendLines => self.shell_append_lines(&cmd),
-            shell::ShellMode::Write => self.shell_write(&cmd),
-            shell::ShellMode::Execute => self.shell_execute_only(&cmd),
+        match command {
+            command::Command::RepeatShell => {
+                let last = self
+                    .cmd_history
+                    .iter()
+                    .rev()
+                    .find(|l| {
+                        matches!(
+                            command::parse_command(l),
+                            Ok(command::Command::Shell { .. })
+                        )
+                    })
+                    .cloned();
+                match last {
+                    Some(line) => self.execute_command(&line),
+                    None => self.notice = ": no previous shell command".to_string(),
+                }
+            }
+            command::Command::Save { all, force, quit } => {
+                if all {
+                    let mode = match (quit, force) {
+                        (false, false) => crate::ui::files::SaveMode::Stay,
+                        (false, true) => crate::ui::files::SaveMode::StayForced,
+                        (true, false) => crate::ui::files::SaveMode::Quit,
+                        (true, true) => crate::ui::files::SaveMode::QuitForced,
+                    };
+                    self.save_dirty_files(mode);
+                } else if force {
+                    self.write_to(quit, true, "");
+                } else {
+                    self.validate_and_write(quit, "");
+                }
+            }
+            command::Command::WriteTo { path } => {
+                if path == self.opts().path {
+                    self.validate_and_write(false, "");
+                } else {
+                    self.validate_and_write(false, &path);
+                }
+            }
+            command::Command::Quit { force } => {
+                if force || self.dirty_files().is_empty() {
+                    self.exiting = true;
+                } else {
+                    self.notice =
+                        ": unsaved changes: use :wq to save or :q! to discard".to_string();
+                }
+            }
+            command::Command::Shell { mode, command } => {
+                let cmd = command::expand_percent(&command, &self.opts().path);
+                match mode {
+                    shell::ShellMode::Read => self.shell_read(&cmd),
+                    shell::ShellMode::AppendLines => self.shell_append_lines(&cmd),
+                    shell::ShellMode::Write => self.shell_write(&cmd),
+                    shell::ShellMode::Execute => self.shell_execute_only(&cmd),
+                }
+            }
         }
     }
 
@@ -774,20 +812,20 @@ impl App {
         let stdout = match shell::run_capture(cmd) {
             Ok(out) => out,
             Err(e) => {
-                self.notice = format!("! {e}");
+                self.notice = format!(": {e}");
                 return;
             }
         };
         let target = match self.shell_target() {
             Some(t) => t,
             None => {
-                self.notice = "! cursor is not on a string or an array of strings".to_string();
+                self.notice = ": cursor is not on a string or an array of strings".to_string();
                 return;
             }
         };
         let output = shell::output_text(&stdout);
         if let Err(e) = shell::apply(&mut self.fs_mut().doc, &target, &output) {
-            self.notice = format!("! {e}");
+            self.notice = format!(": {e}");
         }
     }
 
@@ -797,20 +835,20 @@ impl App {
         let stdout = match shell::run_capture(cmd) {
             Ok(out) => out,
             Err(e) => {
-                self.notice = format!("! {e}");
+                self.notice = format!(": {e}");
                 return;
             }
         };
         let target = match self.shell_array_target() {
             Some(t) => t,
             None => {
-                self.notice = "! cursor is not on a string array".to_string();
+                self.notice = ": cursor is not on a string array".to_string();
                 return;
             }
         };
         let lines = shell::output_lines(&stdout);
         if let Err(e) = shell::apply_lines(&mut self.fs_mut().doc, &target, &lines) {
-            self.notice = format!("! {e}");
+            self.notice = format!(": {e}");
         }
     }
 
@@ -821,7 +859,7 @@ impl App {
         let text = match self.fs().codec.write(self.doc(), &self.fs().meta) {
             Ok(text) => text,
             Err(e) => {
-                self.notice = format!("! cannot serialize document: {e}");
+                self.notice = format!(": cannot serialize document: {e}");
                 return;
             }
         };
@@ -829,34 +867,41 @@ impl App {
             Ok(out) => {
                 let shown = shell::compact_output(&out);
                 self.notice = if shown.is_empty() {
-                    format!("! piped {} bytes to command", text.len())
+                    format!(": piped {} bytes to command", text.len())
                 } else {
                     shown
                 };
             }
-            Err(e) => self.notice = format!("! {e}"),
+            Err(e) => self.notice = format!(": {e}"),
         }
     }
 
     /// shell_execute_only is vi's `:!cmd`: run the command and show its
-    /// output without touching the document. A multi-line stdout opens the
-    /// scrolling page; one line (or none) keeps the bottom notice.
+    /// output without touching the document. One line (or none) keeps the
+    /// single-line notice; a multi-line stdout is rendered inline when it
+    /// fits the blank rows above the bottom block and otherwise opens the
+    /// scrolling page.
     pub(super) fn shell_execute_only(&mut self, cmd: &str) {
         match shell::run_capture(cmd) {
             Ok(out) => {
                 let text = shell::output_text(&out);
-                if text.contains('\n') {
+                if !text.contains('\n') {
+                    self.notice = shell::compact_output(&out);
+                    return;
+                }
+                let lines = wrap_text(&text, self.width.saturating_sub(1));
+                if lines.len() <= self.blank_rows_above_notice() {
+                    self.notice = text;
+                } else {
                     self.notice.clear();
                     self.overlay = Some(Overlay::ShellOut(ShellOutState {
                         command: cmd.to_string(),
-                        lines: wrap_text(&text, self.width.saturating_sub(1)),
+                        lines,
                         scroll: 0,
                     }));
-                } else {
-                    self.notice = shell::compact_output(&out);
                 }
             }
-            Err(e) => self.notice = format!("! {e}"),
+            Err(e) => self.notice = format!(": {e}"),
         }
     }
 

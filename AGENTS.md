@@ -73,7 +73,10 @@ src/ui/
   accessible.rs      --accessible line protocol
   lineio.rs          one-line-per-read stdin reader
   schema_picker.rs   SchemaStore picker (TUI + accessible)
-  shell.rs           vi-style `!` modes: `r` stdout insert, `a` line append, `w` document-to-stdin, bare execute; tab completion
+  command.rs         vi-style `:` grammar: builtins (w/wa/wq/waq, q/q!), shell
+                     escapes, cursor-aware completion, `%` expansion
+  shell.rs           shell execution: `r !` stdout insert, `a !` line append,
+                     `w !` document-to-stdin, `!` execute
 tests/
   arch.rs            A1–A6 architecture invariants (source scan)
   common/mod.rs      pty + run helpers

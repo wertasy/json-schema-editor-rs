@@ -2295,6 +2295,25 @@ fn unknown_array_add_string_edits_inline() {
 }
 
 #[test]
+fn search_from_a_null_object_lists_its_fields() {
+    let mut doc = test_doc();
+    let null = doc.new_null();
+    doc.set(&sp(&["server"]), null).unwrap();
+    let mut m = app_with(test_schema(), doc, test_opts());
+    set_cursor_path(&mut m, &sp(&["server"]));
+    press(&mut m, &["enter"]);
+    assert_eq!(m.fs().stack.len(), 2, "null object still opens its menu");
+
+    press(&mut m, &["/", "port"]);
+    let results = &search_state(&m).results;
+    assert!(
+        results.iter().any(|r| r.path == sp(&["server", "port"])),
+        "a null object's fields must be searchable: {:?}",
+        results.iter().map(|r| r.path.clone()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn search_jump_to_variant_key_stays_on_row() {
     let schema = schema_from_json(
         r#"{
@@ -10340,36 +10359,43 @@ fn shell_doc() -> Doc {
     })
 }
 
-fn shell_value(app: &App) -> String {
+fn command_value(app: &App) -> String {
     match &app.overlay {
-        Some(Overlay::Shell(s)) => s.ti.value().to_string(),
-        _ => panic!("shell prompt is not open"),
+        Some(Overlay::Command(s)) => s.ti.value().to_string(),
+        _ => panic!("command prompt is not open"),
+    }
+}
+
+fn command_cursor(app: &App) -> usize {
+    match &app.overlay {
+        Some(Overlay::Command(s)) => s.ti.cursor_byte(),
+        _ => panic!("command prompt is not open"),
     }
 }
 
 #[test]
 fn shell_inserts_stdout_into_string_and_string_array_values() {
     let mut app = app_with(shell_schema(), shell_doc(), test_opts());
-    press(&mut app, &["!"]);
-    assert!(matches!(app.overlay, Some(Overlay::Shell(_))));
+    press(&mut app, &[":"]);
+    assert!(matches!(app.overlay, Some(Overlay::Command(_))));
     let view = app.view();
     let lines: Vec<&str> = view.lines().collect();
     assert!(
-        lines[lines.len() - 2].starts_with('!'),
+        lines[lines.len() - 2].starts_with(':'),
         "prompt row must sit directly above the help row: {:?}",
         &lines[lines.len() - 2..]
     );
-    assert!(lines[lines.len() - 1].contains("shell: r <cmd> insert"));
+    assert!(lines[lines.len() - 1].contains(": command"));
 
-    press(&mut app, &["r echo shell"]);
+    press(&mut app, &["r !echo shell"]);
     press(&mut app, &["enter"]);
     assert!(app.overlay.is_none());
     assert_eq!(str_at(&app.doc(), &["name"]), "shell");
 
     // string array row: append the output as a new item
     press(&mut app, &["j"]);
-    press(&mut app, &["!"]);
-    press(&mut app, &["r echo next"]);
+    press(&mut app, &[":"]);
+    press(&mut app, &["r !echo next"]);
     press(&mut app, &["enter"]);
     let tags = app.doc().get(&sp(&["tags"])).unwrap();
     let got: Vec<String> = match app.doc().value(tags) {
@@ -10386,67 +10412,54 @@ fn shell_inserts_stdout_into_string_and_string_array_values() {
 }
 
 #[test]
-fn shell_history_recalls_and_bang_bang_reruns_the_last_command() {
+fn command_history_recalls_and_bang_bang_reruns_the_last_shell_command() {
     let mut app = app_with(shell_schema(), shell_doc(), test_opts());
-    press(&mut app, &["!"]);
-    press(&mut app, &["r echo one"]);
+    press(&mut app, &[":"]);
+    press(&mut app, &["r !echo one"]);
     press(&mut app, &["enter"]);
     assert_eq!(str_at(&app.doc(), &["name"]), "one");
 
-    press(&mut app, &["!"]);
+    press(&mut app, &[":"]);
     press(&mut app, &["up"]);
-    assert_eq!(shell_value(&app), "r echo one");
+    assert_eq!(command_value(&app), "r !echo one");
     press(&mut app, &["down"]);
-    assert_eq!(shell_value(&app), "");
+    assert_eq!(command_value(&app), "");
     press(&mut app, &["esc"]);
 
-    press(&mut app, &["!"]);
-    press(&mut app, &["r echo two"]);
+    press(&mut app, &[":"]);
+    press(&mut app, &["r !echo two"]);
     press(&mut app, &["enter"]);
     assert_eq!(str_at(&app.doc(), &["name"]), "two");
-    assert_eq!(app.shell_history, vec!["r echo one", "r echo two"]);
+    assert_eq!(app.cmd_history, vec!["r !echo one", "r !echo two"]);
 
-    // The prompt already shows one `!`: typing one more displays `!!` and
-    // enter repeats the last input (the reported `exit 1` case).
+    // `!!` reruns the previous shell escape (including its r/a/w mode).
     let name = app.fs_mut().doc.new_str("changed");
     app.fs_mut()
         .doc
         .set(&sp(&["name"]), name)
         .expect("rewrite name");
-    press(&mut app, &["!"]);
-    press(&mut app, &["!"]);
-    assert!(matches!(app.overlay, Some(Overlay::Shell(_))));
+    press(&mut app, &[":"]);
+    press(&mut app, &["!!"]);
+    assert!(matches!(app.overlay, Some(Overlay::Command(_))));
     press(&mut app, &["enter"]);
     assert!(app.overlay.is_none());
     assert_eq!(str_at(&app.doc(), &["name"]), "two");
-
-    // Typing two bangs after the prompt also repeats on enter.
-    let name = app.fs_mut().doc.new_str("changed again");
-    app.fs_mut()
-        .doc
-        .set(&sp(&["name"]), name)
-        .expect("rewrite name");
-    press(&mut app, &["!"]);
-    press(&mut app, &["!!"]);
-    assert!(matches!(app.overlay, Some(Overlay::Shell(_))));
-    press(&mut app, &["enter"]);
-    assert_eq!(str_at(&app.doc(), &["name"]), "two");
     assert_eq!(
-        app.shell_history,
-        vec!["r echo one", "r echo two"],
+        app.cmd_history,
+        vec!["r !echo one", "r !echo two"],
         "!! must not add another history entry"
     );
 }
 
 #[test]
-fn shell_bang_without_history_never_runs_a_literal_bang_command() {
+fn command_repeat_without_history_never_runs_a_literal_bang_command() {
     let mut app = app_with(shell_schema(), shell_doc(), test_opts());
-    press(&mut app, &["!"]);
-    press(&mut app, &["!"]);
-    assert!(matches!(app.overlay, Some(Overlay::Shell(_))));
+    press(&mut app, &[":"]);
+    press(&mut app, &["!!"]);
+    assert!(matches!(app.overlay, Some(Overlay::Command(_))));
     press(&mut app, &["enter"]);
     assert!(app.overlay.is_none());
-    assert_eq!(app.notice, "! no previous command");
+    assert_eq!(app.notice, ": no previous shell command");
     assert!(!app.notice.contains("exit"), "notice: {}", app.notice);
     assert_eq!(str_at(&app.doc(), &["name"]), "old");
 }
@@ -10454,16 +10467,16 @@ fn shell_bang_without_history_never_runs_a_literal_bang_command() {
 #[test]
 fn shell_failure_and_non_string_targets_only_report_notices() {
     let mut app = app_with(shell_schema(), shell_doc(), test_opts());
-    press(&mut app, &["!"]);
-    press(&mut app, &["exit 4"]);
+    press(&mut app, &[":"]);
+    press(&mut app, &["!exit 4"]);
     press(&mut app, &["enter"]);
     assert!(app.overlay.is_none());
     assert!(app.notice.contains("exit 4"), "notice: {}", app.notice);
     assert_eq!(str_at(&app.doc(), &["name"]), "old");
 
     press(&mut app, &["j", "j"]);
-    press(&mut app, &["!"]);
-    press(&mut app, &["r echo nope"]);
+    press(&mut app, &[":"]);
+    press(&mut app, &["r !echo nope"]);
     press(&mut app, &["enter"]);
     assert!(
         app.notice.contains("not on a string"),
@@ -10499,8 +10512,8 @@ fn shell_prefers_a_string_variant_over_a_string_array_variant() {
     });
     let doc = dbuild(|db| db.obj(vec![("field", db.arr(vec![db.s("old")]))]));
     let mut app = app_with(schema, doc, test_opts());
-    press(&mut app, &["!"]);
-    press(&mut app, &["r echo hi"]);
+    press(&mut app, &[":"]);
+    press(&mut app, &["r !echo hi"]);
     press(&mut app, &["enter"]);
     assert_eq!(str_at(&app.doc(), &["field"]), "hi");
 }
@@ -10508,8 +10521,8 @@ fn shell_prefers_a_string_variant_over_a_string_array_variant() {
 #[test]
 fn shell_bare_command_runs_without_touching_the_document() {
     let mut app = app_with(shell_schema(), shell_doc(), test_opts());
-    press(&mut app, &["!"]);
-    press(&mut app, &["echo run-only"]);
+    press(&mut app, &[":"]);
+    press(&mut app, &["!echo run-only"]);
     press(&mut app, &["enter"]);
     assert!(app.overlay.is_none());
     assert!(
@@ -10521,48 +10534,78 @@ fn shell_bare_command_runs_without_touching_the_document() {
 }
 
 #[test]
-fn shell_bare_multiline_output_opens_a_scrolling_page() {
+fn shell_bare_multiline_output_renders_inline_when_it_fits() {
     let mut app = app_with(shell_schema(), shell_doc(), test_opts());
-    press(&mut app, &["!"]);
-    press(&mut app, &["echo one && echo two"]);
+    press(&mut app, &[":"]);
+    press(&mut app, &["!echo one && echo two"]);
+    press(&mut app, &["enter"]);
+    assert!(app.overlay.is_none(), "output fits, so no page overlay");
+    assert_eq!(app.notice, "one\ntwo");
+    assert!(app.list_mode(), "the menu keeps the keyboard");
+    assert_eq!(str_at(&app.doc(), &["name"]), "old");
+
+    let view = app.view();
+    let rows: Vec<&str> = view.lines().collect();
+    assert_eq!(rows.len(), app.height, "view: {view}");
+    assert!(rows[app.height - 3].contains("one"), "view: {view}");
+    assert!(rows[app.height - 2].contains("two"), "view: {view}");
+    assert!(
+        rows[app.height - 1].contains("↑/↓ move"),
+        "the help row stays pinned: {view}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_multiline_output_fills_the_blank_rows_exactly() {
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    let blank = app.blank_rows_above_notice();
+    assert!(blank > 1, "fixture needs free rows below the menu: {blank}");
+
+    // Exactly the blank rows: the inline notice fits without moving rows.
+    let fits = format!("!seq 1 {blank}");
+    press(&mut app, &[":", fits.as_str(), "enter"]);
+    assert!(app.overlay.is_none(), "exactly fitting output stays inline");
+    assert_eq!(app.notice.lines().count(), blank);
+
+    // One line more: the standalone page is the only place it fits.
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    let over = format!("!seq 1 {}", blank + 1);
+    press(&mut app, &[":", over.as_str(), "enter"]);
+    assert!(
+        matches!(app.overlay, Some(Overlay::ShellOut(_))),
+        "one line past the blank rows must open the page"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_bare_multiline_output_too_tall_opens_the_scrolling_page() {
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    press(&mut app, &[":"]);
+    press(&mut app, &["!seq 1 40"]);
     press(&mut app, &["enter"]);
     match &app.overlay {
         Some(Overlay::ShellOut(s)) => {
-            assert_eq!(s.command, "echo one && echo two");
-            assert_eq!(s.lines, vec!["one", "two"]);
+            assert_eq!(s.command, "seq 1 40");
+            assert_eq!(s.lines.len(), 40);
             assert_eq!(s.scroll, 0);
         }
-        _ => panic!("multi-line bare output must open the output page"),
+        _ => panic!("output taller than the blank rows must open the output page"),
     }
-    assert_eq!(app.notice, "");
-    assert!(!app.list_mode(), "the output page owns the keyboard");
-    assert_eq!(str_at(&app.doc(), &["name"]), "old");
-    let view = app.view();
-    assert!(view.contains("one") && view.contains("two"), "view: {view}");
-    // Short output sits at the bottom: blank rows first, then the title and
-    // output directly above the help row.
-    let rows: Vec<&str> = view.lines().collect();
-    assert_eq!(rows.len(), app.height, "view: {view}");
-    assert!(
-        rows[0].trim().is_empty(),
-        "output must not start at the top: {view}"
-    );
-    assert!(
-        rows[app.height - 4].contains("echo one && echo two"),
-        "view: {view}"
-    );
-    assert!(rows[app.height - 3].contains("one"), "view: {view}");
-    assert!(rows[app.height - 2].contains("two"), "view: {view}");
-    assert!(rows[app.height - 1].contains("q/esc close"), "view: {view}");
-
-    // The content fits the page: scrolling clamps at zero.
-    press(&mut app, &["j"]);
-    match &app.overlay {
-        Some(Overlay::ShellOut(s)) => assert_eq!(s.scroll, 0),
-        _ => panic!("output page closed unexpectedly"),
-    }
+    assert!(app.notice.is_empty());
     press(&mut app, &["q"]);
     assert!(app.overlay.is_none());
+}
+
+#[test]
+fn other_multiline_notices_render_inline() {
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    app.notice = "first line\nsecond line".to_string();
+    let view = app.view();
+    let rows: Vec<&str> = view.lines().collect();
+    assert!(rows[app.height - 3].contains("first line"), "view: {view}");
+    assert!(rows[app.height - 2].contains("second line"), "view: {view}");
 }
 
 #[test]
@@ -10621,8 +10664,8 @@ fn shell_out_scroll(app: &App) -> usize {
 #[test]
 fn shell_w_pipes_the_document_to_the_command_stdin() {
     let mut app = app_with(shell_schema(), shell_doc(), test_opts());
-    press(&mut app, &["!"]);
-    press(&mut app, &["w cat"]);
+    press(&mut app, &[":"]);
+    press(&mut app, &["w !cat"]);
     press(&mut app, &["enter"]);
     assert!(app.overlay.is_none());
     assert!(
@@ -10631,16 +10674,16 @@ fn shell_w_pipes_the_document_to_the_command_stdin() {
         app.notice
     );
     assert_eq!(str_at(&app.doc(), &["name"]), "old");
-    assert_eq!(app.shell_history, vec!["w cat"]);
-    assert!(!app.dirty(), "w must not modify the document");
+    assert_eq!(app.cmd_history, vec!["w !cat"]);
+    assert!(!app.dirty(), "w !cat must not modify the document");
 }
 
 #[test]
 fn shell_a_mode_appends_each_output_line_to_a_string_array() {
     let mut app = app_with(shell_schema(), shell_doc(), test_opts());
     press(&mut app, &["j"]); // tags row
-    press(&mut app, &["!"]);
-    press(&mut app, &["a echo x && echo y"]);
+    press(&mut app, &[":"]);
+    press(&mut app, &["a !echo x && echo y"]);
     press(&mut app, &["enter"]);
     let tags = app.doc().get(&sp(&["tags"])).unwrap();
     let got: Vec<String> = match app.doc().value(tags) {
@@ -10659,8 +10702,8 @@ fn shell_a_mode_appends_each_output_line_to_a_string_array() {
 #[test]
 fn shell_a_mode_rejects_a_string_target() {
     let mut app = app_with(shell_schema(), shell_doc(), test_opts());
-    press(&mut app, &["!"]);
-    press(&mut app, &["a echo x"]);
+    press(&mut app, &[":"]);
+    press(&mut app, &["a !echo x"]);
     press(&mut app, &["enter"]);
     assert!(
         app.notice.contains("not on a string array"),
@@ -10671,18 +10714,27 @@ fn shell_a_mode_rejects_a_string_target() {
 }
 
 #[test]
-fn shell_tab_completes_the_current_path_token() {
+fn command_tab_completes_the_word_before_the_cursor_and_keeps_the_suffix() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("alpha.txt"), "").unwrap();
     std::fs::write(dir.path().join("alpine"), "").unwrap();
     let mut app = app_with(shell_schema(), shell_doc(), test_opts());
-    press(&mut app, &["!"]);
-    let line = format!("r cat {}/al", dir.path().display());
+    press(&mut app, &[":"]);
+    let line = format!("!cat {}/alZZ", dir.path().display());
     let base = dir.path().display().to_string();
     press(&mut app, &[line.as_str()]);
 
+    // Put the cursor before `ZZ`: completion uses only the prefix and
+    // leaves the suffix in place.
+    press(&mut app, &["left", "left"]);
     press(&mut app, &["tab"]);
-    assert_eq!(shell_value(&app), format!("r cat {base}/alpha.txt"));
+    assert_eq!(command_value(&app), format!("!cat {base}/alpha.txtZZ"));
+    assert_eq!(
+        command_cursor(&app),
+        format!("!cat {base}/alpha.txt").len(),
+        "the cursor lands after the inserted candidate, before the suffix"
+    );
+
     let view = app.view();
     assert!(
         view.contains("\x1b[38;5;39;48;5;236m> …pha.txt"),
@@ -10695,47 +10747,181 @@ fn shell_tab_completes_the_current_path_token() {
     let line = view
         .lines()
         .find(|l| l.contains("\x1b[38;5;39;48;5;236m> …pha.txt"))
-        .expect("selected shell candidate line");
+        .expect("selected command candidate line");
     let start = line
         .find("\x1b[38;5;39;48;5;236m")
         .expect("candidate background");
     assert_eq!(
         display_width(&line[..start]),
         1,
-        "shell candidates align after the ! prompt"
+        "command candidates align after the : prompt"
     );
     // While completion is active, the arrow keys move the candidate cursor
     // instead of recalling command history.
     press(&mut app, &["down"]);
-    assert_eq!(shell_value(&app), format!("r cat {base}/alpine"));
+    assert_eq!(command_value(&app), format!("!cat {base}/alpineZZ"));
     let view = app.view();
     assert!(
         view.contains("\x1b[38;5;39;48;5;236m> …pine"),
         "selection marker must follow the arrow key: {view}"
     );
     press(&mut app, &["up"]);
-    assert_eq!(shell_value(&app), format!("r cat {base}/alpha.txt"));
-    // Wrap-around matches tab completion.
-    press(&mut app, &["up"]);
-    assert_eq!(shell_value(&app), format!("r cat {base}/alpine"));
-    press(&mut app, &["down"]);
-    assert_eq!(shell_value(&app), format!("r cat {base}/alpha.txt"));
+    assert_eq!(command_value(&app), format!("!cat {base}/alpha.txtZZ"));
     // Tab after arrow movement keeps using the same candidate list.
     press(&mut app, &["tab"]);
-    assert_eq!(shell_value(&app), format!("r cat {base}/alpine"));
+    assert_eq!(command_value(&app), format!("!cat {base}/alpineZZ"));
+}
+
+#[test]
+fn command_tab_expands_percent_to_the_session_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("config with space.json");
+    std::fs::write(&file, "").unwrap();
+    let path = file.display().to_string();
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    app.fs_mut().opts.path = path.clone();
+    press(&mut app, &[":"]);
+    press(&mut app, &["!cat %"]);
     press(&mut app, &["tab"]);
-    assert_eq!(shell_value(&app), format!("r cat {base}/alpha.txt"));
+    let want = crate::ui::command::shell_quote(&crate::ui::command::absolute_path(&path));
+    assert_eq!(command_value(&app), format!("!cat {want}"));
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_command_expands_percent_when_it_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("config with space.json");
+    std::fs::write(&file, "needle\n").unwrap();
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    app.fs_mut().opts.path = file.display().to_string();
+    press(&mut app, &[":"]);
+    press(&mut app, &["!cat %"]);
+    press(&mut app, &["enter"]);
+    assert!(
+        app.notice.contains("needle"),
+        "the command must see the expanded file path: {}",
+        app.notice
+    );
+}
+
+#[test]
+fn command_completion_offers_builtins_but_not_shell_commands() {
+    let sug = |app: &App| match &app.overlay {
+        Some(Overlay::Command(s)) => (s.sug.clone(), s.sug_prefix.clone()),
+        _ => panic!("command prompt is not open"),
+    };
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    press(&mut app, &[":", "w"]);
+    let (sugs, prefix) = sug(&app);
+    assert_eq!(prefix, "w");
+    assert!(sugs.contains(&"wa".to_string()), "{sugs:?}");
+    assert!(sugs.contains(&"wq!".to_string()), "{sugs:?}");
+    assert!(sugs.contains(&"waq".to_string()), "{sugs:?}");
+
+    // `!` switches to shell completion: PATH commands, never builtin names.
+    press(&mut app, &["ctrl+u", "!"]);
+    let (sugs, prefix) = sug(&app);
+    assert_eq!(prefix, "");
+    assert!(!sugs.contains(&"waq".to_string()), "{sugs:?}");
+    assert!(!sugs.contains(&"wq!".to_string()), "{sugs:?}");
+}
+
+#[test]
+fn command_w_saves_and_wq_saves_then_exits() {
+    let (opts, n) = counting_opts();
+    let mut app = app_with(shell_schema(), shell_doc(), opts);
+    press(&mut app, &[":", "w", "enter"]);
+    assert_eq!(n.load(Ordering::SeqCst), 1);
+    assert!(app.overlay.is_none());
+    assert!(!app.exiting);
+    assert_eq!(app.notice, "Saved");
+
+    press(&mut app, &[":", "wq", "enter"]);
+    assert_eq!(n.load(Ordering::SeqCst), 2);
+    assert!(app.exiting);
+}
+
+#[test]
+fn command_q_refuses_dirty_files_and_q_bang_discards() {
+    let (opts, n) = counting_opts();
+    let mut app = app_with(shell_schema(), shell_doc(), opts);
+    let name = app.fs_mut().doc.new_str("changed");
+    app.fs_mut().doc.set(&sp(&["name"]), name).unwrap();
+
+    press(&mut app, &[":", "q", "enter"]);
+    assert!(!app.exiting);
+    assert_eq!(n.load(Ordering::SeqCst), 0);
+    assert!(
+        app.notice.contains("unsaved changes"),
+        "notice: {}",
+        app.notice
+    );
+
+    press(&mut app, &[":", "q!", "enter"]);
+    assert!(app.exiting);
+    assert_eq!(n.load(Ordering::SeqCst), 0, "q! must not save");
+}
+
+fn two_file_app() -> (App, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let (opts1, n1) = counting_opts();
+    let (opts2, n2) = counting_opts();
+    let mut app = App::new(vec![
+        session(shell_schema(), shell_doc(), opts1),
+        session(shell_schema(), shell_doc(), opts2),
+    ]);
+    for i in 0..2 {
+        let name = app.files[i].doc.new_str("changed");
+        app.files[i].doc.set(&sp(&["name"]), name).unwrap();
+    }
+    (app, n1, n2)
+}
+
+#[test]
+fn command_wa_saves_all_dirty_files_and_stays() {
+    let (mut app, n1, n2) = two_file_app();
+    press(&mut app, &[":", "wa", "enter"]);
+    assert_eq!(n1.load(Ordering::SeqCst), 1);
+    assert_eq!(n2.load(Ordering::SeqCst), 1);
+    assert_eq!(app.cur, 0, "wa returns to the active file");
+    assert!(!app.exiting);
+    assert_eq!(app.notice, "Saved 2 files");
+}
+
+#[test]
+fn command_waq_saves_all_dirty_files_and_exits() {
+    let (mut app, n1, n2) = two_file_app();
+    press(&mut app, &[":", "waq", "enter"]);
+    assert_eq!(n1.load(Ordering::SeqCst), 1);
+    assert_eq!(n2.load(Ordering::SeqCst), 1);
+    assert!(app.exiting);
+}
+
+#[test]
+fn command_w_path_writes_to_the_given_target() {
+    let mut opts = test_opts();
+    opts.path = "/tmp/orig.json".to_string();
+    let seen = Arc::new(std::sync::Mutex::new(String::new()));
+    let got = Arc::clone(&seen);
+    opts.write_to = Some(Arc::new(move |path: &str, _: &Doc, _: &Meta| {
+        *got.lock().unwrap() = path.to_string();
+        Ok(())
+    }));
+    let mut app = app_with(shell_schema(), shell_doc(), opts);
+    press(&mut app, &[":", "w /tmp/out.json", "enter"]);
+    assert_eq!(*seen.lock().unwrap(), "/tmp/out.json");
+    assert!(app.overlay.is_none());
 }
 
 #[test]
 fn shell_ctrl_u_then_ctrl_y_restores_the_command() {
     let mut app = app_with(shell_schema(), shell_doc(), test_opts());
-    press(&mut app, &["!"]);
-    press(&mut app, &["echo hi"]);
+    press(&mut app, &[":"]);
+    press(&mut app, &["!echo hi"]);
     press(&mut app, &["ctrl+u"]);
-    assert_eq!(shell_value(&app), "");
+    assert_eq!(command_value(&app), "");
     press(&mut app, &["ctrl+y"]);
-    assert_eq!(shell_value(&app), "echo hi");
+    assert_eq!(command_value(&app), "!echo hi");
     press(&mut app, &["enter"]);
     assert!(app.notice.contains("hi"), "notice: {}", app.notice);
 }
@@ -10831,6 +11017,74 @@ fn edit_input_arrows_move_completion_selection() {
 }
 
 #[test]
+fn edit_completion_overlay_starts_at_the_caret_column() {
+    let schema = schema_build(|b| {
+        let mut name = scalar("name", "Name", "string");
+        name.suggestions = vec!["alpha".into(), "alpine".into(), "alps".into()];
+        let name = b.id(name);
+        let other = b.id(scalar("other", "Other", "string"));
+        b.id(FormNode {
+            key: "$".into(),
+            kind: Kind::Object,
+            children: vec![name, other],
+            ..FormNode::default()
+        })
+    });
+    let doc = dbuild(|db| db.obj(vec![("name", db.s("a")), ("other", db.s("x"))]));
+    let mut app = app_with(schema, doc, test_opts());
+    press(&mut app, &["enter"]); // edit Name with the caret after "a"
+    match &app.overlay {
+        Some(Overlay::Edit(e)) => {
+            assert_eq!(e.ti.value(), "a");
+            assert_eq!(e.sugs.len(), 3);
+        }
+        _ => panic!("edit overlay is not open"),
+    }
+
+    let rows = app.menu_rows();
+    let tw = app.menu_title_col_width(&rows);
+    let input_left = 2 + display_width(&app.title_col("Name", tw));
+    let expected = input_left + display_width("a");
+    assert!(
+        expected > input_left,
+        "the caret is right of the value start"
+    );
+
+    let view = app.view();
+    let line = view
+        .lines()
+        .find(|l| l.contains("\x1b[2;48;5;236m  alpha"))
+        .expect("candidate line");
+    let start = line.find("\x1b[2;48;5;236m").expect("candidate background");
+    assert_eq!(
+        display_width(&line[..start]),
+        expected,
+        "the candidate window starts at the caret column: {view}"
+    );
+
+    // Applying a candidate does not move the anchor: the window keeps
+    // marking where completion was triggered, not the new caret.
+    press(&mut app, &["tab"]);
+    match &app.overlay {
+        Some(Overlay::Edit(e)) => assert_eq!(e.ti.value(), "alpha"),
+        _ => panic!("edit overlay is not open"),
+    }
+    let view = app.view();
+    let line = view
+        .lines()
+        .find(|l| l.contains("\x1b[38;5;39;48;5;236m"))
+        .expect("selected candidate line");
+    let start = line
+        .find("\x1b[38;5;39;48;5;236m")
+        .expect("selected candidate background");
+    assert_eq!(
+        display_width(&line[..start]),
+        expected,
+        "the anchor stays at the trigger caret: {view}"
+    );
+}
+
+#[test]
 fn write_path_arrows_move_completion_selection() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("alpha.txt"), "").unwrap();
@@ -10909,6 +11163,59 @@ fn edit_candidate_overlay_uses_free_rows_below_the_last_row() {
     assert!(
         !view.contains("tab/↑↓:"),
         "candidates are an overlay, not an inserted hint line: {view}"
+    );
+}
+
+#[test]
+fn edit_completion_moves_above_a_row_at_the_bottom() {
+    let schema = schema_build(|b| {
+        let first = b.id(scalar("first", "First", "string"));
+        let second = b.id(scalar("second", "Second", "string"));
+        let third = b.id(scalar("third", "Third", "string"));
+        let mut last = scalar("last", "Last", "string");
+        last.suggestions = vec!["alpha".into(), "alpine".into(), "alps".into()];
+        let last = b.id(last);
+        b.id(FormNode {
+            key: "$".into(),
+            kind: Kind::Object,
+            children: vec![first, second, third, last],
+            ..FormNode::default()
+        })
+    });
+    let doc = dbuild(|db| {
+        db.obj(vec![
+            ("first", db.s("x")),
+            ("second", db.s("y")),
+            ("third", db.s("z")),
+            ("last", db.s("")),
+        ])
+    });
+    let mut app = app_with(schema, doc, test_opts());
+    // title + breadcrumb + four rows + help: the edited row sits at the
+    // bottom of the terminal with no space below it.
+    app.height = 7;
+    set_cursor(&mut app, |r| r.path == sp(&["last"]));
+    press(&mut app, &["enter"]);
+    assert!(matches!(app.overlay, Some(Overlay::Edit(_))));
+
+    let view = app.view();
+    let rows: Vec<&str> = view.lines().collect();
+    assert_eq!(rows.len(), app.height, "view: {view}");
+    let input = rows
+        .iter()
+        .position(|l| l.contains("Last"))
+        .expect("edit input row");
+    let candidate = rows
+        .iter()
+        .position(|l| l.contains("alpha"))
+        .expect("candidate row");
+    assert!(
+        candidate < input,
+        "candidates must move above the input at the bottom: {view}"
+    );
+    assert!(
+        view.contains("alpine") && view.contains("alps"),
+        "all candidates stay visible: {view}"
     );
 }
 

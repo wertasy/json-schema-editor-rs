@@ -13,7 +13,7 @@ $
   Logging                 —  --->
   Mounts                  1 item  --->
   Auth                    —  --->
-↑/↓ move · enter edit/open · esc back · ctrl+s/w save · / search · ? help
+↑/↓ move · enter edit/open · esc back · ctrl+s/w save · / search · : command · ? help
 ```
 
 ## 特性
@@ -83,7 +83,7 @@ jse -s server.schema.json a.json b.yaml
 | `m` / `v` | 标记单项 / 连选；配合 `y`、`x`、`d` 批量操作 |
 | `y` / `Y` / `p` / `P` | 复制键值对 / 复制值 / 智能粘贴到菜单 / 粘贴到光标容器 |
 | `u` / `ctrl+r` | 撤销 / 重做 |
-| `!` | vi 风格 shell：`!r <cmd>` 输出写入光标值，`!a <cmd>` 每行追加到字符串数组，`!w <cmd>` 把文档送入命令 stdin，裸 `<cmd>` 仅执行；进入输入框即自动显示候选并随键入过滤，tab/`↑`/`↓` 选择（未选中候选时 `↑`/`↓` 为命令历史），`!!`+enter 重跑上一条 |
+| `:` | vi 风格命令模式：`w`/`wa`/`wq`/`waq` 保存（加 `!` 跳过校验），`q`/`q!` 退出；`!<cmd>` 仅执行 shell，`r !<cmd>` 输出写入光标值，`a !<cmd>` 每行追加到字符串数组，`w !<cmd>` 把文档送入命令 stdin；`%` 代表当前文件；tab 只按光标前的内容补全内置命令、`$PATH` 命令或路径，并保留光标后的文本；`!!` 重跑上一条 shell 命令 |
 | `E` / `ctrl+e` | 用外部编辑器编辑光标行的值（raw JSON/YAML/TOML；非值行时编辑整份文档） / 物化 YAML 别名与合并值 |
 | `ctrl+s` / `w` | 保存当前文件并留在编辑器 |
 | `W` | 另存副本到指定路径 |

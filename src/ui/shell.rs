@@ -1,8 +1,10 @@
-//! vi-style `!` command modes. `r <cmd>` runs a command and writes its stdout
-//! into the value under the menu cursor, `a <cmd>` splits stdout into lines
-//! and appends each as an item of a string array, `w <cmd>` streams the live
-//! document to the command's stdin, and a bare `<cmd>` only executes (its
-//! output goes to the bottom notice).
+//! vi-style shell escapes behind the `:` command line. `r !<cmd>` runs a
+//! command and writes its stdout into the value under the menu cursor,
+//! `a !<cmd>` splits stdout into lines and appends each as an item of a
+//! string array, `w !<cmd>` streams the live document to the command's
+//! stdin, and `!<cmd>` only executes (its output goes to the bottom notice).
+//! [`crate::ui::command`] owns the command grammar, completion and `%`
+//! expansion; this module runs the shell and classifies insertion targets.
 //!
 //! For `r`, a target is either a single string (replace the value) or an
 //! array of strings (append the whole output as one item). The schema decides
@@ -10,163 +12,23 @@
 //! that admits both a string and an array of strings is treated as a string
 //! (replace). The `a` mode only accepts an array-of-strings target.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 use std::io::Write;
-use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::doc::{Doc, NodeId, PathSeg, Value};
 use crate::smodel::{FormNodeId, Kind, Schema};
 
-/// One parsed `!` input line. `r <cmd>` inserts the command's stdout at the
-/// cursor value, `a <cmd>` appends its stdout lines as array items, `w <cmd>`
-/// streams the document to the command's stdin, and a bare command executes
-/// vi-style without touching the document.
+/// How a shell escape uses the command. `r !<cmd>` inserts the command's
+/// stdout at the cursor value, `a !<cmd>` appends its stdout lines as array
+/// items, `w !<cmd>` streams the document to the command's stdin, and
+/// `!<cmd>` executes without touching the document.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShellMode {
     Execute,
     Read,
     Write,
     AppendLines,
-}
-
-/// Split one `!` input line into its mode and shell command. `r`/`a`/`w` are
-/// reserved only when followed by whitespace, so commands such as `rm` or
-/// `wc` still run as bare shell commands.
-pub fn parse_input(line: &str) -> Result<(ShellMode, String), String> {
-    let line = line.trim();
-    if line.is_empty() {
-        return Err("command required".to_string());
-    }
-    let mut parts = line.splitn(2, char::is_whitespace);
-    let head = parts.next().unwrap_or("");
-    let rest = parts.next().unwrap_or("").trim();
-    let mode = match head {
-        "r" => ShellMode::Read,
-        "a" => ShellMode::AppendLines,
-        "w" => ShellMode::Write,
-        _ => return Ok((ShellMode::Execute, line.to_string())),
-    };
-    if rest.is_empty() {
-        return Err(format!("{head} needs a shell command"));
-    }
-    Ok((mode, rest.to_string()))
-}
-
-/// Completion for the `!` command line. The first word after an optional
-/// `r`/`a`/`w` mode completes executable names from PATH; later words
-/// complete filesystem paths. The returned strings are whole-line
-/// replacements (prefix preserved), sorted and unique.
-pub fn completion_candidates(line: &str) -> Vec<String> {
-    let dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
-    completion_candidates_in(line, &dirs)
-}
-
-fn completion_candidates_in(line: &str, path_dirs: &[PathBuf]) -> Vec<String> {
-    let (token_start, token, command_word) = completion_token(line);
-    let names = if command_word {
-        command_candidates(path_dirs, &token)
-    } else {
-        path_candidates(&token)
-    };
-    let prefix = &line[..token_start];
-    names
-        .into_iter()
-        .map(|name| format!("{prefix}{name}"))
-        .collect()
-}
-
-/// Locate the word being completed: its byte start, its text and whether it
-/// is the command word (first word after the optional mode).
-fn completion_token(line: &str) -> (usize, String, bool) {
-    let start = line.len() - line.trim_start().len();
-    let rest = &line[start..];
-    let first_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-    let first = &rest[..first_end];
-    let mut cmd_start = start;
-    if matches!(first, "r" | "a" | "w") && first_end < rest.len() {
-        let after = start + first_end;
-        cmd_start = after + (line[after..].len() - line[after..].trim_start().len());
-    }
-    let cmd_part = &line[cmd_start..];
-    let word_rel = cmd_part
-        .char_indices()
-        .rfind(|(_, c)| c.is_whitespace())
-        .map(|(i, c)| i + c.len_utf8())
-        .unwrap_or(0);
-    let token_start = cmd_start + word_rel;
-    let token = line[token_start..].to_string();
-    let command_word = cmd_part[..word_rel].trim().is_empty();
-    (token_start, token, command_word)
-}
-
-fn command_candidates(path_dirs: &[PathBuf], prefix: &str) -> Vec<String> {
-    let mut out = BTreeSet::new();
-    for dir in path_dirs {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if !name.starts_with(prefix) || !is_executable_file(&e.path()) {
-                continue;
-            }
-            out.insert(name);
-        }
-    }
-    out.into_iter().collect()
-}
-
-fn is_executable_file(path: &Path) -> bool {
-    let Ok(meta) = std::fs::metadata(path) else {
-        return false;
-    };
-    if !meta.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        meta.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
-
-fn path_candidates(token: &str) -> Vec<String> {
-    let sep = token.rfind(['/', '\\']);
-    let (dir_part, prefix) = match sep {
-        Some(i) => (&token[..=i], &token[i + 1..]),
-        None => ("", token),
-    };
-    let read = if dir_part.is_empty() { "." } else { dir_part };
-    let Ok(entries) = std::fs::read_dir(read) else {
-        return Vec::new();
-    };
-    let mut out = BTreeSet::new();
-    let lower = prefix.to_lowercase();
-    for e in entries.flatten() {
-        let name = e.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') && !prefix.starts_with('.') {
-            continue;
-        }
-        // Case-insensitive like the write-path completion (shell `!` words):
-        // typing `al` should offer `Alpha.txt` too.
-        if !name.to_lowercase().starts_with(&lower) {
-            continue;
-        }
-        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false)
-            || std::fs::metadata(e.path())
-                .map(|m| m.is_dir())
-                .unwrap_or(false);
-        let name = if is_dir { format!("{name}/") } else { name };
-        out.insert(format!("{dir_part}{name}"));
-    }
-    out.into_iter().collect()
 }
 
 /// compact_output turns command output into one notice line (the bottom bar
@@ -627,38 +489,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_input_reserves_read_and_write_modes() {
-        assert_eq!(
-            parse_input("r echo hi"),
-            Ok((ShellMode::Read, "echo hi".to_string()))
-        );
-        assert_eq!(
-            parse_input("w cat"),
-            Ok((ShellMode::Write, "cat".to_string()))
-        );
-        assert_eq!(
-            parse_input("a printf 'x\\ny\\n'"),
-            Ok((ShellMode::AppendLines, "printf 'x\\ny\\n'".to_string()))
-        );
-        assert_eq!(
-            parse_input("echo hi"),
-            Ok((ShellMode::Execute, "echo hi".to_string()))
-        );
-        // only a standalone first word reserves the mode: rm/wc stay commands
-        assert_eq!(
-            parse_input("rm -rf x"),
-            Ok((ShellMode::Execute, "rm -rf x".to_string()))
-        );
-        assert_eq!(
-            parse_input("wc -l"),
-            Ok((ShellMode::Execute, "wc -l".to_string()))
-        );
-        assert!(parse_input("").is_err());
-        assert!(parse_input("r").is_err());
-        assert!(parse_input("w   ").is_err());
-    }
-
-    #[test]
     fn compact_output_joins_lines_for_the_one_line_notice() {
         assert_eq!(compact_output("a\n\n b \n"), "a b");
         assert_eq!(compact_output("\n"), "");
@@ -735,63 +565,5 @@ mod tests {
             "a plain string is not an append target"
         );
         assert!(resolve_array_target(&s, &doc, Some(3), &[PathSeg::key("tags")]).is_none());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn command_completion_reads_executables_from_path() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let exe = dir.path().join("frobnicate");
-        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let plain = dir.path().join("frobnicate.txt");
-        std::fs::write(&plain, "").unwrap();
-
-        let got = completion_candidates_in("r frob", &[dir.path().to_path_buf()]);
-        assert_eq!(got, vec!["r frobnicate"]);
-    }
-
-    #[test]
-    fn path_completion_preserves_the_mode_prefix() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("alpha.txt"), "").unwrap();
-        std::fs::write(dir.path().join("alpine"), "").unwrap();
-        std::fs::create_dir(dir.path().join("al-dir")).unwrap();
-        std::fs::write(dir.path().join("beta"), "").unwrap();
-        let base = dir.path().display().to_string();
-        let line = format!("r cat {base}/al");
-        let got = completion_candidates_in(&line, &[]);
-        assert_eq!(
-            got,
-            vec![
-                format!("r cat {base}/al-dir/"),
-                format!("r cat {base}/alpha.txt"),
-                format!("r cat {base}/alpine"),
-            ]
-        );
-    }
-
-    #[test]
-    fn completion_token_handles_multibyte_whitespace() {
-        // U+00A0 and U+3000 are multi-byte whitespace: advancing one byte
-        // past their start would slice inside the char and panic.
-        for space in ['\u{00A0}', '\u{3000}'] {
-            let line = format!("r cat{space}/tmp/x");
-            let (token_start, token, command_word) = completion_token(&line);
-            assert_eq!(token, "/tmp/x");
-            assert!(!command_word);
-            assert_eq!(token_start, line.find("/tmp/x").unwrap());
-        }
-    }
-
-    #[test]
-    fn path_completion_matches_case_insensitively() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("Alpha.txt"), "").unwrap();
-        std::fs::write(dir.path().join("beta"), "").unwrap();
-        let base = dir.path().display().to_string();
-        let got = completion_candidates_in(&format!("r cat {base}/al"), &[]);
-        assert_eq!(got, vec![format!("r cat {base}/Alpha.txt")]);
     }
 }

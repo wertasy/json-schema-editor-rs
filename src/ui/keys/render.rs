@@ -1,5 +1,33 @@
 use super::*;
 
+/// ListFrame is the fixed chrome of the main list screen: the menu viewport
+/// height and every line pinned above the help bar. `list_view` and the
+/// command-output sizing share it, so an inline multi-line notice is chosen
+/// exactly when it fits the blank rows between the menu and the bottom block.
+struct ListFrame {
+    rows_height: usize,
+    bottom: usize,
+    desc_lines: Vec<DescLine>,
+    summary_lines: Vec<String>,
+    status: Vec<String>,
+    title_width: usize,
+    write_lines: Vec<String>,
+    write_sugs: Vec<String>,
+    cmd_line: Option<String>,
+    cmd_sugs: Vec<String>,
+}
+
+/// EditSugs is the inline autocomplete window for the edited cell. It sits
+/// below the row when it fits, otherwise it replaces rows above the row so
+/// candidates stay visible when the cursor is at the bottom of the screen.
+struct EditSugs {
+    cursor_idx: usize,
+    left: usize,
+    /// Some(first covered row) when the window is above the edited row.
+    above_start: Option<usize>,
+    lines: Vec<String>,
+}
+
 impl App {
     // --- rendering (Go menu.go View layer) ----------------------------------
 
@@ -178,9 +206,9 @@ impl App {
 
     /// helpLine renders the bottom hint row.
     pub(super) fn help_line(&self) -> String {
-        if matches!(&self.overlay, Some(Overlay::Shell(_))) {
+        if matches!(&self.overlay, Some(Overlay::Command(_))) {
             return self.rec_hint(
-                "shell: r <cmd> insert · a <cmd> lines→array · w <cmd> pipe doc · <cmd> run · tab/↑/↓ candidates · ↑/↓ history when idle · !!+enter repeat · esc",
+                ": command · w/wa/wq/waq save · q quit · !<cmd> shell · r/a/w !<cmd> · tab completes · ↑/↓ history when idle · esc",
             );
         }
         if let Some(f) = &self.fast_move {
@@ -215,12 +243,12 @@ impl App {
         self.rec_hint(crate::ui::menu::MENU_HELP)
     }
 
-    /// shellInputLine renders the `!` prompt above the help bar; the caret is
-    /// the text input's reverse-video cell.
-    pub(super) fn shell_input_line(&self) -> Option<String> {
+    /// command_input_line renders the `:` prompt above the help bar; the
+    /// caret is the text input's reverse-video cell.
+    pub(super) fn command_input_line(&self) -> Option<String> {
         match &self.overlay {
-            Some(Overlay::Shell(s)) => {
-                Some(search_input_line("!", &s.ti, self.width.saturating_sub(1)))
+            Some(Overlay::Command(s)) => {
+                Some(search_input_line(":", &s.ti, self.width.saturating_sub(1)))
             }
             _ => None,
         }
@@ -331,26 +359,28 @@ impl App {
             .collect()
     }
 
-    /// shellSuggestionLines renders the visible window of an active tab
+    /// command_suggestion_lines renders the visible window of an active tab
     /// completion. The prompt is at the bottom, so its window sits above it.
-    pub(super) fn shell_suggestion_lines(&self) -> Vec<String> {
-        let Some(Overlay::Shell(s)) = &self.overlay else {
+    pub(super) fn command_suggestion_lines(&self) -> Vec<String> {
+        let Some(Overlay::Command(s)) = &self.overlay else {
             return Vec::new();
         };
         if s.sug.is_empty() {
             return Vec::new();
         }
-        let idx = if s.sug_idx.is_some() && s.ti.value() == s.sug_line {
-            s.sug_idx.unwrap() as i64
-        } else {
-            -1
-        };
+        let idx =
+            if s.sug_idx.is_some() && s.ti.value() == s.sug_line && s.ti.cursor_byte() == s.sug_end
+            {
+                s.sug_idx.unwrap() as i64
+            } else {
+                -1
+            };
         let lines = Self::suggestion_overlay_lines(
             &s.sug,
             idx,
             &s.sug_prefix,
-            SHELL_SUG_WINDOW,
-            1, // after the `!` prompt
+            CMD_SUG_WINDOW,
+            1, // after the `:` prompt
             self.width.saturating_sub(1),
         );
         Self::indent_overlay(lines, 1)
@@ -370,7 +400,7 @@ impl App {
             &w.sugs,
             w.sug_idx,
             &w.sug_prefix,
-            SHELL_SUG_WINDOW,
+            CMD_SUG_WINDOW,
             left,
             self.width.saturating_sub(1),
         );
@@ -466,6 +496,99 @@ impl App {
         }
     }
 
+    /// list_header_rows counts the title, breadcrumb and any inline input
+    /// rows above the menu.
+    fn list_header_rows(&self, st: &MenuState) -> usize {
+        let mut header = 2;
+        if let Some(Overlay::Mrg(s)) = &self.overlay {
+            header += self.merge_input_lines(s).matches('\n').count() + 1;
+        }
+        if matches!(st.kind, MenuKind::OneOf | MenuKind::EnumArray) && st.filter.active {
+            header += 1;
+        }
+        header
+    }
+
+    /// list_frame lays out the fixed chrome around the menu rows. A notice
+    /// with `notice_rows` lines shrinks the viewport; the caller supplies 0
+    /// when asking how many blank rows are available for one.
+    fn list_frame(
+        &self,
+        st: &MenuState,
+        rows: &[Row],
+        summary: &str,
+        notice_rows: usize,
+    ) -> ListFrame {
+        let desc_lines = self.desc_lines_for(st, rows, !self.desc_expanded);
+        let summary_lines = if summary.is_empty() {
+            Vec::new()
+        } else {
+            wrap_text(
+                &format!("variant: {}", summary),
+                self.width.saturating_sub(1),
+            )
+        };
+        let status = self.status_lines();
+        let title_width = self.menu_title_col_width(rows);
+        let write_lines = self.write_input_lines(title_width);
+        let write_sugs = self.write_suggestion_lines(title_width);
+        let cmd_line = self.command_input_line();
+        let cmd_sugs = self.command_suggestion_lines();
+        let bottom = desc_lines.len()
+            + summary_lines.len()
+            + status.len()
+            + notice_rows
+            + write_sugs.len()
+            + write_lines.len()
+            + cmd_sugs.len()
+            + usize::from(cmd_line.is_some());
+        let rows_height = self
+            .height
+            .saturating_sub(self.list_header_rows(st) + 1 + bottom + usize::from(self.hide_empty));
+        ListFrame {
+            rows_height,
+            bottom,
+            desc_lines,
+            summary_lines,
+            status,
+            title_width,
+            write_lines,
+            write_sugs,
+            cmd_line,
+            cmd_sugs,
+        }
+    }
+
+    /// notice_lines renders the transient notice. A plain one-line notice is
+    /// clipped like before; a message carrying newlines (command output) is
+    /// wrapped into the rows above the bottom block.
+    pub(super) fn notice_lines(&self) -> Vec<String> {
+        if self.notice.is_empty() {
+            return Vec::new();
+        }
+        if !self.notice.contains('\n') {
+            return vec![style::fg1(&clip_runes(&self.notice, self.width))];
+        }
+        wrap_text(&self.notice, self.width.saturating_sub(1))
+            .into_iter()
+            .map(|line| style::fg1(&line))
+            .collect()
+    }
+
+    /// blank_rows_above_notice is how many rows are free between the last
+    /// menu row and the pinned bottom block. Command output up to this many
+    /// wrapped lines stays inline instead of opening the output page.
+    pub(super) fn blank_rows_above_notice(&mut self) -> usize {
+        let Some(st) = self.top().cloned() else {
+            return 0;
+        };
+        let rows = self.menu_rows_snapshot();
+        let (_, summary) = self.menu_title(&st);
+        let frame = self.list_frame(&st, &rows, &summary, 0);
+        let rendered = rows.len().min(frame.rows_height.max(1));
+        frame.rows_height.saturating_sub(rendered)
+    }
+
     /// listView renders the plain menu screen (Go listView).
     pub(super) fn list_view(&mut self) -> String {
         let mut b = String::new();
@@ -512,17 +635,15 @@ impl App {
             self.width.saturating_sub(1),
         ));
         b.push('\n');
-        let mut header = 2usize;
         // the "<" merge-keys input edits the mapping itself: header row
         if let Some(Overlay::Mrg(s)) = &self.overlay {
             for line in self.merge_input_lines(s).split('\n') {
                 b.push_str(&clip_display(line, self.width.saturating_sub(1)));
                 b.push('\n');
-                header += 1;
             }
         }
         if let Some(Overlay::Search(s)) = &self.overlay {
-            return self.render_search_body(b, header, s);
+            return self.render_search_body(b, self.list_header_rows(&st), s);
         }
         // Inline picker searches sit above their list, like every other
         // search prompt.
@@ -534,39 +655,19 @@ impl App {
                 self.width.saturating_sub(1),
             ));
             b.push('\n');
-            header += 1;
         }
-        let desc_lines = self.desc_lines_for(&st, &rows, !self.desc_expanded);
-        let mut summary_lines: Vec<String> = Vec::new();
-        if !summary.is_empty() {
-            summary_lines = wrap_text(
-                &format!("variant: {}", summary),
-                self.width.saturating_sub(1),
-            );
-        }
-        let status = self.status_lines();
-        let title_width = self.menu_title_col_width(&rows);
-        let write_lines = self.write_input_lines(title_width);
-        let write_sugs = self.write_suggestion_lines(title_width);
-        let shell_line = self.shell_input_line();
-        let shell_sugs = self.shell_suggestion_lines();
-        let mut h = self.height.saturating_sub(
-            header
-                + 1
-                + desc_lines.len()
-                + summary_lines.len()
-                + status.len()
-                + write_sugs.len()
-                + write_lines.len()
-                + shell_sugs.len()
-                + usize::from(shell_line.is_some()),
-        );
-        if !self.notice.is_empty() {
-            h = h.saturating_sub(1);
-        }
-        if self.hide_empty {
-            h = h.saturating_sub(1);
-        }
+        let notice_lines = self.notice_lines();
+        let frame = self.list_frame(&st, &rows, &summary, notice_lines.len());
+        let h = frame.rows_height;
+        let bottom = frame.bottom;
+        let desc_lines = frame.desc_lines;
+        let summary_lines = frame.summary_lines;
+        let status = frame.status;
+        let title_width = frame.title_width;
+        let write_lines = frame.write_lines;
+        let write_sugs = frame.write_sugs;
+        let cmd_line = frame.cmd_line;
+        let cmd_sugs = frame.cmd_sugs;
         self.write_rows(&mut b, &st, &rows, h, title_width);
         if self.hide_empty {
             b.push_str(&clip_display(
@@ -576,14 +677,6 @@ impl App {
             b.push('\n');
         }
         // pin the bottom block above the hint bar
-        let bottom = desc_lines.len()
-            + summary_lines.len()
-            + status.len()
-            + usize::from(!self.notice.is_empty())
-            + write_sugs.len()
-            + write_lines.len()
-            + shell_sugs.len()
-            + usize::from(shell_line.is_some());
         let mut lines = b.matches('\n').count();
         while lines < self.height.saturating_sub(1).saturating_sub(bottom) {
             b.push('\n');
@@ -607,11 +700,8 @@ impl App {
             b.push_str(&clip_display(line, self.width.saturating_sub(1)));
             b.push('\n');
         }
-        if !self.notice.is_empty() {
-            b.push_str(&clip_display(
-                &style::fg1(&clip_runes(&self.notice, self.width)),
-                self.width.saturating_sub(1),
-            ));
+        for line in &notice_lines {
+            b.push_str(&clip_display(line, self.width.saturating_sub(1)));
             b.push('\n');
         }
         for line in &write_sugs {
@@ -622,11 +712,11 @@ impl App {
             b.push_str(&clip_display(line, self.width.saturating_sub(1)));
             b.push('\n');
         }
-        for line in &shell_sugs {
+        for line in &cmd_sugs {
             b.push_str(&clip_display(line, self.width.saturating_sub(1)));
             b.push('\n');
         }
-        if let Some(line) = &shell_line {
+        if let Some(line) = &cmd_line {
             b.push_str(&clip_display(line, self.width.saturating_sub(1)));
             b.push('\n');
         }
@@ -772,6 +862,59 @@ impl App {
 
     /// writeRows renders the visible slice of rows (scroll computed
     /// read-only around the persisted offset).
+    /// edit_sugs_plan places the inline edit completion window. Below is
+    /// preferred; when the window does not fit there and the rows above have
+    /// more room, the same rectangle is drawn over them instead.
+    fn edit_sugs_plan(
+        &self,
+        rows: &[Row],
+        offset: usize,
+        end: usize,
+        cursor: usize,
+        height: usize,
+        title_width: usize,
+    ) -> Option<EditSugs> {
+        let Some(Overlay::Edit(e)) = &self.overlay else {
+            return None;
+        };
+        if e.sugs.is_empty() || cursor < offset || cursor >= end {
+            return None;
+        }
+        let row = &rows[cursor];
+        if !self.inline_edit_row(row, e) {
+            return None;
+        }
+        let rel = cursor - offset;
+        let extra_lines = self.row_line(row, true, title_width).matches('\n').count();
+        let below = height.saturating_sub(rel + 1 + extra_lines);
+        let above = rel;
+        let needed = e.sugs.len().min(CMD_SUG_WINDOW);
+        let use_above = below < needed && above > below;
+        let capacity = if use_above { above } else { below }.min(CMD_SUG_WINDOW);
+        // Anchor the window at the caret column recorded when the list was
+        // built, not at the input start: the rectangle then marks where
+        // completion was triggered. Clamp so a long value leaves one column.
+        let text_left = 2 + display_width(&self.title_col(&self.row_title_text(row), title_width));
+        let left = (text_left + e.sug_col).min(self.width.saturating_sub(2));
+        let lines = Self::suggestion_overlay_lines(
+            &e.sugs,
+            e.sug_idx,
+            &e.sug_prefix,
+            capacity,
+            left,
+            self.width.saturating_sub(1),
+        );
+        if lines.is_empty() {
+            return None;
+        }
+        Some(EditSugs {
+            cursor_idx: cursor,
+            left,
+            above_start: use_above.then(|| cursor - lines.len()),
+            lines,
+        })
+    }
+
     pub(super) fn write_rows(
         &self,
         b: &mut String,
@@ -794,8 +937,23 @@ impl App {
             offset = max_off;
         }
         let end = rows.len().min(offset + height);
+        let edit_sugs = self.edit_sugs_plan(rows, offset, end, cursor, height, title_width);
         let mut i = offset;
         while i < end {
+            // A window that did not fit below the edited row covers the rows
+            // above it instead; keep their left-hand content visible.
+            if let Some(p) = &edit_sugs
+                && let Some(start) = p.above_start
+                && i >= start
+                && i < p.cursor_idx
+            {
+                let k = i - start;
+                let prefix =
+                    Self::overlay_prefix(&self.row_line(&rows[i], false, title_width), p.left);
+                self.write_cut(b, &format!("{prefix}{}", p.lines[k]));
+                i += 1;
+                continue;
+            }
             let row = &rows[i];
             let line = self.row_line(row, i == cursor, title_width);
             self.write_cut(b, &line);
@@ -814,9 +972,7 @@ impl App {
                 let input_lines = lines.matches('\n').count() + 1;
                 self.write_cut(b, &lines);
                 i += input_lines.min(end.saturating_sub(i));
-                let max = slots_below
-                    .saturating_sub(input_lines)
-                    .min(SHELL_SUG_WINDOW);
+                let max = slots_below.saturating_sub(input_lines).min(CMD_SUG_WINDOW);
                 let prompt = if s.mode == AnchorMode::RefSet {
                     "  reference: "
                 } else {
@@ -851,34 +1007,25 @@ impl App {
             }
             // Inline scalar edit: the candidate overlay covers the rows
             // below the edited row (and any free row slots), so the menu
-            // never shifts.
-            if let Some(Overlay::Edit(e)) = &self.overlay {
-                if self.inline_edit_row(row, e) && !e.sugs.is_empty() {
-                    let max = slots_below.min(SHELL_SUG_WINDOW);
-                    let left =
-                        2 + display_width(&self.title_col(&self.row_title_text(row), title_width));
-                    let sugs = Self::suggestion_overlay_lines(
-                        &e.sugs,
-                        e.sug_idx,
-                        &e.sug_prefix,
-                        max,
-                        left,
-                        self.width.saturating_sub(1),
-                    );
-                    let base = i;
-                    for (k, rect) in sugs.iter().enumerate() {
-                        let prefix = if base + k < end {
-                            Self::overlay_prefix(
-                                &self.row_line(&rows[base + k], false, title_width),
-                                left,
-                            )
-                        } else {
-                            " ".repeat(left)
-                        };
-                        self.write_cut(b, &format!("{prefix}{rect}"));
-                    }
-                    i += sugs.len().min(end.saturating_sub(i));
+            // never shifts. When it was placed above instead, nothing goes
+            // below.
+            if let Some(p) = &edit_sugs
+                && p.cursor_idx + 1 == i
+                && p.above_start.is_none()
+            {
+                let base = i;
+                for (k, rect) in p.lines.iter().enumerate() {
+                    let prefix = if base + k < end {
+                        Self::overlay_prefix(
+                            &self.row_line(&rows[base + k], false, title_width),
+                            p.left,
+                        )
+                    } else {
+                        " ".repeat(p.left)
+                    };
+                    self.write_cut(b, &format!("{prefix}{rect}"));
                 }
+                i += p.lines.len().min(end.saturating_sub(i));
             }
         }
         // in-place input for a brand-new array item on its own row
@@ -956,7 +1103,7 @@ impl App {
     /// keeping the title, breadcrumb, one menu row and the help bar.
     pub(super) fn desc_page_capacity(&self) -> usize {
         let status = self.status_lines().len();
-        let notice = usize::from(!self.notice.is_empty());
+        let notice = self.notice_lines().len();
         let hidden = usize::from(self.hide_empty);
         self.height
             .saturating_sub(4 + status + notice + hidden)
@@ -1709,10 +1856,10 @@ impl App {
             ));
             b.push('\n');
         }
-        let notice = usize::from(!self.notice.is_empty());
+        let notice_lines = self.notice_lines();
         let height = self
             .height
-            .saturating_sub(2 + usize::from(s.filter.active) + notice)
+            .saturating_sub(2 + usize::from(s.filter.active) + notice_lines.len())
             .max(1);
         let total = issue_indices(s).count();
         let cursor = s.cursor.min(total.saturating_sub(1));
@@ -1730,11 +1877,8 @@ impl App {
             b.push_str(&style::faint("(no matches)"));
             b.push('\n');
         }
-        if !self.notice.is_empty() {
-            b.push_str(&clip_display(
-                &style::fg1(&clip_runes(&self.notice, self.width)),
-                self.width.saturating_sub(1),
-            ));
+        for line in &notice_lines {
+            b.push_str(&clip_display(line, self.width.saturating_sub(1)));
             b.push('\n');
         }
         let hint = if s.filter.active {

@@ -229,6 +229,23 @@ impl TextInput {
         self.value[..self.cursor].chars().count()
     }
 
+    /// Cursor position as a byte offset (always a char boundary).
+    pub fn cursor_byte(&self) -> usize {
+        self.cursor
+    }
+
+    /// Replaces the byte range `start..end` with `text` (completion), leaving
+    /// everything outside the range — including the text after the cursor —
+    /// untouched. The cursor lands after the inserted text.
+    pub fn replace_range(&mut self, start: usize, end: usize, text: &str) {
+        let start = start.min(self.value.len());
+        let end = end.clamp(start, self.value.len());
+        let start = self.value.floor_char_boundary(start);
+        let end = self.value.floor_char_boundary(end);
+        self.value.replace_range(start..end, text);
+        self.cursor = start + text.len();
+    }
+
     /// SetValue: replaces the buffer and moves the cursor to the end.
     pub fn set_value(&mut self, v: impl Into<String>) {
         self.value = v.into();

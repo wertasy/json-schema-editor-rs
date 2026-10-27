@@ -1149,27 +1149,28 @@ fn pty_shell_tab_arrows_keep_the_candidate_list() {
         return;
     };
     pty.wait_frame("root menu", 0, &["↑/↓ move"]);
-    pty.send(b"!");
-    pty.wait_frame("shell prompt", 0, &["shell: r <cmd> insert"]);
+    pty.send(b":");
+    let (_, off) = pty.wait_frame("command prompt", 0, &[": command"]);
+    // Builtin commands appear on open; `!` switches to PATH completion.
+    pty.wait_frame("builtin candidates", off, &["  wa", "  wq", "  waq"]);
+    pty.send(b"!zzal");
     let (_, off) = pty.wait_frame(
-        "automatic candidates",
-        0,
-        &["  zzalpha", "  zzalpine", "  zzalps"],
+        "typed with automatic candidates",
+        off,
+        &[":!zzal", "  zzalpha", "  zzalpine", "  zzalps"],
     );
-    pty.send(b"r zzal");
-    let (_, off) = pty.wait_frame("typed", off, &["!r zzal"]);
     pty.send(b"\t");
     let (_, off) = pty.wait_frame(
         "candidate overlay",
         off,
-        &["> r zzalpha", "  r zzalpine", "  r zzalps", "!r zzalpha"],
+        &["> zzalpha", "  zzalpine", "  zzalps", ":!zzalpha"],
     );
     pty.send(b"\x1b[B"); // down
-    let (_, off) = pty.wait_frame("down candidate", off, &["> r zzalpine", "!r zzalpine"]);
+    let (_, off) = pty.wait_frame("down candidate", off, &["> zzalpine", ":!zzalpine"]);
     pty.send(b"\x1b[A"); // up
-    let (_, off) = pty.wait_frame("up candidate", off, &["> r zzalpha", "!r zzalpha"]);
+    let (_, off) = pty.wait_frame("up candidate", off, &["> zzalpha", ":!zzalpha"]);
     pty.send(b"\t");
-    pty.wait_frame("tab after arrows cycles", off, &["> r zzalpine"]);
+    pty.wait_frame("tab after arrows cycles", off, &["> zzalpine"]);
     pty.send(b"\x03");
     pty.wait_exit(130);
 }
@@ -1194,10 +1195,10 @@ fn pty_shell_command_inserts_output() {
     };
 
     pty.wait_frame("root menu", 0, &["↑/↓ move"]);
-    pty.send(b"!");
-    pty.wait_frame("shell prompt", 0, &["shell: r <cmd> insert"]);
-    pty.send(b"r echo from-shell");
-    let (_, typed_off) = pty.wait_frame("command typed", 0, &["!r echo from-shell"]);
+    pty.send(b":");
+    pty.wait_frame("command prompt", 0, &[": command"]);
+    pty.send(b"r !echo from-shell");
+    let (_, typed_off) = pty.wait_frame("command typed", 0, &[":r !echo from-shell"]);
     pty.send(b"\r");
     // The redraw after enter shows the inserted value; the typed prompt text
     // was already consumed by typed_off.
@@ -1234,11 +1235,11 @@ fn pty_shell_bare_multiline_output_pages_and_closes() {
     };
 
     pty.wait_frame("root menu", 0, &["↑/↓ move"]);
-    pty.send(b"!");
-    pty.wait_frame("shell prompt", 0, &["shell: r <cmd> insert"]);
-    let command = "seq 1 40 | sed 's/^/row-/'";
+    pty.send(b":");
+    pty.wait_frame("command prompt", 0, &[": command"]);
+    let command = "!seq 1 40 | sed 's/^/row-/'";
     pty.send(command.as_bytes());
-    let (_, typed_off) = pty.wait_frame("command typed", 0, &["!seq 1 40"]);
+    let (_, typed_off) = pty.wait_frame("command typed", 0, &[":!seq 1 40"]);
     pty.send(b"\r");
     let (_, first_page) = pty.wait_frame(
         "multi-line output page",
@@ -1251,25 +1252,24 @@ fn pty_shell_bare_multiline_output_pages_and_closes() {
     pty.send(b"q");
     let (_, closed) = pty.wait_frame("output page closed", paged, &["↑/↓ move"]);
 
-    // A short multi-line output sits on the bottom of the screen: the last
-    // rows before the help bar are the title and the two output lines.
-    pty.send(b"!");
-    let (_, prompt) = pty.wait_frame("second prompt", closed, &["shell: r <cmd> insert"]);
-    pty.send(b"printf 'alpha\\nbeta\\n'");
+    // A short multi-line output fits in the blank rows above the help bar:
+    // it renders inline instead of opening the output page.
+    pty.send(b":");
+    let (_, prompt) = pty.wait_frame("second prompt", closed, &[": command"]);
+    pty.send(b"!printf 'alpha\\nbeta\\n'");
     let (_, typed_short) = pty.wait_frame("short command typed", prompt, &["printf 'alpha"]);
     pty.send(b"\r");
-    let (snap, after_short) =
-        pty.wait_frame("short output page", typed_short, &["beta", "q/esc close"]);
+    let (snap, _) = pty.wait_frame(
+        "short output inline",
+        typed_short,
+        &["alpha", "beta", "↑/↓ move"],
+    );
     let rows: Vec<&str> = snap[typed_short..].split("\r\n").collect();
     assert_eq!(rows.len(), 30, "one full frame: {rows:?}");
-    assert!(rows[0].trim().is_empty(), "top rows stay blank: {rows:?}");
-    assert!(rows[26].contains("printf 'alpha"), "title: {rows:?}");
-    assert_eq!(rows[27].trim(), "alpha");
-    assert_eq!(rows[28].trim(), "beta");
-    assert!(rows[29].contains("q/esc close"), "help row: {rows:?}");
+    assert_eq!(rows[27].trim(), "alpha", "inline output: {rows:?}");
+    assert_eq!(rows[28].trim(), "beta", "inline output: {rows:?}");
+    assert!(rows[29].contains("↑/↓ move"), "help row: {rows:?}");
 
-    pty.send(b"q");
-    pty.wait_frame("short page closed", after_short, &["↑/↓ move"]);
     pty.send(b"q");
     pty.wait_exit(0);
     assert_eq!(
@@ -1974,6 +1974,64 @@ fn pty_save() {
     pty.wait_exit(130);
     let content = read_text(&out_file);
     assert!(content.contains(r#""name": "hello""#), "output = {content}");
+}
+
+#[test]
+fn pty_command_wq_saves_and_exits() {
+    let dir = mktemp();
+    let schema = dir.path().join("mini.schema.json");
+    let out_file = dir.path().join("o.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{"name":{"type":"string","title":"Name"}}}"#,
+    );
+    let schema_arg = arg(&schema);
+    let out_arg = arg(&out_file);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &out_arg], &[], &cache) else {
+        return;
+    };
+
+    pty.wait_frame("root menu", 0, &["↑/↓ move"]);
+    pty.send(b"\rhello\r"); // edit Name
+    pty.send(b":wq\r");
+    pty.wait_exit(0);
+    let content = read_text(&out_file);
+    assert!(content.contains(r#""name": "hello""#), "output = {content}");
+}
+
+#[test]
+fn pty_command_percent_expands_to_the_session_file() {
+    let dir = mktemp();
+    let schema = dir.path().join("mini.schema.json");
+    let out_file = dir.path().join("o file.json"); // the space proves quoting
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{"name":{"type":"string","title":"Name"}}}"#,
+    );
+    let schema_arg = arg(&schema);
+    let out_arg = arg(&out_file);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &out_arg], &[], &cache) else {
+        return;
+    };
+
+    pty.wait_frame("root menu", 0, &["↑/↓ move"]);
+    pty.send(b"\rfrom-percent\r");
+    pty.send(b":w\r");
+    let (_, saved) = pty.wait_frame("saved", 0, &["Write to "]);
+    // `%` is the session file; the shell must receive the quoted path.
+    pty.send(b":!cat %\r");
+    // The short JSON output fits the blank rows, so it stays inline.
+    pty.wait_frame(
+        "percent output inline",
+        saved,
+        &["from-percent", "↑/↓ move"],
+    );
+    pty.send(b":wq\r");
+    pty.wait_exit(0);
+    let content = read_text(&out_file);
+    assert!(content.contains("from-percent"), "output = {content}");
 }
 
 #[test]

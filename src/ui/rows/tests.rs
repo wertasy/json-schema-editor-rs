@@ -1312,6 +1312,37 @@ fn test_search_index_and_filter() {
     );
 }
 
+#[test]
+fn test_search_index_null_object_keeps_menu_fields() {
+    let mut schema = test_schema();
+    let root = schema.root;
+    let server = child_of(&schema, root, "server");
+    // The object exists but is null (a freshly created placeholder).
+    let doc = dbuild(|db| db.obj(vec![("server", db.push(Value::Null))]));
+    let all = search_index(
+        &mut schema,
+        &doc,
+        &st(MenuKind::Object, server, vec![PathSeg::key("server")]),
+    );
+    let has = |key: &str| {
+        all.iter()
+            .any(|r| path_eq(&r.path, &[PathSeg::key("server"), PathSeg::key(key)]))
+    };
+    for key in ["port", "host", "debug", "ratio"] {
+        assert!(has(key), "null object must still list its menu field {key}");
+    }
+    let ctx = MenuCtx {
+        schema: &schema,
+        doc: &doc,
+    };
+    let hits = filter_search(&ctx, &all, "port", true, None);
+    assert!(
+        hits.iter()
+            .any(|r| path_eq(&r.path, &[PathSeg::key("server"), PathSeg::key("port")])),
+        "search must find the field of a null object"
+    );
+}
+
 /// TestSearchDotQuery: a "."-prefixed query matches the keyword against
 /// path segments from any node — the node itself first, its descendants
 /// after — and both path queries fall back to values carrying the query

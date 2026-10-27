@@ -29,7 +29,12 @@ pub fn search_index(schema: &mut Schema, doc: &Doc, st: &MenuState) -> Vec<Row> 
             let Some(n) = doc.get(path) else {
                 return;
             };
-            if is_null(doc, n) {
+            // A null object/oneOf still has the schema-defined fields in
+            // its menu (a just-created placeholder), so keep indexing them.
+            // Other null containers have no actual children to index.
+            if is_null(doc, n)
+                && !matches!(schema.nodes[fn_ as usize].kind, Kind::Object | Kind::OneOf)
+            {
                 return;
             }
         }
