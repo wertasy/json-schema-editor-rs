@@ -4,7 +4,7 @@ use super::*;
 
 /// summary renders the right-hand value column for fn at path: the current
 /// doc value, or the effective default when unset, "—" when neither exists.
-pub fn summary(ctx: &MenuCtx, fn_: FormNodeId, path: &[PathSeg]) -> String {
+pub fn summary(ctx: &MenuCtx<'_>, fn_: FormNodeId, path: &[PathSeg]) -> String {
     summary_raw(ctx.schema, ctx.doc, fn_, path)
 }
 

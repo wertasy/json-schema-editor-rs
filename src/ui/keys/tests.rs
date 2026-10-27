@@ -1559,7 +1559,7 @@ fn text_area_view_draws_the_cursor() {
 fn c_adds_and_removes_a_document_comment() {
     let schema = schema_from_json(r#"{"type":"object","properties":{"port":{"type":"number"}}}"#);
     let doc = dbuild(|db| db.obj(vec![("port", db.n("8080"))]));
-    let mut meta = crate::doc::Meta::default();
+    let meta = crate::doc::Meta::default();
     let mut m = app_with_meta(schema, doc, test_opts(), meta);
     set_cursor_path(&mut m, &sp(&["port"]));
 

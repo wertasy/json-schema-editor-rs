@@ -7,7 +7,7 @@ use super::*;
 /// keyword against path segments from any node; any other query is ordinary
 /// text (title, key and scalar value).
 pub fn filter_search(
-    ctx: &MenuCtx,
+    ctx: &MenuCtx<'_>,
     all: &[Row],
     q: &str,
     fold: bool,
@@ -437,7 +437,7 @@ pub(crate) fn runes_fold_equal(a: &[char], b: &[char]) -> bool {
 /// "<path>  <old> → <new>" so the result list doubles as the replacement
 /// preview.
 pub fn replace_hits(
-    ctx: &MenuCtx,
+    ctx: &MenuCtx<'_>,
     all: &[Row],
     q: &str,
     rep: &str,

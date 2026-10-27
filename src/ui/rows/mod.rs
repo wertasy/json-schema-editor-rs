@@ -153,7 +153,7 @@ pub fn menu_rows_for(
     doc: &Doc,
     hide_empty: bool,
     st: &MenuState,
-    env: &mut RowsEnv,
+    env: &mut RowsEnv<'_>,
 ) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
     // A YAML alias occurrence drills into the anchored original the
@@ -372,7 +372,7 @@ pub fn menu_rows_for(
 
 /// valueRow reports whether r is a document entry whose value is present and
 /// not JSON null.
-pub fn value_row(ctx: &MenuCtx, r: &Row) -> bool {
+pub fn value_row(ctx: &MenuCtx<'_>, r: &Row) -> bool {
     value_row_raw(ctx.schema, ctx.doc, r)
 }
 
@@ -408,7 +408,7 @@ fn empty_key_row(_schema: &Schema, doc: &Doc, r: &Row) -> bool {
 
 /// moveToValue moves the cursor to the next (delta > 0) or previous
 /// (delta < 0) row with a non-null value, wrapping at both ends.
-pub fn move_to_value(ctx: &MenuCtx, st: &mut MenuState, rows: &[Row], delta: i64) {
+pub fn move_to_value(ctx: &MenuCtx<'_>, st: &mut MenuState, rows: &[Row], delta: i64) {
     if rows.is_empty() {
         return;
     }

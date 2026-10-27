@@ -428,7 +428,7 @@ enum Entry {
 }
 
 impl Entry {
-    fn apply(&self, s: &mut Sess) {
+    fn apply(&self, s: &mut Sess<'_>) {
         let schema = s.schema;
         let doc: &mut Doc = s.doc;
         match self {
@@ -494,7 +494,7 @@ impl Entry {
 
 /// scalarEntry asks one text input; the returned Entry applies it.
 fn scalar_entry<R: BufRead, W: Write>(
-    s: &Sess,
+    s: &Sess<'_>,
     fn_id: FormNodeId,
     path: &[PathSeg],
     reader: &mut LineReader<R>,
@@ -544,7 +544,7 @@ fn scalar_entry<R: BufRead, W: Write>(
 /// enumEntry asks one select over the enum options (leading "(none)" for
 /// optional fields).
 fn enum_entry<R: BufRead, W: Write>(
-    s: &Sess,
+    s: &Sess<'_>,
     fn_id: FormNodeId,
     path: &[PathSeg],
     reader: &mut LineReader<R>,
@@ -589,7 +589,7 @@ fn enum_entry<R: BufRead, W: Write>(
 
 /// boolEntry asks one confirm.
 fn bool_entry<R: BufRead, W: Write>(
-    s: &Sess,
+    s: &Sess<'_>,
     fn_id: FormNodeId,
     path: &[PathSeg],
     reader: &mut LineReader<R>,
@@ -619,7 +619,7 @@ fn bool_entry<R: BufRead, W: Write>(
 
 /// multiEnumEntry edits arrays whose items are enums as one multiselect.
 fn multi_enum_entry<R: BufRead, W: Write>(
-    s: &Sess,
+    s: &Sess<'_>,
     fn_id: FormNodeId,
     path: &[PathSeg],
     reader: &mut LineReader<R>,
@@ -656,7 +656,7 @@ fn multi_enum_entry<R: BufRead, W: Write>(
 
 /// rawEntry edits one subtree as raw text in the codec's syntax.
 fn raw_entry<R: BufRead, W: Write>(
-    s: &Sess,
+    s: &Sess<'_>,
     fn_id: FormNodeId,
     path: &[PathSeg],
     reader: &mut LineReader<R>,
@@ -703,7 +703,7 @@ fn raw_entry<R: BufRead, W: Write>(
 /// editSingle asks one entry's field and applies it. Go returns false only
 /// on a form error, which the accessible mode never raises.
 fn edit_single<R: BufRead, W: Write>(
-    s: &mut Sess,
+    s: &mut Sess<'_>,
     fn_id: FormNodeId,
     path: &[PathSeg],
     reader: &mut LineReader<R>,
@@ -725,7 +725,7 @@ fn edit_single<R: BufRead, W: Write>(
 /// Navigate select for children. It re-renders after every drill-down until
 /// the user goes back, saves, or aborts.
 fn section<R: BufRead, W: Write>(
-    s: &mut Sess,
+    s: &mut Sess<'_>,
     node: FormNodeId,
     path: &[PathSeg],
     root: bool,
@@ -870,7 +870,7 @@ fn section<R: BufRead, W: Write>(
 
 /// arrayManager renders the item manager for an array node.
 fn array_manager<R: BufRead, W: Write>(
-    s: &mut Sess,
+    s: &mut Sess<'_>,
     node: FormNodeId,
     path: &[PathSeg],
     root: bool,
@@ -962,7 +962,7 @@ fn array_manager<R: BufRead, W: Write>(
 
 /// removeItem runs the two-step removal flow (pick item, confirm).
 fn remove_item<R: BufRead, W: Write>(
-    s: &mut Sess,
+    s: &mut Sess<'_>,
     path: &[PathSeg],
     _n: usize,
     reader: &mut LineReader<R>,
@@ -997,7 +997,7 @@ fn remove_item<R: BufRead, W: Write>(
 /// item, then shift it. The first item moved up (or last moved down) is a
 /// silent no-op: the manager simply re-renders unchanged.
 fn move_item<R: BufRead, W: Write>(
-    s: &mut Sess,
+    s: &mut Sess<'_>,
     path: &[PathSeg],
     _n: usize,
     delta: i64,
@@ -1037,7 +1037,7 @@ fn move_item<R: BufRead, W: Write>(
 
 /// editItem edits array element idx (idx == usize::MAX appends a new one).
 fn edit_item<R: BufRead, W: Write>(
-    s: &mut Sess,
+    s: &mut Sess<'_>,
     items: Option<FormNodeId>,
     parent_path: &[PathSeg],
     idx: usize,
@@ -1069,7 +1069,7 @@ fn edit_item<R: BufRead, W: Write>(
 /// variant renders the oneOf/anyOf variant picker followed by the chosen
 /// variant's editor.
 fn variant<R: BufRead, W: Write>(
-    s: &mut Sess,
+    s: &mut Sess<'_>,
     node: FormNodeId,
     path: &[PathSeg],
     reader: &mut LineReader<R>,
@@ -1102,7 +1102,7 @@ fn variant<R: BufRead, W: Write>(
 /// rawEditor edits a whole subtree (None = entire document) in the raw
 /// syntax selected by Options.Raw.
 fn raw_editor<R: BufRead, W: Write>(
-    s: &mut Sess,
+    s: &mut Sess<'_>,
     path: Option<&[PathSeg]>,
     reader: &mut LineReader<R>,
     out: &mut W,
@@ -1182,7 +1182,11 @@ fn raw_editor<R: BufRead, W: Write>(
 /// through opts.save. Returns Res::Saved when the write succeeded — or when
 /// it failed, after recording the error in save_err (Res::Saved unwinds the
 /// screen loop; Run surfaces the error).
-fn save_flow<R: BufRead, W: Write>(s: &mut Sess, reader: &mut LineReader<R>, out: &mut W) -> Res {
+fn save_flow<R: BufRead, W: Write>(
+    s: &mut Sess<'_>,
+    reader: &mut LineReader<R>,
+    out: &mut W,
+) -> Res {
     if let Some(validate) = &s.opts.validate {
         let errs = validate(s.doc);
         if !errs.is_empty() {
@@ -1209,7 +1213,7 @@ fn save_flow<R: BufRead, W: Write>(s: &mut Sess, reader: &mut LineReader<R>, out
 
 /// variantRoot handles a oneOf root: pick → edit → save.
 fn variant_root<R: BufRead, W: Write>(
-    s: &mut Sess,
+    s: &mut Sess<'_>,
     root: FormNodeId,
     reader: &mut LineReader<R>,
     out: &mut W,
@@ -1257,7 +1261,7 @@ fn variant_root<R: BufRead, W: Write>(
 
 /// simpleRoot handles scalar/enum/boolean/raw root schemas: edit then save.
 fn simple_root<R: BufRead, W: Write>(
-    s: &mut Sess,
+    s: &mut Sess<'_>,
     root: FormNodeId,
     reader: &mut LineReader<R>,
     out: &mut W,
