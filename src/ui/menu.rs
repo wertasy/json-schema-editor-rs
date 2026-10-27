@@ -328,7 +328,7 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
     },
     HelpEntry {
         keys: "!",
-        desc: "shell: r <cmd> inserts stdout into the focused value, a <cmd> appends stdout lines to a string array, w <cmd> pipes the document to stdin (vi :w !cmd), bare <cmd> only runs; candidates appear automatically above the prompt and filter as you type; tab/↑/↓ select (↑/↓ are history until a candidate is selected); ! then enter repeats the last input (the prompt shows the first !)",
+        desc: "shell: r <cmd> inserts stdout into the focused value, a <cmd> appends stdout lines to a string array, w <cmd> pipes the document to stdin (vi :w !cmd), bare <cmd> only runs; candidates appear automatically above the prompt and filter as you type; tab/↑/↓ select (↑/↓ are history until a candidate is selected); ! then enter repeats the last input (the prompt shows the first !); a bare command's multi-line output opens a scrollable page (j/k, PgUp/PgDn, q/esc)",
     },
 ];
 
@@ -685,6 +685,16 @@ pub struct CommentState {
     pub scroll: usize,
 }
 
+/// ShellOutState is the scrolling page for a bare `!` command's multi-line
+/// stdout. `lines` are already wrapped to the terminal width; `scroll` is the
+/// first visible line.
+pub struct ShellOutState {
+    /// the executed command line, shown in the page title
+    pub command: String,
+    pub lines: Vec<String>,
+    pub scroll: usize,
+}
+
 /// CommentEditState is the multiline editor for the document comment of one
 /// key. ctrl+s applies it to the session metadata (the document body is not
 /// touched); esc cancels.
@@ -710,6 +720,7 @@ pub enum Overlay {
     Add(AddState),
     Write(WriteState),
     Shell(ShellState),
+    ShellOut(ShellOutState),
     Anc(AnchorState),
     Mrg(MergeState),
     Comment(CommentState),
@@ -849,6 +860,7 @@ impl App {
             Some(Overlay::Add(_)) => i.add = true,
             Some(Overlay::Write(_)) => i.write = true,
             Some(Overlay::Shell(_)) => i.shell = true,
+            Some(Overlay::ShellOut(_)) => i.shell_out = true,
             Some(Overlay::Anc(_)) => i.anc = true,
             Some(Overlay::Mrg(_)) => i.mrg = true,
             Some(Overlay::Confirm(_)) => i.confirm = true,
@@ -1399,6 +1411,7 @@ impl App {
             Overlay::Add(s) => self.key_add(msg, s),
             Overlay::Write(s) => self.key_write(msg, s),
             Overlay::Shell(s) => self.key_shell(msg, s),
+            Overlay::ShellOut(s) => self.key_shell_out(msg, s),
             Overlay::Anc(s) => self.key_anchor(msg, s),
             Overlay::Mrg(s) => self.key_merge(msg, s),
             Overlay::Comment(s) => self.key_comment(msg, s),

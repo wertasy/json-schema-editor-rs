@@ -94,6 +94,8 @@ pub struct Inputs {
     pub write: bool,
     /// `!` shell-command input
     pub shell: bool,
+    /// scrolling page for a bare `!` command's multi-line output
+    pub shell_out: bool,
     pub anc: bool,
     pub mrg: bool,
     pub confirm: bool,
@@ -133,6 +135,7 @@ pub fn list_mode(i: &Inputs) -> bool {
         && !i.sel
         && !i.ref_pick
         && !i.comment
+        && !i.shell_out
         && !i.help
         && !typing(i)
         && !i.file_pick

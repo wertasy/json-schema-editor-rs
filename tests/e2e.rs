@@ -1217,6 +1217,69 @@ fn pty_shell_command_inserts_output() {
 }
 
 #[test]
+fn pty_shell_bare_multiline_output_pages_and_closes() {
+    let dir = mktemp();
+    let schema = dir.path().join("shell.schema.json");
+    let cfg = dir.path().join("shell.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{"name":{"type":"string","title":"Name"}}}"#,
+    );
+    write_file(&cfg, r#"{"name":"old"}"#);
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+        return;
+    };
+
+    pty.wait_frame("root menu", 0, &["↑/↓ move"]);
+    pty.send(b"!");
+    pty.wait_frame("shell prompt", 0, &["shell: r <cmd> insert"]);
+    let command = "seq 1 40 | sed 's/^/row-/'";
+    pty.send(command.as_bytes());
+    let (_, typed_off) = pty.wait_frame("command typed", 0, &["!seq 1 40"]);
+    pty.send(b"\r");
+    let (_, first_page) = pty.wait_frame(
+        "multi-line output page",
+        typed_off,
+        &["row-28", "q/esc close"],
+    );
+    // 40 output lines over a 28-line page: the first page ends at row-28.
+    pty.send(b"\x06"); // ctrl+f
+    let (_, paged) = pty.wait_frame("paged to the end", first_page, &["row-40"]);
+    pty.send(b"q");
+    let (_, closed) = pty.wait_frame("output page closed", paged, &["↑/↓ move"]);
+
+    // A short multi-line output sits on the bottom of the screen: the last
+    // rows before the help bar are the title and the two output lines.
+    pty.send(b"!");
+    let (_, prompt) = pty.wait_frame("second prompt", closed, &["shell: r <cmd> insert"]);
+    pty.send(b"printf 'alpha\\nbeta\\n'");
+    let (_, typed_short) = pty.wait_frame("short command typed", prompt, &["printf 'alpha"]);
+    pty.send(b"\r");
+    let (snap, after_short) =
+        pty.wait_frame("short output page", typed_short, &["beta", "q/esc close"]);
+    let rows: Vec<&str> = snap[typed_short..].split("\r\n").collect();
+    assert_eq!(rows.len(), 30, "one full frame: {rows:?}");
+    assert!(rows[0].trim().is_empty(), "top rows stay blank: {rows:?}");
+    assert!(rows[26].contains("printf 'alpha"), "title: {rows:?}");
+    assert_eq!(rows[27].trim(), "alpha");
+    assert_eq!(rows[28].trim(), "beta");
+    assert!(rows[29].contains("q/esc close"), "help row: {rows:?}");
+
+    pty.send(b"q");
+    pty.wait_frame("short page closed", after_short, &["↑/↓ move"]);
+    pty.send(b"q");
+    pty.wait_exit(0);
+    assert_eq!(
+        read_json(&cfg)["name"],
+        json!("old"),
+        "bare command edits nothing"
+    );
+}
+
+#[test]
 fn pty_smoke() {
     let out = mktemp();
     let out_file = out.path().join("o.json");

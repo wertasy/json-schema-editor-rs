@@ -21,11 +21,11 @@ use crate::ui::menu::{
     AddState, AnchorMode, AnchorState, App, CommentEditState, CommentState, ConfirmState,
     DESC_BLOCK_PREVIEW_LINES, DescLine, DescSource, EditState, ErrsState, ExternalEdit,
     FastMoveState, FilePickState, IssuesState, MergeState, Msg, Overlay, RefPickState, SearchState,
-    SelState, ShellState, TextState, WriteState, anchor_defs, anchor_holder, anchor_holder_path,
-    anchor_merge_use_paths, anchor_role, copy_detached_from_doc, copy_from_doc, count_anchor_uses,
-    cursor_ancestor, cursor_by_path, cursor_for_row, cursor_prefix, is_path_prefix, merge_ref_uses,
-    nodes_equal, nodes_equal_doc, page_delta, read_clipboard, ref_would_cycle, remap_state_cursor,
-    vertical_delta, write_clipboard,
+    SelState, ShellOutState, ShellState, TextState, WriteState, anchor_defs, anchor_holder,
+    anchor_holder_path, anchor_merge_use_paths, anchor_role, copy_detached_from_doc, copy_from_doc,
+    count_anchor_uses, cursor_ancestor, cursor_by_path, cursor_for_row, cursor_prefix,
+    is_path_prefix, merge_ref_uses, nodes_equal, nodes_equal_doc, page_delta, read_clipboard,
+    ref_would_cycle, remap_state_cursor, vertical_delta, write_clipboard,
 };
 use crate::ui::rows::{
     SynthKey, any_type_menu, clip_runes, current_variant, display_title, doc_array_len,
@@ -5540,7 +5540,8 @@ impl App {
                     self.shell_history.remove(0);
                 }
                 self.execute_shell_input(&cmd);
-                None
+                // a bare command's multi-line output installs its page here
+                self.overlay.take()
             }
             "esc" => None,
             "up" => {
@@ -5582,10 +5583,15 @@ impl App {
     /// included (`r`/`a`/`w`/bare), like vi's `!!`.
     fn shell_rerun_last(&mut self) -> Option<Overlay> {
         match self.shell_history.last().cloned() {
-            Some(line) => self.execute_shell_input(&line),
-            None => self.notice = "! no previous command".to_string(),
+            Some(line) => {
+                self.execute_shell_input(&line);
+                self.overlay.take()
+            }
+            None => {
+                self.notice = "! no previous command".to_string();
+                None
+            }
         }
-        None
     }
 
     /// shell_history_up recalls the previous command, remembering the draft
@@ -5712,10 +5718,23 @@ impl App {
     }
 
     /// shell_execute_only is vi's `:!cmd`: run the command and show its
-    /// output without touching the document.
+    /// output without touching the document. A multi-line stdout opens the
+    /// scrolling page; one line (or none) keeps the bottom notice.
     fn shell_execute_only(&mut self, cmd: &str) {
         match shell::run_capture(cmd) {
-            Ok(out) => self.notice = shell::compact_output(&out),
+            Ok(out) => {
+                let text = shell::output_text(&out);
+                if text.contains('\n') {
+                    self.notice.clear();
+                    self.overlay = Some(Overlay::ShellOut(ShellOutState {
+                        command: cmd.to_string(),
+                        lines: wrap_text(&text, self.width.saturating_sub(1)),
+                        scroll: 0,
+                    }));
+                } else {
+                    self.notice = shell::compact_output(&out);
+                }
+            }
             Err(e) => self.notice = format!("! {e}"),
         }
     }
@@ -6377,6 +6396,7 @@ impl App {
             Some(Overlay::CommentEdit(s)) => return self.comment_edit_view(s),
             Some(Overlay::Sel(s)) => return self.sel_view(s),
             Some(Overlay::Comment(s)) => return self.comment_view(s),
+            Some(Overlay::ShellOut(s)) => return self.shell_out_view(s),
             _ => {}
         }
         if self.file_pick.is_some() {
@@ -7326,6 +7346,23 @@ impl App {
         Some(Overlay::Comment(s))
     }
 
+    /// key_shell_out drives the scrolling page for a bare command's
+    /// multi-line output: j/k and the arrows scroll one line, PgUp/PgDn and
+    /// ctrl+b/ctrl+f page, q/esc closes.
+    pub fn key_shell_out(&mut self, msg: Msg, mut s: ShellOutState) -> Option<Overlay> {
+        let page = self.height.saturating_sub(2).max(1);
+        let max_scroll = s.lines.len().saturating_sub(page);
+        match msg.key_str().as_str() {
+            "up" | "k" => s.scroll = s.scroll.saturating_sub(1),
+            "down" | "j" => s.scroll = (s.scroll + 1).min(max_scroll),
+            "pgdown" | "ctrl+f" => s.scroll = (s.scroll + page).min(max_scroll),
+            "pgup" | "ctrl+b" => s.scroll = s.scroll.saturating_sub(page),
+            "q" | "esc" => return None,
+            _ => {}
+        }
+        Some(Overlay::ShellOut(s))
+    }
+
     /// key_comment_edit drives the multiline document-comment editor.
     /// ctrl+s writes the comment into the session metadata (a later save emits it);
     /// the document body is unchanged.
@@ -8187,6 +8224,35 @@ impl App {
             lines += 1;
         }
         b.push_str(&self.rec_hint("j/k · PgUp/PgDn page · c/q/esc close"));
+        b
+    }
+
+    /// shell_out_view renders the scrolling page for a bare command's
+    /// multi-line stdout. The title and output block sit on the bottom of the
+    /// screen, directly above the help row, so short output stays where shell
+    /// output normally appears instead of floating at the top.
+    fn shell_out_view(&self, s: &ShellOutState) -> String {
+        let width = self.width.saturating_sub(1);
+        let title = if s.command.is_empty() {
+            "Command output".to_string()
+        } else {
+            format!("! {}", s.command)
+        };
+        let page = self.height.saturating_sub(2).max(1);
+        let max_scroll = s.lines.len().saturating_sub(page);
+        let off = s.scroll.min(max_scroll);
+        let shown: Vec<&String> = s.lines.iter().skip(off).take(page).collect();
+        // Blank rows above the block; a full page fills the area exactly.
+        let block = 1 + shown.len();
+        let above = self.height.saturating_sub(1);
+        let mut b = "\n".repeat(above.saturating_sub(block));
+        b.push_str(&clip_display(&style::bold(&title), width));
+        b.push('\n');
+        for line in shown {
+            b.push_str(&clip_display(line, width));
+            b.push('\n');
+        }
+        b.push_str(&self.rec_hint("j/k · PgUp/PgDn page · q/esc close"));
         b
     }
 

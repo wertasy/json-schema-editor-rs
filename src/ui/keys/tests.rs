@@ -10673,6 +10673,103 @@ fn shell_bare_command_runs_without_touching_the_document() {
     assert_eq!(str_at(&app.doc(), &["name"]), "old");
 }
 
+#[test]
+fn shell_bare_multiline_output_opens_a_scrolling_page() {
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    press(&mut app, &["!"]);
+    press(&mut app, &["echo one && echo two"]);
+    press(&mut app, &["enter"]);
+    match &app.overlay {
+        Some(Overlay::ShellOut(s)) => {
+            assert_eq!(s.command, "echo one && echo two");
+            assert_eq!(s.lines, vec!["one", "two"]);
+            assert_eq!(s.scroll, 0);
+        }
+        _ => panic!("multi-line bare output must open the output page"),
+    }
+    assert_eq!(app.notice, "");
+    assert!(!app.list_mode(), "the output page owns the keyboard");
+    assert_eq!(str_at(&app.doc(), &["name"]), "old");
+    let view = app.view();
+    assert!(view.contains("one") && view.contains("two"), "view: {view}");
+    // Short output sits at the bottom: blank rows first, then the title and
+    // output directly above the help row.
+    let rows: Vec<&str> = view.lines().collect();
+    assert_eq!(rows.len(), app.height, "view: {view}");
+    assert!(
+        rows[0].trim().is_empty(),
+        "output must not start at the top: {view}"
+    );
+    assert!(
+        rows[app.height - 4].contains("echo one && echo two"),
+        "view: {view}"
+    );
+    assert!(rows[app.height - 3].contains("one"), "view: {view}");
+    assert!(rows[app.height - 2].contains("two"), "view: {view}");
+    assert!(rows[app.height - 1].contains("q/esc close"), "view: {view}");
+
+    // The content fits the page: scrolling clamps at zero.
+    press(&mut app, &["j"]);
+    match &app.overlay {
+        Some(Overlay::ShellOut(s)) => assert_eq!(s.scroll, 0),
+        _ => panic!("output page closed unexpectedly"),
+    }
+    press(&mut app, &["q"]);
+    assert!(app.overlay.is_none());
+}
+
+#[test]
+fn shell_output_page_scrolls_lines_and_pages_and_closes() {
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    app.width = 40;
+    app.height = 5; // two title/hint rows leave a 3-row page
+    app.overlay = Some(Overlay::ShellOut(ShellOutState {
+        command: "seq 10".to_string(),
+        lines: (0..10).map(|i| format!("line{i}")).collect(),
+        scroll: 0,
+    }));
+
+    press(&mut app, &["j", "down"]);
+    assert_eq!(shell_out_scroll(&app), 2);
+    press(&mut app, &["k", "up"]);
+    assert_eq!(shell_out_scroll(&app), 0);
+
+    press(&mut app, &["pgdown"]);
+    assert_eq!(shell_out_scroll(&app), 3);
+    press(&mut app, &["ctrl+f"]);
+    assert_eq!(shell_out_scroll(&app), 6);
+    press(&mut app, &["pgdown"]);
+    assert_eq!(
+        shell_out_scroll(&app),
+        7,
+        "scrolling clamps at the last page"
+    );
+    press(&mut app, &["ctrl+f"]);
+    assert_eq!(shell_out_scroll(&app), 7);
+
+    press(&mut app, &["pgup"]);
+    assert_eq!(shell_out_scroll(&app), 4);
+    press(&mut app, &["ctrl+b"]);
+    assert_eq!(shell_out_scroll(&app), 1);
+    press(&mut app, &["pgup"]);
+    assert_eq!(shell_out_scroll(&app), 0);
+
+    press(&mut app, &["pgdown"]);
+    let view = app.view();
+    assert!(view.contains("line3"), "view: {view}");
+    assert!(!view.contains("line0"), "view: {view}");
+
+    press(&mut app, &["esc"]);
+    assert!(app.overlay.is_none());
+}
+
+fn shell_out_scroll(app: &App) -> usize {
+    match &app.overlay {
+        Some(Overlay::ShellOut(s)) => s.scroll,
+        _ => panic!("output page is not open"),
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn shell_w_pipes_the_document_to_the_command_stdin() {
