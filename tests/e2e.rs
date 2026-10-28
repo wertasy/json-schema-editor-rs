@@ -70,6 +70,26 @@ fn pty_or_skip(
     }
 }
 
+/// pty_or_skip_sized is pty_or_skip on a terminal of the given size.
+fn pty_or_skip_sized(
+    args: &[&str],
+    extra_envs: &[(&str, &str)],
+    cache: &tempfile::TempDir,
+    cols: u16,
+    rows: u16,
+) -> Option<PtySession> {
+    let (k, v) = cache_env(cache);
+    let mut envs: Vec<(&str, &str)> = vec![(k.as_str(), v.as_str())];
+    envs.extend_from_slice(extra_envs);
+    match PtySession::spawn_sized(repo_root(), args, &envs, cols, rows) {
+        PtySpawn::Ok(s) => Some(s),
+        PtySpawn::Unavailable(e) => {
+            eprintln!("SKIP: no pty available: {e}");
+            None
+        }
+    }
+}
+
 fn yaml_doc(text: &str) -> Yaml {
     let docs = YamlLoader::load_from_str(text)
         .unwrap_or_else(|e| panic!("saved YAML parses: {e}\n{text}"));
@@ -777,6 +797,89 @@ fn pty_numeric_quick_keys_array_items() {
 
     let doc = read_json(&cfg);
     assert_eq!(doc["nums"], serde_json::json!([2, 5]), "{doc}");
+}
+
+#[test]
+fn pty_narrow_terminal_edit_scrolls_with_the_caret() {
+    // A value wider than the terminal used to clip at the right edge, so
+    // the caret and freshly typed characters were invisible. The inline
+    // input must scroll horizontally and stay within one line.
+    let dir = mktemp();
+    let schema = dir.path().join("narrow.schema.json");
+    let cfg = dir.path().join("cfg.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{"name":{"type":"string"}}}"#,
+    );
+    let long = format!("headmarker-{}-tailmarker", "m".repeat(44));
+    write_file(&cfg, &format!("{{\"name\":\"{long}\"}}\n"));
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip_sized(&["-s", &schema_arg, &cfg_arg], &[], &cache, 40, 24)
+    else {
+        return;
+    };
+
+    pty.wait_frame("narrow root", 0, &["name"]);
+    pty.send(b"\r"); // inline edit, caret at the value end
+    pty.wait_frame("edit viewport shows the caret surroundings", 0, &["tailmarker"]);
+    pty.send(b"ZZZ"); // typed at the caret; the head is far off screen
+    let (snap, _) = pty.wait_frame("typed characters visible", 0, &["ZZZ"]);
+    let row = snap
+        .split("\r\n")
+        .find(|l| l.contains("ZZZ"))
+        .expect("the edited row");
+    assert!(
+        row.chars().count() <= 39,
+        "the edited row must not wrap at 40 columns: {row:?}"
+    );
+    pty.send(b"\x1b"); // esc cancels the edit without writing
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+
+    assert_eq!(read_text(&cfg), format!("{{\"name\":\"{long}\"}}\n"));
+}
+
+#[test]
+fn pty_right_edge_completion_window_stays_visible() {
+    // With the caret at the terminal's right edge the candidate rectangle
+    // used to clamp against the edge and shrink until the candidates were
+    // gone; it must slide left instead and stay fully on screen.
+    let dir = mktemp();
+    let schema = dir.path().join("edge.schema.json");
+    let cfg = dir.path().join("cfg.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{"name":{"anyOf":[{"type":"string"},
+          {"enum":["alpha-beta-gamma-1","alpha-beta-gamma-2","alpha-beta-gamma-3"]}]}}}"#,
+    );
+    write_file(&cfg, "{\"name\":\"alpha-beta-gamma-\"}\n");
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip_sized(&["-s", &schema_arg, &cfg_arg], &[], &cache, 36, 24)
+    else {
+        return;
+    };
+
+    pty.wait_frame("narrow root", 0, &["name"]);
+    pty.send(b"\r"); // edit opens with the caret at the value end
+    let (snap, _) = pty.wait_frame("candidates", 0, &["…1", "…2", "…3"]);
+    let row = snap
+        .split("\r\n")
+        .find(|l| l.contains("…2"))
+        .expect("a candidate row");
+    assert!(
+        row.chars().count() <= 35,
+        "the candidate window must not run past 36 columns: {row:?}"
+    );
+    pty.send(b"\t"); // select the first candidate; the 18-char value shows
+    // its tail in the 14-cell input window on a 36-column terminal
+    pty.wait_frame("candidate applied", 0, &["gamma-1"]);
+    pty.send(b"\x1b");
+    pty.send(b"\x03");
+    pty.wait_exit(130);
 }
 
 #[test]

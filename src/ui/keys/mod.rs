@@ -541,6 +541,24 @@ pub(crate) fn clip_display(s: &str, max: usize) -> String {
     out
 }
 
+/// clip_keep_tail clips `body` so a protected tail of `keep` cells (change
+/// dot, severity glyph) still fits into `avail` cells, marking the cut with
+/// an ellipsis. A body that already fits comes back unchanged; the caller
+/// appends the tail itself.
+pub(crate) fn clip_keep_tail(body: &str, avail: usize, keep: usize) -> String {
+    let keep = keep.min(avail);
+    let budget = avail.saturating_sub(keep);
+    if display_width(body) <= budget {
+        return body.to_string();
+    }
+    if budget < 2 {
+        return String::new();
+    }
+    let mut out = clip_display(body, budget - 1);
+    out.push('…');
+    out
+}
+
 /// strip_query removes the already-typed prefix from a candidate. Matching is
 /// case-insensitive, mirroring suggestion filtering; the returned slice is
 /// the differing tail.
@@ -924,12 +942,20 @@ pub(crate) fn msg_key(msg: &Msg) -> Option<Key> {
     })
 }
 
-/// inputLine renders `prompt + value` with a reverse-video caret, scrolling
-/// horizontally so the caret stays visible (the schema picker's search row).
-fn search_input_line(prompt: &str, ti: &TextInput, width: usize) -> String {
-    let avail = width.saturating_sub(display_width(prompt) + 2); // caret + margin
-    let value = ti.value();
-    let chars: Vec<char> = value.chars().collect();
+/// input_avail is the viewport width of a TextInput rendered after `prefix`
+/// cells on a line clipped to `width`: the caret cell and one margin column
+/// stay inside the clip.
+pub(crate) fn input_avail(width: usize, prefix: usize) -> usize {
+    width.saturating_sub(prefix + 2)
+}
+
+/// ti_window returns the char range [start, end) of a TextInput value that a
+/// viewport of `avail` cells shows so the cursor cell stays visible, plus
+/// the display width skipped before `start`. Long values scroll horizontally
+/// around the caret instead of running past the terminal edge (the schema
+/// picker's inputLine behavior, bubbles textinput with a Width).
+pub(crate) fn ti_window(ti: &TextInput, avail: usize) -> (usize, usize, usize) {
+    let chars: Vec<char> = ti.value().chars().collect();
     let cursor = ti.cursor().min(chars.len());
     let cell_at = |n: usize| chars[..n].iter().map(|&c| char_width(c)).sum::<usize>();
     let cursor_cell = cell_at(cursor);
@@ -948,46 +974,48 @@ fn search_input_line(prompt: &str, ti: &TextInput, width: usize) -> String {
         used += w;
         end += 1;
     }
-    let before: String = chars[start..cursor].iter().collect();
-    let mut out = String::from(prompt);
-    out.push_str(&before);
+    (start, end, cell_at(start))
+}
+
+/// ti_view renders a TextInput viewport of `avail` cells like bubbles
+/// textinput.View(): the value with the cursor cell reverse-video, scrolled
+/// horizontally so the caret stays visible. Returns the skipped leading
+/// cells so callers can map value columns (sug_col) to screen columns.
+pub(crate) fn ti_view(ti: &TextInput, avail: usize) -> (usize, String) {
+    let (start, end, shift) = ti_window(ti, avail);
+    let chars: Vec<char> = ti.value().chars().collect();
+    let cursor = ti.cursor().min(chars.len());
+    let mut out = String::new();
     if cursor < end {
+        out.push_str(&chars[start..cursor].iter().collect::<String>());
         out.push_str("\x1b[7m");
         out.push(chars[cursor]);
         out.push_str("\x1b[27m");
         out.push_str(&chars[cursor + 1..end].iter().collect::<String>());
     } else {
+        out.push_str(&chars[start..end].iter().collect::<String>());
         out.push_str("\x1b[7m \x1b[27m");
     }
-    out
+    (shift, out)
+}
+
+/// inputLine renders `prompt + value` with a reverse-video caret, scrolling
+/// horizontally so the caret stays visible (the schema picker's search row).
+fn search_input_line(prompt: &str, ti: &TextInput, width: usize) -> String {
+    let (_, input) = ti_view(ti, input_avail(width, display_width(prompt)));
+    format!("{prompt}{input}")
 }
 
 /// search_field_line renders one overlay input row. Only the focused input
 /// shows the reverse-video caret; the inactive row is dimmed and caret-less
 /// so tabbing between search and replace is visible.
-fn search_field_line(label: &str, ti: &TextInput, focused: bool) -> String {
+fn search_field_line(label: &str, ti: &TextInput, focused: bool, width: usize) -> String {
     if focused {
-        format!("{label}: {}", ti_view(ti))
+        let (_, input) = ti_view(ti, input_avail(width, display_width(label) + 2));
+        format!("{label}: {input}")
     } else {
         style::faint(&format!("{label}: {}", ti.value()))
     }
-}
-
-/// Render a TextInput like bubbles textinput.View(): the value with the
-/// cursor cell reverse-video.
-fn ti_view(ti: &TextInput) -> String {
-    let v = ti.value();
-    let pos = ti.cursor();
-    let chs: Vec<char> = v.chars().collect();
-    let byte_pos = v.char_indices().nth(pos).map(|(b, _)| b).unwrap_or(v.len());
-    let before = &v[..byte_pos];
-    let (cell, after) = if pos < chs.len() {
-        let c = chs[pos];
-        (c.to_string(), v[byte_pos + c.len_utf8()..].to_string())
-    } else {
-        (" ".to_string(), String::new())
-    };
-    format!("{before}\x1b[7m{cell}\x1b[0m{after}")
 }
 
 /// Render a TextArea viewport with a reverse-video cursor cell. The window

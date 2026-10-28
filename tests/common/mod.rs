@@ -260,10 +260,22 @@ pub enum PtySpawn {
 
 impl PtySession {
     pub fn spawn(cwd: &Path, args: &[&str], envs: &[(&str, &str)]) -> PtySpawn {
+        PtySession::spawn_sized(cwd, args, envs, 120, 30)
+    }
+
+    /// spawn_sized starts the binary on a terminal of the given size; the
+    /// narrow-width flows need fewer columns than the default 120.
+    pub fn spawn_sized(
+        cwd: &Path,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        cols: u16,
+        rows: u16,
+    ) -> PtySpawn {
         let pty = native_pty_system();
         let pair = match pty.openpty(PtySize {
-            rows: 30,
-            cols: 120,
+            rows,
+            cols,
             pixel_width: 0,
             pixel_height: 0,
         }) {

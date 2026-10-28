@@ -11085,6 +11085,222 @@ fn edit_completion_overlay_starts_at_the_caret_column() {
 }
 
 #[test]
+fn edit_input_window_keeps_the_caret_visible_on_a_narrow_terminal() {
+    // A value wider than the terminal used to clip at the right edge: the
+    // caret and everything typed after it were invisible. The input now
+    // scrolls horizontally like the command line, so the caret and its
+    // surroundings stay on screen.
+    let schema = schema_build(|b| {
+        let name = b.id(scalar("name", "Name", "string"));
+        b.id(FormNode {
+            key: "$".into(),
+            kind: Kind::Object,
+            children: vec![name],
+            ..FormNode::default()
+        })
+    });
+    let long = "abcdefghij".repeat(6); // 60 chars
+    let doc = dbuild(|db| db.obj(vec![("name", db.s(&long))]));
+    let mut app = app_with(schema, doc, test_opts());
+    app.width = 30;
+    app.height = 24;
+    press(&mut app, &["enter"]); // inline edit, caret at the value end
+    let view = app.view();
+    let line = view
+        .lines()
+        .find(|l| l.contains("\x1b[7m"))
+        .expect("the edited row must show a caret");
+    assert!(
+        display_width(&line) <= app.width - 1,
+        "the edited row must not wrap: {line:?}"
+    );
+    assert!(
+        line.contains("hij"),
+        "the text around the caret must stay visible: {line:?}"
+    );
+    // Typing at the end scrolls the window with the caret.
+    press(&mut app, &["X", "Y", "Z"]);
+    let view = app.view();
+    let line = view
+        .lines()
+        .find(|l| l.contains("\x1b[7m"))
+        .expect("the edited row must show a caret");
+    assert!(
+        line.contains("XYZ"),
+        "freshly typed characters must be visible: {line:?}"
+    );
+    // The value itself is untouched by the viewport.
+    match &app.overlay {
+        Some(Overlay::Edit(e)) => assert_eq!(e.ti.value(), format!("{long}XYZ")),
+        _ => panic!("edit overlay is not open"),
+    }
+}
+
+#[test]
+fn edit_completion_window_stays_inside_the_terminal_at_the_right_edge() {
+    // With the caret at the terminal's right edge the candidate rectangle
+    // used to clamp to width-2 and shrink to a single cell; now it slides
+    // left (the horizontal counterpart of the rows-above fallback) and
+    // every candidate stays fully visible.
+    let schema = schema_build(|b| {
+        let mut name = scalar("name", "Name", "string");
+        name.suggestions = vec![
+            "alpha-beta-gamma-1".into(),
+            "alpha-beta-gamma-2".into(),
+            "alpha-beta-gamma-3".into(),
+        ];
+        let name = b.id(name);
+        b.id(FormNode {
+            key: "$".into(),
+            kind: Kind::Object,
+            children: vec![name],
+            ..FormNode::default()
+        })
+    });
+    let doc = dbuild(|db| db.obj(vec![("name", db.s("alpha-beta-gamma-"))]));
+    let mut app = app_with(schema, doc, test_opts());
+    app.width = 36;
+    app.height = 24;
+    press(&mut app, &["enter"]); // caret at the end of the long value
+    let rows = app.menu_rows();
+    let tw = app.menu_title_col_width(&rows);
+    let input_left = 2 + display_width(&app.title_col("Name", tw));
+    let anchor = input_left + display_width("alpha-beta-gamma-");
+    assert!(
+        anchor > app.width - 1,
+        "fixture: the caret-anchored window must overflow the terminal"
+    );
+    let view = app.view();
+    let line = view
+        .lines()
+        .find(|l| l.contains("\x1b[2;48;5;236m  …2"))
+        .expect("candidate line");
+    let start = line.find("\x1b[2;48;5;236m").expect("candidate background");
+    let body = &line[start + "\x1b[2;48;5;236m".len()..];
+    let rect = display_width(&body[..body.find("\x1b[0m").expect("candidate reset")]);
+    let left = display_width(&line[..start]);
+    assert_eq!(rect, SUG_MIN_WIDTH, "the rectangle keeps its full width");
+    assert!(
+        left + rect <= app.width - 1,
+        "the candidate window must end inside the terminal: left {left} rect {rect}"
+    );
+    assert!(
+        left < anchor,
+        "the window must slide left of the caret anchor: left {left} anchor {anchor}"
+    );
+    assert!(
+        body.contains("…2"),
+        "candidates must not be cut at the right edge: {body:?}"
+    );
+    // Selecting a candidate keeps the window in place.
+    press(&mut app, &["tab"]);
+    let view = app.view();
+    let line = view
+        .lines()
+        .find(|l| l.contains("\x1b[38;5;39;48;5;236m> …1"))
+        .expect("selected candidate line");
+    let start = line
+        .find("\x1b[38;5;39;48;5;236m")
+        .expect("selected candidate background");
+    assert!(
+        display_width(&line[..start]) + rect <= app.width - 1,
+        "the selected window stays inside the terminal: {view}"
+    );
+}
+
+#[test]
+fn clip_keep_tail_marks_cuts_and_keeps_room_for_the_tail() {
+    assert_eq!(clip_keep_tail("short", 10, 2), "short");
+    // 6 available cells minus the 2-cell tail: 3 body cells + the ellipsis.
+    assert_eq!(clip_keep_tail("abcdefgh", 6, 2), "abc…");
+    assert_eq!(
+        display_width(&clip_keep_tail("abcdefgh", 6, 2)),
+        4,
+        "the body keeps the budget for the tail"
+    );
+    assert_eq!(clip_keep_tail("abc", 6, 0), "abc");
+    // Wide runes count their cells, not their chars: the cut never splits
+    // one, so the body may land a cell under the budget.
+    let cut = clip_keep_tail("很长的中文值需要被截断标记", 8, 2);
+    assert_eq!(display_width(&cut), 5);
+    assert!(cut.ends_with('…'));
+}
+
+#[test]
+fn narrow_rows_keep_the_change_dot_and_mark_the_cut() {
+    let schema = schema_build(|b| {
+        let name = b.id(scalar("name", "Name", "string"));
+        b.id(FormNode {
+            key: "$".into(),
+            kind: Kind::Object,
+            children: vec![name],
+            ..FormNode::default()
+        })
+    });
+    let doc = dbuild(|db| db.obj(vec![("name", db.s("value-0123456789-abcdefghij"))]));
+    let mut app = app_with(schema, doc, test_opts());
+    app.width = 30;
+    app.height = 24;
+    // Edit and apply: the row becomes dirty, so it carries the ● tail.
+    press(&mut app, &["enter", "Z", "enter"]);
+    let view = app.view();
+    let ansi = regex::Regex::new("\x1b\\[[0-9;]*m").unwrap();
+    let row = view
+        .lines()
+        .map(|l| ansi.replace_all(l, ""))
+        .find(|l| l.contains("Name"))
+        .expect("the edited row");
+    assert!(
+        row.chars().count() <= app.width - 1,
+        "the row must fit the terminal: {row:?}"
+    );
+    assert!(row.contains('…'), "the cut must be marked: {row:?}");
+    assert!(row.ends_with('●'), "the change dot must survive: {row:?}");
+}
+
+#[test]
+fn narrow_title_keeps_the_dirty_dot_and_marks_the_cut() {
+    let mut app = mk_app(test_doc(), test_opts());
+    app.width = 24;
+    app.height = 24;
+    app.fs_mut().opts.path = format!("/tmp/{}.json", "longname".repeat(4));
+    set_cursor_path(&mut app, &sp(&["name"]));
+    press(&mut app, &["enter", "Z", "enter"]);
+    let view = app.view();
+    let ansi = regex::Regex::new("\x1b\\[[0-9;]*m").unwrap();
+    let title = ansi.replace_all(view.lines().next().expect("title line"), "");
+    assert!(title.ends_with('●'), "the dirty dot must survive: {title:?}");
+    assert!(title.contains('…'), "the cut must be marked: {title:?}");
+    assert!(
+        title.chars().count() <= app.width - 1,
+        "the title must fit the terminal: {title:?}"
+    );
+}
+
+#[test]
+fn file_picker_keeps_dirty_dots_on_narrow_paths() {
+    let (mut app, _, _) = two_file_app();
+    app.width = 30;
+    app.height = 24;
+    for i in 0..app.files.len() {
+        app.files[i].opts.path = format!("/tmp/dir-{}.json", "segment".repeat(3 + i));
+    }
+    press(&mut app, &["s"]); // file picker, both files dirty
+    let view = app.view();
+    let ansi = regex::Regex::new("\x1b\\[[0-9;]*m").unwrap();
+    let rows: Vec<String> = view
+        .lines()
+        .map(|l| ansi.replace_all(l, "").into_owned())
+        .filter(|l| l.contains("dir-"))
+        .collect();
+    assert_eq!(rows.len(), 2, "both files are listed: {view}");
+    for row in rows {
+        assert!(row.contains('…'), "the cut path must be marked: {row:?}");
+        assert!(row.ends_with('●'), "the dirty dot must survive: {row:?}");
+    }
+}
+
+#[test]
 fn write_path_arrows_move_completion_selection() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("alpha.txt"), "").unwrap();

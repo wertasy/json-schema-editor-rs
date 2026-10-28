@@ -254,6 +254,56 @@ impl App {
         }
     }
 
+    /// suggestion_slice returns the absolute candidate range a window of
+    /// `max` rows shows, the selected absolute index within it and whether
+    /// any row is selected.
+    fn suggestion_slice(sugs: &[String], idx: i64, max: usize) -> (usize, usize, usize, bool) {
+        let n = sugs.len();
+        let selected = idx >= 0;
+        let sel = if selected {
+            (idx as usize).min(n - 1)
+        } else {
+            0
+        };
+        let max = max.min(n);
+        let start = if selected {
+            sel.saturating_sub(max.saturating_sub(1)).min(n - max)
+        } else {
+            0
+        };
+        (start, start + max, sel, selected)
+    }
+
+    /// suggestion_rect_width is the rectangle width suggestion_overlay_lines
+    /// draws for these candidates within `avail` cells (0 when nothing
+    /// shows). Placement asks for it first so a caret-anchored window can
+    /// slide left without its width changing.
+    pub(super) fn suggestion_rect_width(
+        sugs: &[String],
+        idx: i64,
+        query: &str,
+        max: usize,
+        avail: usize,
+    ) -> usize {
+        if sugs.is_empty() || max == 0 || avail == 0 {
+            return 0;
+        }
+        let (start, end, ..) = Self::suggestion_slice(sugs, idx, max);
+        let strip = end - start > 1 && query.chars().count() >= SUG_STRIP_PREFIX_MIN;
+        let natural = sugs[start..end]
+            .iter()
+            .map(|raw| {
+                let shown = match strip.then(|| strip_query(raw, query)).flatten() {
+                    Some(tail) if !tail.is_empty() => format!("…{tail}"),
+                    _ => raw.clone(),
+                };
+                display_width(&format!("{}{}", cursor_prefix(false), shown))
+            })
+            .max()
+            .unwrap_or(0);
+        natural.max(SUG_MIN_WIDTH).min(avail)
+    }
+
     /// suggestion_overlay_lines renders one candidate window: `>` on the
     /// selected row, accent-colored text for it, faint text for the rest.
     pub(super) fn suggestion_overlay_lines(
@@ -268,20 +318,7 @@ impl App {
         if sugs.is_empty() || max == 0 || avail == 0 {
             return Vec::new();
         }
-        let n = sugs.len();
-        let selected = idx >= 0;
-        let sel = if selected {
-            (idx as usize).min(n - 1)
-        } else {
-            0
-        };
-        let max = max.min(n);
-        let start = if selected {
-            sel.saturating_sub(max.saturating_sub(1)).min(n - max)
-        } else {
-            0
-        };
-        let end = start + max;
+        let (start, end, sel, selected) = Self::suggestion_slice(sugs, idx, max);
         // Hide the already-typed leading text when it is long enough; the
         // differing tail is what the user still needs to choose between.
         let strip = end - start > 1 && query.chars().count() >= SUG_STRIP_PREFIX_MIN;
@@ -610,9 +647,15 @@ impl App {
         if !merges.is_empty() {
             title += &format!(" {}", style::anchor(&merges));
         }
-        if self.dirty() {
-            title += &format!(" {}", style::diff("●"));
-        }
+        // The change dot is a status marker: when the terminal is too
+        // narrow for the whole title the body is cut (marked with …) so
+        // the dot stays visible; the multi-file position label degrades
+        // first.
+        let tail = if self.dirty() {
+            format!(" {}", style::diff("●"))
+        } else {
+            String::new()
+        };
         if self.files.len() > 1 {
             let base = crate::paths::file_base(&self.opts().path);
             // The root title is already the file name; repeat only the
@@ -624,7 +667,10 @@ impl App {
             };
             title += &format!(" {}", style::faint(&label));
         }
-        b.push_str(&clip_display(&title, self.width.saturating_sub(1)));
+        b.push_str(&format!(
+            "{}{tail}",
+            clip_keep_tail(&title, self.width.saturating_sub(1), display_width(&tail))
+        ));
         b.push('\n');
         let rows = self.menu_rows_snapshot();
         b.push_str(&clip_display(
@@ -744,10 +790,15 @@ impl App {
         if !merges.is_empty() {
             title += &format!(" {}", style::anchor(&merges));
         }
-        if self.dirty() {
-            title += &format!(" {}", style::diff("●"));
-        }
-        b.push_str(&clip_display(&title, self.width.saturating_sub(1)));
+        let tail = if self.dirty() {
+            format!(" {}", style::diff("●"))
+        } else {
+            String::new()
+        };
+        b.push_str(&format!(
+            "{}{tail}",
+            clip_keep_tail(&title, self.width.saturating_sub(1), display_width(&tail))
+        ));
         b.push('\n');
         b.push_str(&clip_display(
             &style::faint(&clip_runes(&self.breadcrumb(), self.width)),
@@ -769,15 +820,16 @@ impl App {
         }
         let status = self.status_lines();
         let search_focused = !s.replace || !s.replace_focused;
+        let line_width = self.width.saturating_sub(1);
         b.push_str(&clip_display(
-            &search_field_line("search", &s.ti, search_focused),
-            self.width.saturating_sub(1),
+            &search_field_line("search", &s.ti, search_focused, line_width),
+            line_width,
         ));
         b.push('\n');
         if s.replace {
             b.push_str(&clip_display(
-                &search_field_line("replace", &s.rti, s.replace_focused),
-                self.width.saturating_sub(1),
+                &search_field_line("replace", &s.rti, s.replace_focused, line_width),
+                line_width,
             ));
             b.push('\n');
         }
@@ -893,16 +945,32 @@ impl App {
         let capacity = if use_above { above } else { below }.min(CMD_SUG_WINDOW);
         // Anchor the window at the caret column recorded when the list was
         // built, not at the input start: the rectangle then marks where
-        // completion was triggered. Clamp so a long value leaves one column.
-        let text_left = 2 + display_width(&self.title_col(&self.row_title_text(row), title_width));
-        let left = (text_left + e.sug_col).min(self.width.saturating_sub(2));
+        // completion was triggered. The input viewport may have scrolled
+        // since (a long value on a narrow terminal), so the anchor moves
+        // with the visible window.
+        let title = self.title_col(&self.row_title_text(row), title_width);
+        let text_left = 2 + display_width(&title);
+        let (shift, ..) = ti_window(&e.ti, self.edit_input_avail(&title));
+        let line_right = self.width.saturating_sub(1);
+        // Prefer the caret anchor; when the rectangle would run past the
+        // right edge, slide it left so every candidate stays on screen —
+        // the horizontal counterpart of the rows-above fallback above.
+        let rect = Self::suggestion_rect_width(
+            &e.sugs,
+            e.sug_idx,
+            &e.sug_prefix,
+            capacity,
+            line_right,
+        );
+        let left = (text_left + e.sug_col.saturating_sub(shift))
+            .min(line_right.saturating_sub(rect));
         let lines = Self::suggestion_overlay_lines(
             &e.sugs,
             e.sug_idx,
             &e.sug_prefix,
             capacity,
             left,
-            self.width.saturating_sub(1),
+            line_right,
         );
         if lines.is_empty() {
             return None;
@@ -1038,11 +1106,16 @@ impl App {
         }
         // key-name input for a schema-less member (a)
         if let Some(Overlay::Add(a)) = &self.overlay {
+            let title = self.title_col("New key", title_width);
+            let avail = input_avail(
+                self.width.saturating_sub(1),
+                display_width(cursor_prefix(true)) + display_width(&title),
+            );
             let line = format!(
                 "{}{}{}",
                 cursor_prefix(true),
-                self.title_col("New key", title_width),
-                ti_view(&a.ti)
+                title,
+                ti_view(&a.ti, avail).1
             );
             self.write_cut(b, &line);
             if !a.err.is_empty() {
@@ -1062,7 +1135,14 @@ impl App {
         let mut lines = vec![format!(
             "{}{}",
             self.title_col("Write to", title_width),
-            ti_view(&w.ti)
+            ti_view(
+                &w.ti,
+                input_avail(
+                    self.width.saturating_sub(1),
+                    display_width(&self.title_col("Write to", title_width)),
+                )
+            )
+            .1
         )];
         if !w.err.is_empty() {
             lines.push(style::fg1(&format!("  {}", w.err)));
@@ -1287,9 +1367,26 @@ impl App {
         out
     }
 
-    /// editLines renders the in-place input line plus error.
+    /// edit_input_avail is the inline edit input's viewport width: the
+    /// clipped line minus the "> " marker and the title column, keeping the
+    /// caret cell and one margin column visible. edit_sugs_plan uses the
+    /// same budget so the candidate anchor matches the rendered window.
+    pub(super) fn edit_input_avail(&self, left: &str) -> usize {
+        input_avail(
+            self.width.saturating_sub(1),
+            display_width(cursor_prefix(true)) + display_width(left),
+        )
+    }
+
+    /// editLines renders the in-place input line plus error. Long values
+    /// scroll horizontally so the caret stays visible on a narrow terminal.
     pub(super) fn edit_lines(&self, e: &EditState, left: &str) -> String {
-        let mut line = format!("{}{}{}", cursor_prefix(true), left, ti_view(&e.ti));
+        let mut line = format!(
+            "{}{}{}",
+            cursor_prefix(true),
+            left,
+            ti_view(&e.ti, self.edit_input_avail(left)).1
+        );
         if !e.err.is_empty() {
             line += &format!("\n{}", style::fg1(&format!("  {}", e.err)));
         }
@@ -1303,7 +1400,11 @@ impl App {
         } else {
             "  anchor: "
         };
-        let mut lines = vec![format!("{}{}", style::help(prompt), ti_view(&s.ti))];
+        let mut lines = vec![format!(
+            "{}{}",
+            style::help(prompt),
+            ti_view(&s.ti, input_avail(self.width.saturating_sub(1), display_width(prompt))).1
+        )];
         if !s.err.is_empty() {
             lines.push(style::fg1(&format!("  {}", s.err)));
         }
@@ -1312,7 +1413,15 @@ impl App {
 
     /// mergeInputLines renders the merge-keys input under the title.
     pub(super) fn merge_input_lines(&self, s: &MergeState) -> String {
-        let mut lines = vec![format!("{}{}", style::help("merge keys: "), ti_view(&s.ti))];
+        let mut lines = vec![format!(
+            "{}{}",
+            style::help("merge keys: "),
+            ti_view(
+                &s.ti,
+                input_avail(self.width.saturating_sub(1), display_width("merge keys: "))
+            )
+            .1
+        )];
         if !merge_filtered(s).is_empty() {
             let cands = merge_filtered(s);
             let parts: Vec<String> = cands
@@ -1619,27 +1728,35 @@ impl App {
         if sel && (!cursor || visual) {
             prefix = style::fg9("> "); // selected rows carry a red > marker
         }
-        let mut line = format!("{prefix}{content}");
+        let mut body = format!("{prefix}{content}");
         if r.kind == RowKind::Unknown && !r.in_schema && !self.fs().schema.schema_less {
-            line += &format!(" {}", style::faint("(not in schema)"));
+            body += &format!(" {}", style::faint("(not in schema)"));
         }
         if self.drill_marker(r) {
-            line += &format!(" {}", style::accent("--->"));
+            body += &format!(" {}", style::accent("--->"));
         }
+        // The change dot and the severity glyph are status markers: on a
+        // narrow terminal the body is cut (marked with …) so they stay
+        // visible at the end of the row.
+        let mut tail = String::new();
         if matches!(r.kind, RowKind::Field | RowKind::Drill | RowKind::Unknown) {
             if self.has_err(&r.path) {
-                line += &format!(" {}", style::fg1(ERR));
+                tail = format!(" {}", style::fg1(ERR));
             } else if (r.kind == RowKind::Unknown && !r.in_schema && !self.fs().schema.schema_less)
                 || self.has_warn(&r.path)
             {
-                line += &format!(" {}", style::fg3(WARN));
+                tail = format!(" {}", style::fg3(WARN));
             }
             if self.changed(&r.path) {
-                line += &format!(" {}", style::diff("●"));
+                tail += &format!(" {}", style::diff("●"));
             }
         }
+        let line = format!(
+            "{}{tail}",
+            clip_keep_tail(&body, self.width.saturating_sub(1), display_width(&tail))
+        );
         if cursor {
-            line = style::sel(&line);
+            return style::sel(&line);
         }
         line
     }
@@ -2163,16 +2280,26 @@ impl App {
             .take(height)
             .enumerate()
         {
-            let mut label = self.files[idx].opts.path.clone();
-            if self.tab_dirty(idx) {
-                label += &format!(" {}", style::diff("●"));
-            }
-            let line = if off + i == cursor {
-                style::sel(&format!("> {label}"))
+            let tail = if self.tab_dirty(idx) {
+                format!(" {}", style::diff("●"))
             } else {
-                format!("  {label}")
+                String::new()
             };
-            b.push_str(&clip_display(&line, self.width.saturating_sub(1)));
+            let body = format!(
+                "{}{}",
+                cursor_prefix(off + i == cursor),
+                self.files[idx].opts.path.clone()
+            );
+            let line = format!(
+                "{}{tail}",
+                clip_keep_tail(&body, self.width.saturating_sub(1), display_width(&tail))
+            );
+            let line = if off + i == cursor {
+                style::sel(&line)
+            } else {
+                line
+            };
+            b.push_str(&line);
             b.push('\n');
         }
         if total == 0 {
