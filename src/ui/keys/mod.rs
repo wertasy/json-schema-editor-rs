@@ -1328,18 +1328,33 @@ impl App {
             "pgup" | "ctrl+b" => self.move_page_rows(-1, &rows),
             "ctrl+j" | "n" => self.move_to_value(&rows, 1),
             "ctrl+k" | "N" => self.move_to_value(&rows, -1),
-            "p" => self.paste_clipboard(&r, false),
-            "P" => self.paste_clipboard(&r, true),
-            "y" => self.copy_row_or_selection(&r),
+            // y/p/P/x/X/d act on the selection: a live visual select ends
+            // first, then the operation runs on the marks
+            "p" => {
+                self.end_visual_for_op();
+                self.paste_clipboard(&r, false);
+            }
+            "P" => {
+                self.end_visual_for_op();
+                self.paste_clipboard(&r, true);
+            }
+            "y" => {
+                self.end_visual_for_op();
+                self.copy_row_or_selection(&r);
+            }
             "Y" => self.copy_row(&r, false),
             "x" => {
+                self.end_visual_for_op();
                 if st_kind == Some(MenuKind::Items) {
                     self.cut_row_or_selection(&r, false);
                 } else {
                     self.cut_row_or_selection(&r, true);
                 }
             }
-            "X" => self.cut_row_or_selection(&r, false),
+            "X" => {
+                self.end_visual_for_op();
+                self.cut_row_or_selection(&r, false);
+            }
             "m" => self.toggle_select(&r),
             "v" => {
                 let notice;
@@ -1421,7 +1436,10 @@ impl App {
             "ctrl+o" => self.nav_go(true),
             "tab" | "ctrl+i" => self.nav_go(false),
             " " => self.space_key(r),
-            "d" | "delete" => self.delete_row(&r),
+            "d" | "delete" => {
+                self.end_visual_for_op();
+                self.delete_row(&r);
+            }
             "D" => self.remove_item_shortcut(&r),
             "-" => self.adjust_number(&r, -1),
             "=" | "+" => self.adjust_number(&r, 1),
@@ -1878,6 +1896,23 @@ impl App {
             // was already present: remove
             let k = sel_key(&r.path);
             st.sel.remove(&k);
+        }
+    }
+
+    /// endVisualForOp ends a live visual select before a selection-consuming
+    /// operation runs: the marks stay until the operation itself consumes or
+    /// clears them, and j/k afterwards navigate plainly again.
+    pub(super) fn end_visual_for_op(&mut self) {
+        if let Some(st) = self.top_mut() {
+            st.visual = false;
+        }
+    }
+
+    /// clearStaleMarks drops a live selection after a paste moved rows: the
+    /// marks are index paths, so an insert would silently re-target them.
+    pub(super) fn clear_stale_marks(&mut self) {
+        if let Some(st) = self.top_mut() {
+            st.sel.clear();
         }
     }
 

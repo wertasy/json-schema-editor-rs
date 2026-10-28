@@ -381,6 +381,41 @@ impl App {
 
     // --- paste -------------------------------------------------------------
 
+    /// pasteLinesDoc turns newline-joined clipboard text into array items
+    /// when the paste target is an array: y/X copy item selections as one
+    /// line per element with strings unquoted, so the same text must splice
+    /// back as items. Each line parses as JSON; anything else is that line's
+    /// literal string text. A single line is never items — single values
+    /// keep their own paste semantics.
+    pub(super) fn paste_lines_doc(
+        &self,
+        text: &str,
+        r: &Row,
+        under_cursor: bool,
+    ) -> Option<(Doc, Vec<NodeId>)> {
+        if !text.contains('\n') {
+            return None;
+        }
+        let (_, is_array, notice) = self.paste_target(r, under_cursor);
+        if !is_array || !notice.is_empty() {
+            return None;
+        }
+        let mut doc = Doc::new();
+        let mut items = Vec::new();
+        for line in text.split('\n') {
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            let node = match jsondoc::parse(line) {
+                Ok(parsed) => {
+                    let root = parsed.root;
+                    doc.copy_into(&parsed, root, CopyMode::Detached)
+                }
+                Err(_) => doc.new_str(line),
+            };
+            items.push(node);
+        }
+        Some((doc, items))
+    }
+
     /// pastePlainStringDoc accepts unstructured clipboard text as a string
     /// when P targets a string value (or a selection containing one). Other
     /// targets keep the parse error: this is not a general plain-text paste.
@@ -453,13 +488,28 @@ impl App {
         };
         let mode = self.fs().codec.label();
         let (members, items, doc) = match parse_paste(&text, mode) {
-            Ok(x) => x,
-            Err(e) => match self.paste_plain_string_doc(&text, r, under_cursor) {
-                Some(doc) => (None, None, Some(doc)),
-                None => {
-                    self.notice = e;
-                    return;
+            Ok((members, items, doc)) => {
+                // y/X copy item selections newline-joined with strings
+                // unquoted; such text also classifies as a single YAML
+                // scalar. An array target must take the lines back as items.
+                if members.is_none()
+                    && items.is_none()
+                    && let Some((ldoc, litems)) = self.paste_lines_doc(&text, r, under_cursor)
+                {
+                    (None, Some(litems), Some(ldoc))
+                } else {
+                    (members, items, doc)
                 }
+            }
+            Err(e) => match self.paste_lines_doc(&text, r, under_cursor) {
+                Some((ldoc, litems)) => (None, Some(litems), Some(ldoc)),
+                None => match self.paste_plain_string_doc(&text, r, under_cursor) {
+                    Some(doc) => (None, None, Some(doc)),
+                    None => {
+                        self.notice = e;
+                        return;
+                    }
+                },
             },
         };
         // a single value replaces values
@@ -538,6 +588,7 @@ impl App {
                 self.notice = "paste made no changes".to_string();
                 return;
             }
+            self.clear_stale_marks();
             self.notice = format!(
                 "pasted 1 items into {}",
                 crate::doc::jsondoc::path_string(&path)
@@ -556,6 +607,7 @@ impl App {
                 self.notice = "paste made no changes".to_string();
                 return;
             }
+            self.clear_stale_marks();
             self.notice = format!(
                 "pasted {} keys into {}",
                 members.len(),
@@ -570,6 +622,7 @@ impl App {
             self.notice = "paste made no changes".to_string();
             return;
         }
+        self.clear_stale_marks();
         self.notice = format!(
             "pasted {} items into {}",
             items.len(),

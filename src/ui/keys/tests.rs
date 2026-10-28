@@ -3464,6 +3464,187 @@ fn paste_array_p_below_p_above() {
     assert_eq!(n_at_idx(&m.fs().doc, "mounts", 0), "8");
 }
 
+// --- copied item selections paste back as items ----------------------------
+
+/// tags_doc holds logging.tags = ["alpha", "beta"].
+fn tags_doc() -> Doc {
+    dbuild(|db| {
+        db.obj(vec![
+            ("name", db.s("webapp")),
+            (
+                "logging",
+                db.obj(vec![("tags", db.arr(vec![db.s("alpha"), db.s("beta")]))]),
+            ),
+        ])
+    })
+}
+
+/// clip_app wires opts.copy/opts.paste to one in-memory clipboard so a test
+/// can copy in one menu and paste in another.
+fn clip_app(doc: Doc) -> (App, Arc<Mutex<Option<String>>>) {
+    let clip = Arc::new(Mutex::new(None));
+    let mut opts = test_opts();
+    {
+        let clip = clip.clone();
+        opts.copy = Some(Arc::new(move |t| {
+            *clip.lock() = Some(t.to_string());
+            Ok(())
+        }));
+    }
+    {
+        let clip = clip.clone();
+        opts.paste = Some(Arc::new(move || {
+            clip.lock()
+                .clone()
+                .ok_or_else(|| "clipboard is empty".to_string())
+        }));
+    }
+    (app_with(test_schema(), doc, opts), clip)
+}
+
+/// enter_tags drills root → logging → tags items menu (cursor on item 0).
+/// Root rows follow schema order: name, mode, server, logging, mounts, auth;
+/// logging rows are levels, tags.
+fn enter_tags(m: &mut App) {
+    press(m, &["down", "down", "down", "enter"]);
+    press(m, &["down", "enter"]);
+}
+
+#[test]
+fn paste_multi_selected_string_items_round_trip() {
+    let (mut m, clip) = clip_app(tags_doc());
+    enter_tags(&mut m);
+    press(&mut m, &["v", "j", "y"]);
+    assert_eq!(m.notice, "Copied 2 values");
+    assert_eq!(clip.lock().as_deref(), Some("alpha\nbeta"));
+    // the copy ends the visual select; the marks go with it
+    assert!(!m.top().unwrap().visual);
+    assert!(m.top().unwrap().sel.is_empty());
+
+    // cursor still on item 1: p splices below it
+    press(&mut m, &["p"]);
+    assert_eq!(m.notice, "pasted 2 items into $.logging.tags");
+    assert_eq!(arr_len(&m.fs().doc, &sp(&["logging", "tags"])), 4);
+    for (i, want) in ["alpha", "beta", "alpha", "beta"].iter().enumerate() {
+        assert_eq!(
+            sget(&m.fs().doc, &[ks("logging"), ks("tags"), PathSeg::Idx(i)]),
+            *want
+        );
+    }
+
+    // j after the operation must not resume marking
+    press(&mut m, &["j"]);
+    assert!(!m.top().unwrap().visual);
+    assert!(m.top().unwrap().sel.is_empty());
+}
+
+#[test]
+fn paste_multi_selected_string_items_above_cursor() {
+    let (mut m, clip) = clip_app(tags_doc());
+    enter_tags(&mut m);
+    press(&mut m, &["v", "j", "y"]);
+    assert_eq!(clip.lock().as_deref(), Some("alpha\nbeta"));
+    press(&mut m, &["up", "P"]); // item 0: P inserts above it
+    assert_eq!(m.notice, "pasted 2 items into $.logging.tags");
+    for (i, want) in ["alpha", "beta", "alpha", "beta"].iter().enumerate() {
+        assert_eq!(
+            sget(&m.fs().doc, &[ks("logging"), ks("tags"), PathSeg::Idx(i)]),
+            *want
+        );
+    }
+}
+
+#[test]
+fn paste_newline_joined_items_yaml_and_toml_arrays() {
+    // bare multi-line text also classifies as one YAML scalar and is no TOML
+    // document at all: an array target must still get the copied items back
+    let tag_at =
+        |m: &App, i: usize| sget(&m.fs().doc, &[ks("logging"), ks("tags"), PathSeg::Idx(i)]);
+    let mut m = yaml_paste_app(tags_doc(), "alpha\nbeta");
+    enter_tags(&mut m);
+    press(&mut m, &["down", "p"]); // cursor on beta: p splices below it
+    assert_eq!(m.notice, "pasted 2 items into $.logging.tags");
+    assert_eq!(tag_at(&m, 2), "alpha");
+    assert_eq!(tag_at(&m, 3), "beta");
+
+    let mut m = toml_paste_app(tags_doc(), "alpha\nbeta");
+    enter_tags(&mut m);
+    press(&mut m, &["down", "p"]);
+    assert_eq!(m.notice, "pasted 2 items into $.logging.tags");
+    assert_eq!(tag_at(&m, 2), "alpha");
+    assert_eq!(tag_at(&m, 3), "beta");
+}
+
+#[test]
+fn paste_newline_joined_items_are_strings_and_literals() {
+    // strings stay unquoted (how y copies them), JSON lines become values
+    let tag_at =
+        |m: &App, i: usize| sget(&m.fs().doc, &[ks("logging"), ks("tags"), PathSeg::Idx(i)]);
+    let mut m = paste_app(tags_doc(), "alpha\n7\ntrue\n{\"k\":1}");
+    enter_tags(&mut m);
+    press(&mut m, &["down", "p"]);
+    assert_eq!(m.notice, "pasted 4 items into $.logging.tags");
+    assert_eq!(tag_at(&m, 2), "alpha");
+    let at = |m: &App, i: usize| -> Option<Value> {
+        m.fs()
+            .doc
+            .get(&[ks("logging"), ks("tags"), PathSeg::Idx(i)])
+            .map(|n| m.fs().doc.value(n).clone())
+    };
+    assert!(matches!(at(&m, 3), Some(Value::Num(text)) if text == "7"));
+    assert!(matches!(at(&m, 4), Some(Value::Bool(true))));
+    let obj_at = m
+        .fs()
+        .doc
+        .get(&[ks("logging"), ks("tags"), PathSeg::Idx(5)])
+        .expect("object item");
+    assert_eq!(m.fs().doc.compact(obj_at), r#"{"k":1}"#);
+}
+
+#[test]
+fn visual_select_off_after_copy_cut_delete() {
+    // object menu: v + j + j + y copies the marked keys and ends the visual
+    // select (unset mode has no value, so two pairs come back)
+    let (mut m, clip) = clip_app(test_doc());
+    press(&mut m, &["v", "j", "j", "y"]);
+    assert_eq!(m.notice, "Copied 2 key-value pairs");
+    assert!(clip.lock().is_some());
+    assert!(!m.top().unwrap().visual);
+    assert!(m.top().unwrap().sel.is_empty());
+    press(&mut m, &["j"]);
+    assert!(!m.top().unwrap().visual, "j must keep navigating plainly");
+    assert!(m.top().unwrap().sel.is_empty());
+
+    // items menu: x cuts the marked elements and ends the visual select
+    let (mut m2, _clip) = clip_app(tags_doc());
+    enter_tags(&mut m2);
+    press(&mut m2, &["v", "j", "x"]);
+    assert_eq!(m2.notice, "Cut 2 values");
+    assert!(!m2.top().unwrap().visual);
+    assert!(m2.top().unwrap().sel.is_empty());
+    assert_eq!(arr_len(&m2.fs().doc, &sp(&["logging", "tags"])), 0);
+
+    // d deletes the marked keys and ends the visual select
+    let mut m3 = mk_app(test_doc(), test_opts());
+    press(&mut m3, &["v", "j", "j", "d"]);
+    assert!(!m3.top().unwrap().visual);
+    assert!(m3.top().unwrap().sel.is_empty());
+    assert_eq!(obj_keys(&m3.fs().doc, &[]).join(" "), "mounts");
+}
+
+#[test]
+fn paste_clears_marked_selection() {
+    // an insert shifts the marked index paths: a successful paste must not
+    // leave marks pointing at rows that moved
+    let mut m = paste_app(tags_doc(), "[\"x\",\"y\"]");
+    enter_tags(&mut m);
+    press(&mut m, &["m", "down", "m"]);
+    assert_eq!(m.top().unwrap().sel.len(), 2);
+    press(&mut m, &["p"]);
+    assert_eq!(m.notice, "pasted 2 items into $.logging.tags");
+    assert!(m.top().unwrap().sel.is_empty());
+}
+
 #[test]
 fn paste_trailing_comma_in_complete_object() {
     let mut m = paste_app(test_doc(), r#"{"a":1,"b":"2",}"#);
