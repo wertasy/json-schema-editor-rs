@@ -1848,6 +1848,46 @@ fn pty_search_jump_into_array_variant() {
 }
 
 #[test]
+fn pty_variant_switch_string_wraps_into_array() {
+    // oneOf string | array[string]: switching the variant must keep the
+    // typed string as the array's first element
+    let dir = mktemp();
+    let schema = dir.path().join("host.schema.json");
+    let cfg = dir.path().join("host.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{
+          "host":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}]}}}"#,
+    );
+    write_file(&cfg, r#"{"host":"old.example"}"#);
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+        return;
+    };
+
+    pty.wait_frame("root menu", 0, &["↑/↓ move"]);
+    pty.send(b"t");
+    (_, _) = pty.wait_frame("variant picker", 0, &["list of string"]);
+    pty.send(b"j");
+    pty.send(b"\r");
+    (_, _) = pty.wait_frame("replace confirm", 0, &["Replace current value?"]);
+    pty.send(b"y");
+    (_, _) = pty.wait_frame(
+        "array editor holds the old string",
+        0,
+        &["$.host", "host[0]", "old.example"],
+    );
+    pty.send(b"\x13"); // ctrl+s
+    pty.wait_frame("saved", 0, &["Write to "]);
+    let got = read_json(&cfg);
+    assert_eq!(got["host"], json!(["old.example"]), "saved doc = {got}");
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+}
+
+#[test]
 fn pty_search_enum_array_element_jump() {
     // enum-array elements are document values: a document search lists them
     // and lands in the toggle menu on the matching row

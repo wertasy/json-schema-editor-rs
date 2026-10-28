@@ -8343,6 +8343,114 @@ fn variant_entry_replaces_picker_in_stack() {
     );
 }
 
+#[test]
+fn variant_switch_string_wraps_as_first_array_element() {
+    let schema = map_one_of_schema();
+    let headers = child(&schema, schema.root, "headers");
+    let one_of = schema.nodes[headers as usize].items.unwrap();
+    let list = schema.nodes[one_of as usize].variants[1];
+    let doc = dbuild(|db| db.obj(vec![("headers", db.obj(vec![("Host", db.s("old"))]))]));
+    let mut m = app_with(schema, doc, test_opts());
+    press(&mut m, &["enter"]);
+
+    let path = sp(&["headers", "Host"]);
+    m.push(one_of, path.clone());
+    m.enter_variant(&Row {
+        kind: RowKind::Variant,
+        variant: Some(list),
+        path: path.clone(),
+        idx: -1,
+        ..Row::default()
+    });
+    press(&mut m, &["y"]);
+    assert_eq!(m.top().unwrap().node, list);
+    assert_eq!(
+        arr_len(&m.fs().doc, &path),
+        1,
+        "the string must survive as element 0"
+    );
+    assert_eq!(
+        sget(&m.fs().doc, &[ks("headers"), ks("Host"), PathSeg::Idx(0)]),
+        "old"
+    );
+}
+
+#[test]
+fn variant_switch_integer_wraps_as_first_array_element() {
+    let schema = schema_from_json(
+        r#"{"type":"object","properties":{
+          "port":{"oneOf":[{"type":"integer"},{"type":"array","items":{"type":"integer"}}]}}}"#,
+    );
+    let one_of = child(&schema, schema.root, "port");
+    let list = schema.nodes[one_of as usize].variants[1];
+    let doc = dbuild(|db| db.obj(vec![("port", db.n("8080"))]));
+    let mut m = app_with(schema, doc, test_opts());
+    press(&mut m, &["enter"]);
+
+    let path = sp(&["port"]);
+    m.push(one_of, path.clone());
+    m.enter_variant(&Row {
+        kind: RowKind::Variant,
+        variant: Some(list),
+        path: path.clone(),
+        idx: -1,
+        ..Row::default()
+    });
+    press(&mut m, &["y"]);
+    assert_eq!(m.top().unwrap().node, list);
+    assert_eq!(arr_len(&m.fs().doc, &path), 1);
+    let el = getv(&m.fs().doc, &[ks("port"), PathSeg::Idx(0)]).expect("element 0");
+    assert!(matches!(m.fs().doc.value(el), Value::Num(t) if t == "8080"));
+}
+
+#[test]
+fn variant_switch_type_mismatch_does_not_wrap() {
+    // array[string] items cannot take a number: the old value is still
+    // discarded instead of becoming an invalid element
+    let schema = map_one_of_schema();
+    let doc = dbuild(|db| db.obj(vec![("headers", db.obj(vec![("Host", db.n("42"))]))]));
+    let mut m = app_with(schema, doc, test_opts());
+    press(&mut m, &["enter"]);
+    let headers = child(&m.fs().schema, m.fs().schema.root, "headers");
+    let one_of = m.fs().schema.nodes[headers as usize].items.unwrap();
+    let list = m.fs().schema.nodes[one_of as usize].variants[1];
+    let path = sp(&["headers", "Host"]);
+    m.push(one_of, path.clone());
+    m.enter_variant(&Row {
+        kind: RowKind::Variant,
+        variant: Some(list),
+        path: path.clone(),
+        idx: -1,
+        ..Row::default()
+    });
+    assert!(matches!(m.overlay, Some(Overlay::Confirm(_))));
+    press(&mut m, &["y"]);
+    assert!(!has(&m.fs().doc, &path));
+}
+
+#[test]
+fn variant_switch_wraps_root_scalar() {
+    let schema = schema_from_json(
+        r#"{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}]}"#,
+    );
+    let one_of = schema.root;
+    let list = schema.nodes[one_of as usize].variants[1];
+    let doc = dbuild(|db| db.s("abc"));
+    let mut m = app_with(schema, doc, test_opts());
+
+    m.push(one_of, Vec::new());
+    m.enter_variant(&Row {
+        kind: RowKind::Variant,
+        variant: Some(list),
+        path: Vec::new(),
+        idx: -1,
+        ..Row::default()
+    });
+    press(&mut m, &["y"]);
+    assert_eq!(arr_len(&m.fs().doc, &[]), 1, "root string wraps in place");
+    assert_eq!(sget(&m.fs().doc, &[PathSeg::Idx(0)]), "abc");
+}
+
 // ===========================================================================
 // menu_issues_test.go
 // ===========================================================================

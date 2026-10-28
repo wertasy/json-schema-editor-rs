@@ -786,6 +786,50 @@ impl App {
 
     // --- oneOf -------------------------------------------------------------
 
+    /// wrap_scalar_element converts the value being replaced into a
+    /// one-element array when the switch targets an array variant whose
+    /// items accept the old scalar (string → array[string], integer/number
+    /// likewise). The old node id stays element 0, so YAML anchors and
+    /// aliases keep sharing it. Reports whether it converted.
+    pub(super) fn wrap_scalar_element(
+        &mut self,
+        variant: FormNodeId,
+        path: &[PathSeg],
+        old: Option<NodeId>,
+    ) -> bool {
+        let Some(old) = old else {
+            return false;
+        };
+        if self.fs().schema.nodes[variant as usize].kind != Kind::Array {
+            return false;
+        }
+        let f = self.fs();
+        if !matches!(
+            f.doc.value(old),
+            Value::Str(_) | Value::Num(_) | Value::Bool(_)
+        ) {
+            return false;
+        }
+        let items = f.schema.nodes[variant as usize].items;
+        if !schema_accepts_value_(&f.schema, items, &f.doc, Some(old)) {
+            return false;
+        }
+        let f = self.fs_mut();
+        // set(&[], …) clones the replacement into the root node, so a root
+        // value must be copied first or the array would point at the root
+        let leaf = if path.is_empty() {
+            f.doc.push(f.doc.node(old).clone())
+        } else {
+            old
+        };
+        let arr = f.doc.push(NodeData {
+            value: Value::Array(vec![leaf]),
+            ..NodeData::default()
+        });
+        let _ = f.doc.set(path, arr);
+        true
+    }
+
     pub(super) fn enter_variant(&mut self, r: &Row) {
         let Some(st) = self.top().cloned() else {
             return;
@@ -808,7 +852,7 @@ impl App {
             }
         }
         if !is_null_opt(self.doc(), v) {
-            let (variant, path, one_of) = (r.variant, r.path.clone(), st.node);
+            let (variant, path, one_of, old) = (r.variant, r.path.clone(), st.node, v);
             // the any-type picker replaces a value's type in place: a null
             // placeholder keeps the object-member order / array slot
             let keep_slot = self.fs().menu_cache.get(&SynthKey::AnyType) == Some(&st.node);
@@ -816,6 +860,16 @@ impl App {
                 title: "Replace current value? (y/n)".to_string(),
                 hint: String::new(),
                 on_yes: Some(Box::new(move |m| {
+                    // a scalar that fits the target array's items becomes
+                    // element 0 (string → array[string], integer/number
+                    // likewise) instead of being dropped; it beats the
+                    // schema default, which would discard the typed value
+                    if let Some(vv) = variant {
+                        if m.wrap_scalar_element(vv, &path, old) {
+                            m.enter_variant_editor(vv, path, Some(one_of));
+                            return;
+                        }
+                    }
                     let has_default = variant
                         .map(|vv| m.fs().schema.nodes[vv as usize].default_)
                         .flatten();
