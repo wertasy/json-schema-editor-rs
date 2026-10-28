@@ -69,6 +69,72 @@ impl App {
         }
     }
 
+    /// adaptiveJump drives ctrl+j/k: cycle the pending change ring left by
+    /// the last replace/undo/redo, else the validation-issue keys, else the
+    /// parked search results; with none of those it falls back to the plain
+    /// n/N non-null walk.
+    pub(super) fn adaptive_jump(&mut self, rows: &[Row], dir: i64) {
+        let ring = match self.fs().change_jump.clone() {
+            Some(ring) if !ring.is_empty() => ring,
+            _ => {
+                let issues: Vec<Vec<PathSeg>> = {
+                    let f = self.fs();
+                    let mut paths: Vec<Vec<PathSeg>> = Vec::new();
+                    for it in &f.issues_now {
+                        if let Some(p) = &it.path {
+                            if !paths.contains(p) {
+                                paths.push(p.clone());
+                            }
+                        }
+                    }
+                    paths
+                };
+                if !issues.is_empty() {
+                    issues
+                } else {
+                    let hits: Vec<Vec<PathSeg>> = match &self.fs().search_parked {
+                        Some(s) => {
+                            let mut paths: Vec<Vec<PathSeg>> = Vec::new();
+                            for r in &s.results {
+                                if !paths.contains(&r.path) {
+                                    paths.push(r.path.clone());
+                                }
+                            }
+                            paths
+                        }
+                        None => Vec::new(),
+                    };
+                    if !hits.is_empty() {
+                        hits
+                    } else {
+                        self.move_to_value(rows, dir);
+                        return;
+                    }
+                }
+            }
+        };
+        self.jump_ring(&ring, dir, rows);
+    }
+
+    /// jumpRing cycles dir (wrapping at both ends) around ring, seeding from
+    /// the focused row's path: sitting on ring[i] continues at i±1, otherwise
+    /// dir > 0 enters at the first entry and dir < 0 at the last. Each hop
+    /// rebuilds the stack down to the target row.
+    fn jump_ring(&mut self, ring: &[Vec<PathSeg>], dir: i64, rows: &[Row]) {
+        let cur = self
+            .top()
+            .and_then(|st| rows.get(st.cursor))
+            .map(|r| r.path.clone());
+        let n = ring.len() as i64;
+        let next = match cur.and_then(|p| ring.iter().position(|r| *r == p)) {
+            Some(i) => (i as i64 + dir).rem_euclid(n) as usize,
+            None if dir > 0 => 0,
+            None => ring.len() - 1,
+        };
+        self.nav_forward();
+        self.jump_to_row(&ring[next]);
+    }
+
     /// revealHiddenEmpty turns the z filter off when path names an object
     /// key with no document value.
     pub(super) fn reveal_hidden_empty(&mut self, path: &[PathSeg]) {
@@ -292,6 +358,7 @@ impl App {
         let rep = s.rti.value().to_string();
         let mut occ = 0usize;
         let mut vals = 0usize;
+        let mut replaced: Vec<Vec<PathSeg>> = Vec::new();
         let paths: Vec<Vec<PathSeg>> = s.results.iter().map(|r| r.path.clone()).collect();
         for p in paths {
             let Some(n) = self.doc().get(&p) else {
@@ -306,11 +373,22 @@ impl App {
             }
             let v = self.fs_mut().doc.new_str(new);
             let _ = self.fs_mut().doc.set(&p, v);
+            if !replaced.contains(&p) {
+                replaced.push(p);
+            }
             occ += c;
             vals += 1;
         }
         self.close_search(s);
         self.overlay = None;
+        // the replaced values become the adaptive ctrl+j/k ring: land on the
+        // first one, cycle the rest
+        self.ring_keep = true;
+        if !replaced.is_empty() {
+            let first = replaced[0].clone();
+            self.fs_mut().change_jump = Some(replaced);
+            self.jump_to_row(&first);
+        }
         self.notice = format!("replaced {} occurrence(s) in {} value(s)", occ, vals);
     }
 

@@ -23,11 +23,14 @@ pub struct History {
 
 /// Outcome of an undo/redo attempt. `changed` is true when the document was
 /// swapped (the caller must then `repair_stack` and refresh rows); `notice`
-/// is byte-identical to the Go status-line text either way.
+/// is byte-identical to the Go status-line text either way. `paths` lists
+/// the locations that differ between the pre- and post-state, in document
+/// order; every path resolves in the new document.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HistoryResult {
     pub changed: bool,
     pub notice: &'static str,
+    pub paths: Vec<Vec<crate::doc::jsondoc::PathSeg>>,
 }
 
 impl History {
@@ -50,13 +53,16 @@ impl History {
             return HistoryResult {
                 changed: false,
                 notice: "nothing to undo",
+                paths: Vec::new(),
             };
         };
         let cur = std::mem::replace(doc, pre);
+        let paths = diff_paths(&cur, doc);
         self.redo_stack.push(cur);
         HistoryResult {
             changed: true,
             notice: "undone",
+            paths,
         }
     }
 
@@ -66,13 +72,75 @@ impl History {
             return HistoryResult {
                 changed: false,
                 notice: "nothing to redo",
+                paths: Vec::new(),
             };
         };
         let cur = std::mem::replace(doc, next);
+        let paths = diff_paths(&cur, doc);
         self.undo_stack.push(cur);
         HistoryResult {
             changed: true,
             notice: "redone",
+            paths,
+        }
+    }
+}
+
+/// diffPaths walks two documents of the same clone lineage and reports the
+/// paths of every location whose content differs, plus paths that only
+/// exist on the `to` side (additions). Removals are not reported: their
+/// path no longer resolves in `to`, so it cannot be jumped to. Order is
+/// `to`'s document order; paths never repeat.
+pub fn diff_paths(from: &Doc, to: &Doc) -> Vec<Vec<crate::doc::jsondoc::PathSeg>> {
+    let mut out = Vec::new();
+    let mut path = Vec::new();
+    diff_node(from, from.root, to, to.root, &mut path, &mut out);
+    out
+}
+
+fn diff_node(
+    from: &Doc,
+    fi: crate::doc::jsondoc::NodeId,
+    to: &Doc,
+    ti: crate::doc::jsondoc::NodeId,
+    path: &mut Vec<crate::doc::jsondoc::PathSeg>,
+    out: &mut Vec<Vec<crate::doc::jsondoc::PathSeg>>,
+) {
+    use crate::doc::jsondoc::PathSeg as Seg;
+    use crate::doc::jsondoc::Value;
+    let (fv, tv) = (from.value(fi), to.value(ti));
+    match (fv, tv) {
+        (Value::Object(fm), Value::Object(tm)) => {
+            for m in tm {
+                path.push(Seg::Key(m.key.clone()));
+                match fm.iter().find(|f| f.key == m.key) {
+                    Some(f) => diff_node(from, f.val, to, m.val, path, out),
+                    None => out.push(path.clone()), // added on the `to` side
+                }
+                path.pop();
+            }
+        }
+        (Value::Array(fa), Value::Array(ta)) => {
+            for (i, &t) in ta.iter().enumerate() {
+                path.push(Seg::Idx(i));
+                match fa.get(i) {
+                    Some(&f) => diff_node(from, f, to, t, path, out),
+                    None => out.push(path.clone()),
+                }
+                path.pop();
+            }
+        }
+        _ => {
+            // leaves (and kind flips) compare content: value spelling plus
+            // the anchor/merge/raw metadata carried beside it
+            let (df, dt) = (from.node(fi), to.node(ti));
+            if df.value != dt.value
+                || df.anchor != dt.anchor
+                || df.merge != dt.merge
+                || df.raw != dt.raw
+            {
+                out.push(path.clone());
+            }
         }
     }
 }
@@ -150,5 +218,51 @@ mod tests {
         }
         assert_eq!(d.write(), "{\n  \"n\": 5\n}\n");
         assert_eq!(h.undo(&mut d).notice, "nothing to undo");
+    }
+
+    fn ks(s: &str) -> crate::doc::jsondoc::PathSeg {
+        crate::doc::jsondoc::PathSeg::key(s)
+    }
+
+    #[test]
+    fn diff_paths_reports_changes_and_additions_not_removals() {
+        use crate::doc::jsondoc::PathSeg;
+        let from = doc(r#"{"a":1,"b":{"x":1},"c":[1,2],"z":9}"#);
+        let to = doc(r#"{"a":2,"b":{"x":1,"y":2},"c":[1,9]}"#);
+        assert_eq!(
+            diff_paths(&from, &to),
+            vec![
+                vec![ks("a")],                  // changed leaf
+                vec![ks("b"), ks("y")],         // added key
+                vec![ks("c"), PathSeg::Idx(1)], // changed element
+            ]
+        );
+        // removals resolve nowhere in the new doc: not reported
+        let from = doc(r#"{"a":1,"z":9}"#);
+        let to = doc(r#"{"a":1}"#);
+        assert!(diff_paths(&from, &to).is_empty());
+        // identical docs produce nothing
+        let d = doc(r#"{"a":{"b":[1,{"c":2}]}}"#);
+        assert!(diff_paths(&d, &d).is_empty());
+        // kind flips report the location once
+        let from = doc(r#"{"a":{"b":1}}"#);
+        let to = doc(r#"{"a":[1,2]}"#);
+        assert_eq!(diff_paths(&from, &to), vec![vec![ks("a")]]);
+    }
+
+    #[test]
+    fn undo_redo_paths_describe_the_applied_direction() {
+        let mut h = History::default();
+        let mut d = doc(r#"{"a":1,"b":2}"#);
+        // snapshot of the state the undo will restore
+        push(&mut h, r#"{"a":9,"b":2,"c":3}"#);
+        let r = h.undo(&mut d);
+        // undo applied {a:9,b:2,c:3}: a reverted to 9, the c addition came
+        // back; b was never touched
+        assert_eq!(r.paths, vec![vec![ks("a")], vec![ks("c")]]);
+        let r = h.redo(&mut d);
+        // redo re-applied the edit: a back to 1, the c addition disappeared
+        // (removals are not reported — the path no longer resolves)
+        assert_eq!(r.paths, vec![vec![ks("a")]]);
     }
 }

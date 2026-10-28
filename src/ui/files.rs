@@ -101,6 +101,10 @@ pub struct FileState {
     pub jump_return: usize,
     /// parked search overlay state (jump landed, esc at return_depth reopens)
     pub search_parked: Option<SearchState>,
+    /// adaptive ctrl+j/k ring: the changed paths from the last
+    /// replace/undo/redo, auto-landing on the first entry; any unrelated
+    /// document edit clears it
+    pub change_jump: Option<Vec<Vec<PathSeg>>>,
     /// session info notices (aliases kept, schema source), dropped on the
     /// first key press
     pub startup: String,
@@ -158,6 +162,7 @@ impl FileState {
             jump_origin: None,
             jump_return: 0,
             search_parked: None,
+            change_jump: None,
             startup,
             disk_stat,
         }
@@ -311,6 +316,7 @@ impl App {
             f.issues_return = 0;
             f.issues_origin = None;
             f.search_parked = None;
+            f.change_jump = None;
             f.jump_origin = None;
             f.jump_return = 0;
             f.disk_stat = disk_stat_of(&f.opts.path);

@@ -151,8 +151,12 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
         desc: "page down / up (menus, list overlays, comment and help pages)",
     },
     HelpEntry {
-        keys: "n / N / ctrl+j / ctrl+k",
+        keys: "n / N",
         desc: "next / previous key with a non-null value",
+    },
+    HelpEntry {
+        keys: "ctrl+j / ctrl+k",
+        desc: "adaptive next / previous: changed keys from the last replace/undo/redo, then keys with validation issues, then search hits; falls back to the non-null walk",
     },
     HelpEntry {
         keys: "y / Y",
@@ -843,6 +847,9 @@ pub struct App {
     pub aborted: bool,
     /// the session ended cleanly (root quit)
     pub exiting: bool,
+    /// set while a key arms the change ring (replace/undo/redo), so the
+    /// dispatcher's edited-check does not clear what that key just set
+    pub ring_keep: bool,
     /// run $EDITOR for real (false in tests: the pending edit is stashed
     /// instead so `finish_external_value` can deliver the content)
     pub exec_editor: bool,
@@ -881,6 +888,7 @@ impl App {
             nav: Nav::default(),
             aborted: false,
             exiting: false,
+            ring_keep: false,
             exec_editor: false,
             pending_edit: None,
             cmd_history,
@@ -1391,6 +1399,7 @@ impl App {
             self.refresh_issues();
             return;
         }
+        self.ring_keep = false;
         // S switches the schema, not a document edit: it records the location
         // and refreshes issues itself, so it must not pollute undo history.
         if self.list_mode() && msg.key_str() == "S" {
@@ -1416,6 +1425,9 @@ impl App {
             );
         if edited {
             self.files[pre_file].history.push_undo(pre);
+        }
+        if edited && !self.ring_keep {
+            self.files[pre_file].change_jump = None;
         }
         self.refresh_variant_menu();
         if edited {
@@ -1453,7 +1465,8 @@ impl App {
     }
 
     /// applyHistoryKey handles u/ctrl+r; consumed reports whether the key
-    /// was a history key.
+    /// was a history key. A successful undo/redo arms the change ring and
+    /// lands the cursor on the first changed row; ctrl+j/k cycles the rest.
     pub fn apply_history_key(&mut self, msg: &Msg) -> bool {
         let key = msg.key_str();
         let f = self.fs_mut();
@@ -1467,6 +1480,10 @@ impl App {
                 self.notice = res.notice.to_string();
                 if res.changed {
                     self.repair_stack();
+                    if !res.paths.is_empty() {
+                        self.fs_mut().change_jump = Some(res.paths.clone());
+                        self.jump_to_row(&res.paths[0]);
+                    }
                 }
                 true
             }

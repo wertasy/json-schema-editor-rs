@@ -1888,6 +1888,80 @@ fn pty_variant_switch_string_wraps_into_array() {
 }
 
 #[test]
+fn pty_undo_lands_on_change_and_ctrl_j_cycles_the_ring() {
+    // undo of a J move auto-lands on the first moved element; ctrl+j/k walk
+    // the ring of changed rows
+    let dir = mktemp();
+    let schema = dir.path().join("items.schema.json");
+    let cfg = dir.path().join("items.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{
+          "items":{"type":"array","items":{"type":"string"}}}}"#,
+    );
+    write_file(&cfg, r#"{"items":["a","b","c"]}"#);
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+        return;
+    };
+
+    pty.wait_frame("root menu", 0, &["↑/↓ move"]);
+    pty.send(b"\r"); // drill into the array
+    let (_, off) = pty.wait_frame("items menu", 0, &["$.items", "> items[0]         a"]);
+    pty.send(b"J"); // move the first item down: [b a c], cursor follows it
+    let (_, off) = pty.wait_frame("moved", off, &["> items[1]         a"]);
+    pty.send(b"u"); // undo: [a b c], cursor auto-lands on items[0]
+    let (_, off) = pty.wait_frame(
+        "undo lands on the first change",
+        off,
+        &["> items[0]         a"],
+    );
+    pty.send(b"\n"); // ctrl+j: next changed row
+    let (_, off) = pty.wait_frame("ctrl+j rings to items[1]", off, &["> items[1]         b"]);
+    pty.send(b"\x0b"); // ctrl+k: back
+    pty.wait_frame("ctrl+k rings back", off, &["> items[0]         a"]);
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+}
+
+#[test]
+fn pty_a_inserts_after_cursor_in_array() {
+    // a inserts a fresh item after the cursor item (A inserts before)
+    let dir = mktemp();
+    let schema = dir.path().join("items.schema.json");
+    let cfg = dir.path().join("items.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{
+          "items":{"type":"array","items":{"type":"string"}}}}"#,
+    );
+    write_file(&cfg, r#"{"items":["a","b","c"]}"#);
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+        return;
+    };
+
+    pty.wait_frame("root menu", 0, &["↑/↓ move"]);
+    pty.send(b"\r"); // drill into the array, cursor on items[0]
+    let (_, off) = pty.wait_frame("items menu", 0, &["$.items", "> items[0]"]);
+    pty.send(b"az\r"); // a: insert after items[0], type the value, commit
+    pty.send(b"\x13"); // ctrl+s (the saved notice syncs the commit)
+    pty.wait_frame("saved", off, &["Write to "]);
+    let got = read_json(&cfg);
+    assert_eq!(
+        got["items"],
+        json!(["a", "z", "b", "c"]),
+        "a must insert after the cursor item; saved doc = {got}"
+    );
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+}
+
+#[test]
 fn pty_search_enum_array_element_jump() {
     // enum-array elements are document values: a document search lists them
     // and lands in the toggle menu on the matching row

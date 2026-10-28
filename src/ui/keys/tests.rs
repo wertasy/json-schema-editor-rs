@@ -1918,11 +1918,17 @@ fn help_page_scrolls_when_taller_than_the_screen() {
     m.height = 24;
     press(&mut m, &["?"]);
     assert!(matches!(m.overlay, Some(Overlay::Help(_))));
-    assert!(!m.view().contains("merge keys: merge anchors"));
+    assert!(
+        !m.view()
+            .contains("move the item under the cursor down / up")
+    );
 
     press(&mut m, &["pgdown"]);
     assert_eq!(help_scroll(&m), 21, "one full help screen");
-    assert!(m.view().contains("merge keys: merge anchors"));
+    assert!(
+        m.view()
+            .contains("move the item under the cursor down / up")
+    );
 
     press(&mut m, &["pgup"]);
     assert_eq!(help_scroll(&m), 0);
@@ -2776,26 +2782,36 @@ fn menu_next_prev_non_null() {
     let n = doc.new_num("1");
     let _ = doc.set(&sp(&["extra"]), n);
     let mut m = mk_app(doc, test_opts());
-    press(&mut m, &["ctrl+j"]);
-    assert_eq!(
-        cursor(&mut m),
-        1,
-        "ctrl+j from the issues row lands on Name"
-    );
-    press(&mut m, &["ctrl+j"]);
-    assert_eq!(cursor(&mut m), 3, "ctrl+j skips the explicit null mode");
-    press(&mut m, &["ctrl+j"]);
-    assert_eq!(cursor(&mut m), 5, "ctrl+j skips unset Logging/Auth");
-    press(&mut m, &["ctrl+j"]);
+    press(&mut m, &["n"]);
+    assert_eq!(cursor(&mut m), 1, "n from the issues row lands on Name");
+    press(&mut m, &["n"]);
+    assert_eq!(cursor(&mut m), 3, "n skips the explicit null mode");
+    press(&mut m, &["n"]);
+    assert_eq!(cursor(&mut m), 5, "n skips unset Logging/Auth");
+    press(&mut m, &["n"]);
     let r = row_at(&mut m);
     assert_eq!(r.kind, RowKind::Unknown);
+    assert_eq!(r.path, sp(&["extra"]), "n lands on the set unknown key");
+    press(&mut m, &["n"]);
+    assert_eq!(cursor(&mut m), 1, "n wraps to Name");
+
+    // warnings are live issues, so ctrl+j cycles the flagged keys instead of
+    // walking non-null rows
+    assert_eq!(m.fs().issues_now.len(), 2);
+    press(&mut m, &["ctrl+j"]);
     assert_eq!(
-        r.path,
-        sp(&["extra"]),
-        "ctrl+j lands on the set unknown key"
+        row_at(&mut m).path,
+        sp(&["null_extra"]),
+        "ctrl+j jumps to the first warning key"
     );
     press(&mut m, &["ctrl+j"]);
-    assert_eq!(cursor(&mut m), 1, "ctrl+j wraps to Name");
+    assert_eq!(row_at(&mut m).path, sp(&["extra"]));
+    press(&mut m, &["ctrl+k"]);
+    assert_eq!(
+        row_at(&mut m).path,
+        sp(&["null_extra"]),
+        "ctrl+k wraps back"
+    );
 
     // no non-null keys: n/N leave the cursor alone
     let schema = schema_build(|b| {
@@ -2861,6 +2877,271 @@ fn menu_next_prev_non_null() {
     assert_eq!(cursor_cursor(&mut im), 2);
     press(&mut im, &["ctrl+k"]);
     assert_eq!(cursor_cursor(&mut im), 1);
+}
+
+#[test]
+fn undo_relands_changed_key_and_ctrl_j_wraps_ring() {
+    let doc = dbuild(|db| db.obj(vec![("a", db.s("1")), ("b", db.s("2")), ("c", db.s("3"))]));
+    let mut m = app_with(crate::smodel::untyped(&doc), doc, test_opts());
+
+    // two edits; undo reverts the latest one and must land on its key
+    for (key, val) in [(&["b"], "B2"), (&["a"], "A2")] {
+        set_cursor_path(&mut m, &sp(key));
+        press(&mut m, &["enter"]);
+        if let Some(Overlay::Edit(e)) = &mut m.overlay {
+            e.ti.set_value(val);
+        }
+        press(&mut m, &["enter"]);
+    }
+    press(&mut m, &["u"]);
+    assert_eq!(sget(&m.fs().doc, &sp(&["a"])), "1");
+    assert_eq!(row_at(&mut m).path, sp(&["a"]), "undo lands on the change");
+    assert_eq!(m.fs().change_jump, Some(vec![sp(&["a"])]));
+
+    // a single-entry ring wraps on both directions
+    press(&mut m, &["ctrl+j"]);
+    assert_eq!(row_at(&mut m).path, sp(&["a"]));
+    press(&mut m, &["ctrl+k"]);
+    assert_eq!(row_at(&mut m).path, sp(&["a"]));
+}
+
+#[test]
+fn undo_of_array_move_rings_both_moved_indices() {
+    let arr_idx = |i: usize| vec![ks("items"), PathSeg::Idx(i)];
+    let schema = schema_build(|b| {
+        let it = b.id(scalar("items", "", "string"));
+        let items = b.id(FormNode {
+            key: "items".into(),
+            title: "Items".into(),
+            kind: Kind::Array,
+            items: Some(it),
+            ..FormNode::default()
+        });
+        b.id(FormNode {
+            key: "$".into(),
+            title: "$".into(),
+            kind: Kind::Object,
+            children: vec![items],
+            ..FormNode::default()
+        })
+    });
+    let doc = dbuild(|db| {
+        db.obj(vec![(
+            "items",
+            db.arr(vec![db.s("a"), db.s("b"), db.s("c")]),
+        )])
+    });
+    let mut m = app_with(schema, doc, test_opts());
+    press(&mut m, &["enter"]);
+    press(&mut m, &["J"]);
+    assert_eq!(
+        sget(&m.fs().doc, &[ks("items"), PathSeg::Idx(0)]),
+        "b",
+        "J moved the first item down"
+    );
+
+    // undo restores the order; both moved indices form the ctrl+j/k ring
+    press(&mut m, &["u"]);
+    assert_eq!(row_at(&mut m).path, arr_idx(0), "lands on the first change");
+    assert_eq!(
+        m.fs().change_jump,
+        Some(vec![arr_idx(0), arr_idx(1)]),
+        "the unchanged tail must not enter the ring"
+    );
+    press(&mut m, &["ctrl+j"]);
+    assert_eq!(row_at(&mut m).path, arr_idx(1));
+    press(&mut m, &["ctrl+j"]);
+    assert_eq!(row_at(&mut m).path, arr_idx(0), "wraps at the ring end");
+}
+
+#[test]
+fn replace_all_lands_on_first_replaced_and_ctrl_j_cycles() {
+    let doc = dbuild(|db| {
+        db.obj(vec![
+            ("name", db.s("alpha")),
+            (
+                "server",
+                db.obj(vec![
+                    ("host", db.s("alpha.example.com")),
+                    ("port", db.n("8080")),
+                ]),
+            ),
+        ])
+    });
+    let mut m = items_app(doc);
+    press(
+        &mut m,
+        &[
+            "r", "a", "l", "p", "h", "a", "tab", "b", "e", "t", "a", "ctrl+a",
+        ],
+    );
+    assert_eq!(m.notice, "replaced 2 occurrence(s) in 2 value(s)");
+    assert_eq!(
+        row_at(&mut m).path,
+        sp(&["name"]),
+        "replace-all lands on the first replaced value"
+    );
+    press(&mut m, &["ctrl+j"]);
+    assert_eq!(row_at(&mut m).path, sp(&["server", "host"]));
+    press(&mut m, &["ctrl+k"]);
+    assert_eq!(row_at(&mut m).path, sp(&["name"]));
+}
+
+#[test]
+fn issues_drive_ctrl_j_without_a_ring() {
+    let doc = test_doc();
+    let mut opts = test_opts();
+    opts.load_errors = live_check(&doc);
+    opts.validate = Some(Arc::new(|d: &Doc| live_check(d)));
+    let mut m = mk_app(doc, opts);
+
+    press(&mut m, &["ctrl+j"]);
+    assert_eq!(
+        row_at(&mut m).path,
+        sp(&["server", "port"]),
+        "first issue key in validator order"
+    );
+    press(&mut m, &["ctrl+j"]);
+    assert_eq!(row_at(&mut m).path, sp(&["name"]));
+    press(&mut m, &["ctrl+k"]);
+    assert_eq!(row_at(&mut m).path, sp(&["server", "port"]));
+}
+
+#[test]
+fn search_hits_drive_ctrl_j_after_a_jump() {
+    let doc = dbuild(|db| {
+        db.obj(vec![
+            ("name", db.s("alpha")),
+            ("server", db.obj(vec![("host", db.s("alpha.example.com"))])),
+        ])
+    });
+    let mut m = items_app(doc);
+    press(&mut m, &["/", "a", "l", "p", "h", "a"]);
+    assert_eq!(search_state(&m).results.len(), 2);
+    press(&mut m, &["enter"]);
+    assert_eq!(row_at(&mut m).path, sp(&["name"]));
+    press(&mut m, &["ctrl+j"]);
+    assert_eq!(
+        row_at(&mut m).path,
+        sp(&["server", "host"]),
+        "ctrl+j continues through the parked search hits"
+    );
+    press(&mut m, &["ctrl+k"]);
+    assert_eq!(row_at(&mut m).path, sp(&["name"]));
+}
+
+#[test]
+fn ctrl_j_priority_ring_then_issues_then_search() {
+    let doc = test_doc();
+    let mut opts = test_opts();
+    opts.load_errors = live_check(&doc);
+    opts.validate = Some(Arc::new(|d: &Doc| live_check(d)));
+    let mut m = mk_app(doc, opts);
+
+    // park a search (two hits: server.port and server.host)
+    press(&mut m, &["/", "0"]);
+    assert_eq!(search_state(&m).results.len(), 2);
+    press(&mut m, &["enter"]);
+    assert_eq!(row_at(&mut m).path, sp(&["server", "port"]));
+
+    // scenario a beats b and c
+    m.fs_mut().change_jump = Some(vec![sp(&["mounts"])]);
+    press(&mut m, &["ctrl+j"]);
+    assert_eq!(row_at(&mut m).path, sp(&["mounts"]));
+
+    // scenario b beats c
+    m.fs_mut().change_jump = None;
+    press(&mut m, &["ctrl+j"]);
+    assert_eq!(row_at(&mut m).path, sp(&["server", "port"]));
+
+    // scenario c: no ring, no issues
+    m.fs_mut().opts.validate = None;
+    m.fs_mut().issues_now.clear();
+    press(&mut m, &["ctrl+j"]);
+    assert_eq!(row_at(&mut m).path, sp(&["server", "host"]));
+}
+
+#[test]
+fn edit_clears_the_change_ring_and_ctrl_j_falls_back() {
+    let doc = dbuild(|db| db.obj(vec![("a", db.s("1")), ("b", db.s("2"))]));
+    let mut m = app_with(crate::smodel::untyped(&doc), doc, test_opts());
+    set_cursor_path(&mut m, &sp(&["b"]));
+    press(&mut m, &["enter"]);
+    if let Some(Overlay::Edit(e)) = &mut m.overlay {
+        e.ti.set_value("B2");
+    }
+    press(&mut m, &["enter"]);
+    press(&mut m, &["u"]);
+    assert_eq!(row_at(&mut m).path, sp(&["b"]));
+
+    // an unrelated edit invalidates the ring
+    set_cursor_path(&mut m, &sp(&["a"]));
+    press(&mut m, &["enter"]);
+    if let Some(Overlay::Edit(e)) = &mut m.overlay {
+        e.ti.set_value("9");
+    }
+    press(&mut m, &["enter"]);
+    assert!(m.fs().change_jump.is_none(), "edit must clear the ring");
+
+    // fallback matches n/N
+    set_cursor_path(&mut m, &sp(&["a"]));
+    press(&mut m, &["n"]);
+    let n_pos = cursor_cursor(&mut m);
+    set_cursor_path(&mut m, &sp(&["a"]));
+    press(&mut m, &["ctrl+j"]);
+    assert_eq!(cursor_cursor(&mut m), n_pos, "fallback matches n/N");
+}
+
+#[test]
+fn a_inserts_after_and_A_inserts_before_array_items() {
+    let schema = schema_build(|b| {
+        let it = b.id(scalar("items", "", "string"));
+        let items = b.id(FormNode {
+            key: "items".into(),
+            title: "Items".into(),
+            kind: Kind::Array,
+            items: Some(it),
+            ..FormNode::default()
+        });
+        b.id(FormNode {
+            key: "$".into(),
+            title: "$".into(),
+            kind: Kind::Object,
+            children: vec![items],
+            ..FormNode::default()
+        })
+    });
+    let doc = dbuild(|db| db.obj(vec![("items", db.arr(vec![db.s("a"), db.s("b")]))]));
+    let mut m = app_with(schema, doc, test_opts());
+    press(&mut m, &["enter"]);
+
+    // a: after the cursor item
+    set_cursor_path(&mut m, &[ks("items"), PathSeg::Idx(0)]);
+    press(&mut m, &["a"]);
+    assert!(matches!(m.overlay, Some(Overlay::Edit(_))));
+    press(&mut m, &["esc"]);
+    assert_eq!(arr_len(&m.fs().doc, &sp(&["items"])), 3);
+    assert!(matches!(
+        m.fs()
+            .doc
+            .value(getv(&m.fs().doc, &[ks("items"), PathSeg::Idx(1)]).expect("idx1")),
+        Value::Null,
+    ));
+    assert_eq!(sget(&m.fs().doc, &[ks("items"), PathSeg::Idx(2)]), "b");
+
+    // A: before the cursor item
+    set_cursor_path(&mut m, &[ks("items"), PathSeg::Idx(2)]);
+    press(&mut m, &["A"]);
+    assert!(matches!(m.overlay, Some(Overlay::Edit(_))));
+    press(&mut m, &["esc"]);
+    assert_eq!(arr_len(&m.fs().doc, &sp(&["items"])), 4);
+    assert!(matches!(
+        m.fs()
+            .doc
+            .value(getv(&m.fs().doc, &[ks("items"), PathSeg::Idx(2)]).expect("idx2")),
+        Value::Null,
+    ));
+    assert_eq!(sget(&m.fs().doc, &[ks("items"), PathSeg::Idx(3)]), "b");
 }
 
 fn render_path(p: &[PathSeg]) -> String {
@@ -4283,10 +4564,12 @@ fn batch_value_paste() {
         nodes_equal_doc(&test_doc(), &m.fs().doc),
         "one undo must restore the batch"
     );
+    // undo lands on the first pasted key
+    assert_eq!(row_at(&mut m).path, sp(&["name"]));
 
     press(&mut m, &["P"]);
-    assert_eq!(m.notice, "pasted value into $.mode");
-    assert_eq!(num_at(&m.fs().doc, &["mode"]), "123");
+    assert_eq!(m.notice, "pasted value into $.name");
+    assert_eq!(num_at(&m.fs().doc, &["name"]), "123");
 }
 
 // ===========================================================================
@@ -9746,7 +10029,7 @@ fn edit_completion() {
     });
     let mut m = items_app(doc);
     press(&mut m, &["down", "down", "down", "down", "enter"]);
-    press(&mut m, &["G", "A"]);
+    press(&mut m, &["G", "a"]);
     press(&mut m, &["enter"]);
     match &m.overlay {
         Some(Overlay::Edit(e)) => {
@@ -10207,9 +10490,9 @@ fn tags_items_model() -> (App, Doc) {
 
 #[test]
 fn insert_item_around_cursor() {
-    // A after item 0
+    // a after item 0
     let (mut m, _) = tags_items_model();
-    press(&mut m, &["A"]);
+    press(&mut m, &["a"]);
     assert!(matches!(m.overlay, Some(Overlay::Edit(_))));
     press(&mut m, &["x", "enter"]);
     assert_eq!(
@@ -10222,9 +10505,9 @@ fn insert_item_around_cursor() {
         ]
     );
 
-    // a before item 1
+    // A before item 1
     let (mut m, _) = tags_items_model();
-    press(&mut m, &["down", "a"]);
+    press(&mut m, &["down", "A"]);
     press(&mut m, &["x", "enter"]);
     assert_eq!(
         arr_strs(&m.fs().doc, &sp(&["logging", "tags"])),
@@ -10236,9 +10519,9 @@ fn insert_item_around_cursor() {
         ]
     );
 
-    // A after the last item appends
+    // a after the last item appends
     let (mut m, _) = tags_items_model();
-    press(&mut m, &["down", "down", "A"]);
+    press(&mut m, &["down", "down", "a"]);
     press(&mut m, &["x", "enter"]);
     assert_eq!(
         arr_strs(&m.fs().doc, &sp(&["logging", "tags"])),
@@ -10250,7 +10533,7 @@ fn insert_item_around_cursor() {
         ]
     );
 
-    // object items: A splices an empty container at idx+1 and drills in
+    // object items: a splices an empty container at idx+1 and drills in
     let doc2 = dbuild(|db| {
         db.obj(vec![(
             "mounts",
@@ -10262,7 +10545,7 @@ fn insert_item_around_cursor() {
     });
     let mut m2 = items_app(doc2);
     press(&mut m2, &["down", "down", "down", "down", "enter"]);
-    press(&mut m2, &["A"]);
+    press(&mut m2, &["a"]);
     assert_eq!(m2.top().unwrap().kind, MenuKind::Object);
     assert_eq!(m2.top().unwrap().path, vec![ks("mounts"), PathSeg::Idx(1)]);
     assert_eq!(arr_len(&m2.fs().doc, &sp(&["mounts"])), 3);

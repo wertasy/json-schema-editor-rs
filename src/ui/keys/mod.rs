@@ -1257,6 +1257,7 @@ impl App {
         f.issues_return = 0;
         f.issues_origin = None;
         f.search_parked = None;
+        f.change_jump = None;
         f.jump_origin = None;
         f.jump_return = 0;
         f.stack = crate::ui::files::root_stack(&f.schema, &f.doc);
@@ -1327,8 +1328,10 @@ impl App {
             }
             "pgdown" | "ctrl+f" => self.move_page_rows(1, &rows),
             "pgup" | "ctrl+b" => self.move_page_rows(-1, &rows),
-            "ctrl+j" | "n" => self.move_to_value(&rows, 1),
-            "ctrl+k" | "N" => self.move_to_value(&rows, -1),
+            "ctrl+j" => self.adaptive_jump(&rows, 1),
+            "ctrl+k" => self.adaptive_jump(&rows, -1),
+            "n" => self.move_to_value(&rows, 1),
+            "N" => self.move_to_value(&rows, -1),
             // y/p/P/x/X/d act on the selection: a live visual select ends
             // first, then the operation runs on the marks
             "p" => {
@@ -1478,14 +1481,14 @@ impl App {
             }
             "a" => {
                 if st_kind == Some(MenuKind::Items) {
-                    self.insert_item(&r, false);
+                    self.insert_item(&r, true);
                 } else {
                     self.add_key(&r, false);
                 }
             }
             "A" => {
                 if st_kind == Some(MenuKind::Items) {
-                    self.insert_item(&r, true);
+                    self.insert_item(&r, false);
                 } else {
                     self.add_key(&r, true);
                 }
