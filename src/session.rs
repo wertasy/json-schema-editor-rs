@@ -232,6 +232,7 @@ pub(crate) fn load_session(
         copy: None,
         paste: None,
         load_schema: Some(Arc::new(|loc: &str| compile_schema(loc))),
+        cmd_history_file: fetch::cache_file("cmd-history"),
         status: status.join("\n"),
         startup_notice: startup.join("\n"),
         load_errors,

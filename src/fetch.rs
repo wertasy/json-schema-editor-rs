@@ -707,6 +707,13 @@ pub(crate) fn cache_path(loc: &str) -> Option<PathBuf> {
     Some(dir.join("fetch").join(hex(&sum)))
 }
 
+/// cacheFile returns a plain file under the cache root for auxiliary
+/// session state (the `:` command history); None when caching is
+/// unavailable. Unlike cachePath the name is used verbatim.
+pub(crate) fn cache_file(name: &str) -> Option<PathBuf> {
+    Some(cache_dir()?.join(name))
+}
+
 /// readCache returns the cached entry and body of loc (None when absent,
 /// unreadable or not matching loc).
 fn read_cache(loc: &str) -> (Option<CacheEntry>, Vec<u8>) {

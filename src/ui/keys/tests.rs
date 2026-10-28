@@ -10452,6 +10452,59 @@ fn command_history_recalls_and_bang_bang_reruns_the_last_shell_command() {
 }
 
 #[test]
+fn command_history_persists_to_the_options_file_and_reloads() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("cmd-history");
+    let mut opts = test_opts();
+    opts.cmd_history_file = Some(file.clone());
+    let mut app = app_with(shell_schema(), shell_doc(), opts);
+    press(&mut app, &[":"]);
+    press(&mut app, &["r !echo one"]);
+    press(&mut app, &["enter"]);
+    assert_eq!(str_at(&app.doc(), &["name"]), "one");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "r !echo one\n");
+
+    // `!!` reruns without adding an entry or rewriting the file.
+    press(&mut app, &[":"]);
+    press(&mut app, &["!!"]);
+    press(&mut app, &["enter"]);
+    assert_eq!(str_at(&app.doc(), &["name"]), "one");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "r !echo one\n");
+
+    // A fresh session seeds its history from the file and recalls it.
+    let mut opts = test_opts();
+    opts.cmd_history_file = Some(file);
+    let mut app = app_with(shell_schema(), shell_doc(), opts);
+    assert_eq!(app.cmd_history, vec!["r !echo one"]);
+    press(&mut app, &[":"]);
+    press(&mut app, &["up"]);
+    assert_eq!(command_value(&app), "r !echo one");
+}
+
+#[test]
+fn command_history_record_caps_memory_and_file_at_100_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("cmd-history");
+    let mut opts = test_opts();
+    opts.cmd_history_file = Some(file.clone());
+    let mut app = app_with(shell_schema(), shell_doc(), opts);
+    for i in 0..101 {
+        press(&mut app, &[":"]);
+        press(&mut app, &[&format!("r !echo {i}")]);
+        press(&mut app, &["enter"]);
+    }
+    assert_eq!(app.cmd_history.len(), MAX_CMD_HISTORY);
+    assert_eq!(app.cmd_history[0], "r !echo 1", "oldest entry drops first");
+    assert_eq!(app.cmd_history[99], "r !echo 100");
+    let lines: Vec<String> = std::fs::read_to_string(&file)
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect();
+    assert_eq!(lines, app.cmd_history, "file mirrors the capped ring");
+}
+
+#[test]
 fn command_repeat_without_history_never_runs_a_literal_bang_command() {
     let mut app = app_with(shell_schema(), shell_doc(), test_opts());
     press(&mut app, &[":"]);

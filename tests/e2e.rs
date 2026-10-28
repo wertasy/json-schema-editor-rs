@@ -546,6 +546,50 @@ fn pty_schema_less_whole_doc_edit_rebuilds_root() {
 }
 
 #[test]
+fn pty_command_history_persists_across_sessions() {
+    let dir = mktemp();
+    let cfg = dir.path().join("cfg.json");
+    write_file(&cfg, r#"{"name":"x"}"#);
+    let cache = mktemp();
+    let cfg_arg = arg(&cfg);
+    let Some(mut pty) = pty_or_skip(
+        &[cfg_arg.as_str()],
+        &[("JSE_CATALOG_URL", "http://127.0.0.1:1/catalog.json")],
+        &cache,
+    ) else {
+        return;
+    };
+    let (_snap, mut off) = pty.wait_frame("schema-less root", 0, &["no schema found", "name"]);
+
+    // One shell escape; its line lands in the persistent history file.
+    pty.send(b":!echo jse-hist-marker\r");
+    (_, off) = pty.wait_frame("shell output shown", off, &["jse-hist-marker"]);
+    assert_eq!(
+        read_text(&cache.path().join("cmd-history")),
+        "!echo jse-hist-marker\n",
+        "the executed command must be persisted immediately"
+    );
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+
+    // A second session over the same cache recalls it with up.
+    let Some(mut pty) = pty_or_skip(
+        &[cfg_arg.as_str()],
+        &[("JSE_CATALOG_URL", "http://127.0.0.1:1/catalog.json")],
+        &cache,
+    ) else {
+        return;
+    };
+    pty.wait_frame("second session root", 0, &["name"]);
+    pty.send(b":");
+    pty.pause(Duration::from_millis(150));
+    pty.send(b"\x1b[A"); // up
+    pty.wait_frame("history recalled", 0, &["!echo jse-hist-marker"]);
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+}
+
+#[test]
 fn pty_json_and_yaml_titles_match_toml_behavior() {
     let schema_src = r#"{
       "type": "object",

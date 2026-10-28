@@ -16,6 +16,7 @@
 //! the file state with `NodeId`s into it.
 
 pub mod accessible;
+pub mod cmd_history;
 pub mod command;
 pub mod files;
 pub mod history;
@@ -89,6 +90,10 @@ pub struct Options {
     /// LoadSchema compiles a schema location for the S picker; None disables
     /// schema switching.
     pub load_schema: Option<Arc<dyn Fn(&str) -> Result<LoadedSchema, String> + Send + Sync>>,
+    /// CmdHistoryFile persists executed `:` commands across sessions (one
+    /// line each, oldest first, under the jse cache dir). None keeps the
+    /// history session-only. Session-only in Go; a jse extension.
+    pub cmd_history_file: Option<std::path::PathBuf>,
     /// Status is a warning line shown on the root screen (e.g. compile
     /// failure).
     pub status: String,
@@ -111,6 +116,7 @@ impl Default for Options {
             copy: None,
             paste: None,
             load_schema: None,
+            cmd_history_file: None,
             status: String::new(),
             startup_notice: String::new(),
             load_errors: Vec::new(),

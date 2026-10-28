@@ -656,10 +656,7 @@ impl App {
                 // `!!` repeats the previous shell command without adding a
                 // history entry of its own.
                 if line != "!!" {
-                    self.cmd_history.push(line.clone());
-                    if self.cmd_history.len() > MAX_CMD_HISTORY {
-                        self.cmd_history.remove(0);
-                    }
+                    self.record_cmd_history(line.clone());
                 }
                 self.execute_command(&line);
                 // a bare command's multi-line output installs its page here
@@ -698,6 +695,20 @@ impl App {
                 }
                 Some(Overlay::Command(s))
             }
+        }
+    }
+
+    /// record_cmd_history appends one executed line, caps the ring and
+    /// persists through Options::cmd_history_file; a failed write only
+    /// loses persistence, never the session history.
+    pub(super) fn record_cmd_history(&mut self, line: String) {
+        self.cmd_history.push(line);
+        if self.cmd_history.len() > MAX_CMD_HISTORY {
+            self.cmd_history.remove(0);
+        }
+        let file = self.opts().cmd_history_file.clone();
+        if let Some(file) = file {
+            crate::ui::cmd_history::store(&file, &self.cmd_history);
         }
     }
 

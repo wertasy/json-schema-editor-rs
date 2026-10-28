@@ -75,6 +75,8 @@ src/ui/
   schema_picker.rs   SchemaStore picker (TUI + accessible)
   command.rs         vi-style `:` grammar: builtins (w/wa/wq/waq, q/q!), shell
                      escapes, cursor-aware completion, `%` expansion
+  cmd_history.rs     persistent `:` command history file (load/store; a jse
+                     extension, no Go counterpart; path arrives via Options)
   shell.rs           shell execution: `r !` stdout insert, `a !` line append,
                      `w !` document-to-stdin, `!` execute
 tests/

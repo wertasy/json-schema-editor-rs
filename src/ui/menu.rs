@@ -324,7 +324,7 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
     },
     HelpEntry {
         keys: ":",
-        desc: "command line: w saves, wa saves all dirty files, wq saves and quits, waq saves all and quits (append ! to force), q quits, q! discards and quits; r !<cmd> inserts stdout into the focused value, a !<cmd> appends stdout lines to a string array, w !<cmd> pipes the document to stdin, !<cmd> only runs; tab completes builtins or (after !) PATH commands and paths, % expands to the session file path; candidates appear automatically and filter as you type; ↑/↓ are history until a candidate is selected; !!+enter repeats the last shell command; multi-line output stays an inline multi-line notice when it fits the blank rows above the help bar, else opens a scrollable page (j/k, PgUp/PgDn, q/esc)",
+        desc: "command line: w saves, wa saves all dirty files, wq saves and quits, waq saves all and quits (append ! to force), q quits, q! discards and quits; r !<cmd> inserts stdout into the focused value, a !<cmd> appends stdout lines to a string array, w !<cmd> pipes the document to stdin, !<cmd> only runs; tab completes builtins or (after !) PATH commands and paths, % expands to the session file path; candidates appear automatically and filter as you type; ↑/↓ are history until a candidate is selected; history persists across sessions (cache dir); !!+enter repeats the last shell command; multi-line output stays an inline multi-line notice when it fits the blank rows above the help bar, else opens a scrollable page (j/k, PgUp/PgDn, q/esc)",
     },
 ];
 
@@ -845,14 +845,22 @@ pub struct App {
     pub exec_editor: bool,
     /// pending $EDITOR target stashed for the event loop (or tests)
     pub pending_edit: Option<ExternalEdit>,
-    /// `:` command lines executed this session, oldest first
+    /// `:` command lines executed, oldest first; seeded from and persisted
+    /// to Options::cmd_history_file, so it spans sessions
     pub cmd_history: Vec<String>,
 }
 
 impl App {
     /// bare builds the shell other constructors fill in (files already
-    /// converted to FileState).
+    /// converted to FileState). The `:` command history is seeded from the
+    /// first file's Options::cmd_history_file, so up/down recall the
+    /// previous sessions' commands.
     pub fn bare(files: Vec<FileState>) -> App {
+        let cmd_history = files
+            .first()
+            .and_then(|f| f.opts.cmd_history_file.as_deref())
+            .map(crate::ui::cmd_history::load)
+            .unwrap_or_default();
         App {
             files,
             cur: 0,
@@ -872,7 +880,7 @@ impl App {
             exiting: false,
             exec_editor: false,
             pending_edit: None,
-            cmd_history: Vec::new(),
+            cmd_history,
         }
     }
 

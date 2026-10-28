@@ -92,7 +92,7 @@ jse --accessible -s examples/server.schema.json new.json
 
 | 变量 | 作用 |
 |---|---|
-| `JSE_CACHE_DIR` | 覆盖远端 schema / SchemaStore 目录缓存目录。默认 `$XDG_CACHE_HOME/jse`（通常 `~/.cache/jse`）。目录不可写时静默不缓存。 |
+| `JSE_CACHE_DIR` | 覆盖远端 schema / SchemaStore 目录缓存目录，`:` 命令历史文件（`cmd-history`）也存在这里。默认 `$XDG_CACHE_HOME/jse`（通常 `~/.cache/jse`）。目录不可写时静默不缓存。 |
 | `JSE_CATALOG_URL` | 覆盖 SchemaStore 目录地址，用于测试或内网镜像。 |
 | `EDITOR` / `VISUAL` | 外部编辑器；都没有时用 `vi`。 |
 | `HTTPS_PROXY` / `https_proxy`、`HTTP_PROXY` / `http_proxy`、`ALL_PROXY` / `all_proxy` | 远端请求代理，按此顺序取第一个非空值。 |
