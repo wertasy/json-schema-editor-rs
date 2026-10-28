@@ -64,7 +64,10 @@ fn cmd_sug_refresh(s: &mut CommandState, file_path: &str) {
     s.sug_line.clear();
     s.sug_start = done.start;
     s.sug_end = cursor;
-    s.sug_col = display_width(&s.ti.value()[..s.ti.cursor_byte()]);
+    // The candidate window aligns with the word being completed: deriving
+    // the anchor from the token start keeps the window still while the user
+    // types inside one word; a separator that starts a new word re-anchors.
+    s.sug_col = display_width(&s.ti.value()[..s.sug_start]);
 }
 
 /// cmd_complete applies the next/previous completion. A fresh cycle scans the
@@ -224,13 +227,20 @@ fn completion_candidate(v: &str) -> bool {
     !v.is_empty() && !v.contains('\r') && !v.contains('\n')
 }
 
-/// filterCompletions keeps candidates starting with prefix
-/// (case-insensitive); an empty prefix keeps everything.
+/// filterCompletions keeps candidates starting with prefix (case-insensitive)
+/// but not equal to it: a candidate identical to what the user typed has no
+/// differing tail to offer. An empty prefix keeps everything.
 fn filter_completions(cands: &[String], prefix: &str) -> Vec<String> {
     let lp = prefix.to_lowercase();
     cands
         .iter()
-        .filter(|c| completion_candidate(c) && (lp.is_empty() || c.to_lowercase().starts_with(&lp)))
+        .filter(|c| {
+            completion_candidate(c)
+                && (lp.is_empty() || {
+                    let lc = c.to_lowercase();
+                    lc.starts_with(&lp) && lc != lp
+                })
+        })
         .cloned()
         .collect()
 }

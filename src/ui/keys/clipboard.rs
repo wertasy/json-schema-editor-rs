@@ -101,6 +101,7 @@ impl App {
                 s.ti.insert_str(&text);
                 s.sug = -1;
                 s.sug_prefix = s.ti.value().to_string();
+                s.sug_col = display_width(&s.ti.value()[..s.ti.cursor_byte()]);
                 s.sugs = Self::anchor_filtered(&s);
                 s.sug_line.clear();
                 self.overlay = Some(Overlay::Anc(s));

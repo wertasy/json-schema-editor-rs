@@ -435,7 +435,8 @@ pub struct EditState {
     /// tab cycle position (-1 = none)
     pub sug_idx: i64,
     /// display column of the caret when the current suggestion list was
-    /// built; the candidate window's left edge is anchored there
+    /// built; the anchor for `…tail` candidate rows (full rows anchor at
+    /// the input text start)
     pub sug_col: usize,
 }
 
@@ -460,6 +461,10 @@ pub struct WriteState {
     pub sug_prefix: String,
     pub sugs: Vec<String>,
     pub sug_idx: i64,
+    /// display column of the caret when the candidate list was rebuilt;
+    /// the anchor for `…tail` candidate rows (full rows anchor at the
+    /// input text start)
+    pub sug_col: usize,
 }
 
 /// CommandState is the `:` command input: one line at the bottom, with
@@ -483,8 +488,9 @@ pub struct CommandState {
     /// byte range of the current line owned by the selected candidate
     pub sug_start: usize,
     pub sug_end: usize,
-    /// display column of the caret when the current suggestion list was
-    /// built; the candidate window's left edge is anchored there
+    /// display column of the completed word's start; the candidate window's
+    /// left edge is anchored there (typing inside the word never moves it,
+    /// a separator that starts a new word re-anchors)
     pub sug_col: usize,
 }
 
@@ -696,6 +702,10 @@ pub struct AnchorState {
     pub sug_line: String,
     /// completion cursor, -1 when nothing selected
     pub sug: i64,
+    /// display column of the caret when the candidate list was rebuilt;
+    /// the anchor for `…tail` candidate rows (full rows anchor at the
+    /// input text start)
+    pub sug_col: usize,
     pub err: String,
 }
 
@@ -1509,6 +1519,7 @@ impl App {
             sug_prefix: String::new(),
             sugs: Vec::new(),
             sug_idx: -1,
+            sug_col: 0,
         }));
         self.refresh_write_suggestions();
     }

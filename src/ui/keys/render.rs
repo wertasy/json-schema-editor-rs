@@ -274,6 +274,16 @@ impl App {
         (start, start + max, sel, selected)
     }
 
+    /// sug_strip_active reports whether the visible candidate window renders
+    /// the `…tail` form: a long typed prefix hidden behind the ellipsis and
+    /// more than one visible row. Such rows anchor at the caret so the
+    /// visible tails stay next to the input position; full rows anchor at
+    /// the word/input start.
+    fn sug_strip_active(sugs: &[String], idx: i64, query: &str, max: usize) -> bool {
+        let (start, end, ..) = Self::suggestion_slice(sugs, idx, max);
+        end - start > 1 && query.chars().count() >= SUG_STRIP_PREFIX_MIN
+    }
+
     /// suggestion_rect_width is the rectangle width suggestion_overlay_lines
     /// draws for these candidates within `avail` cells (0 when nothing
     /// shows). Placement asks for it first so a caret-anchored window can
@@ -294,7 +304,7 @@ impl App {
             .iter()
             .map(|raw| {
                 let shown = match strip.then(|| strip_query(raw, query)).flatten() {
-                    Some(tail) if !tail.is_empty() => format!("…{tail}"),
+                    Some(tail) if !tail.is_empty() => tail.to_string(),
                     _ => raw.clone(),
                 };
                 display_width(&shown)
@@ -320,13 +330,16 @@ impl App {
         }
         let (start, end, sel, selected) = Self::suggestion_slice(sugs, idx, max);
         // Hide the already-typed leading text when it is long enough; the
-        // differing tail is what the user still needs to choose between.
+        // differing tail is what the user still needs to choose between. No
+        // `…` marks the hidden prefix — that marker belongs to
+        // clip_left_ellipsis, which cuts only when the shown text does not
+        // fit the width.
         let strip = end - start > 1 && query.chars().count() >= SUG_STRIP_PREFIX_MIN;
         let displays: Vec<String> = (start..end)
             .map(|i| {
                 let raw = &sugs[i];
                 match strip.then(|| strip_query(raw, query)).flatten() {
-                    Some(tail) if !tail.is_empty() => format!("…{tail}"),
+                    Some(tail) if !tail.is_empty() => tail.to_string(),
                     _ => raw.clone(),
                 }
             })
@@ -402,19 +415,25 @@ impl App {
             } else {
                 -1
             };
-        // Anchor the window at the caret column recorded when the list was
-        // built — the same caret-following rectangle the inline edit input
-        // draws. The input viewport may have scrolled since (a long command
-        // on a narrow terminal), so the anchor moves with the visible
-        // window; when the rectangle would run past the right edge it
-        // slides left so every candidate stays on screen.
+        // Full candidate rows anchor at the completed word's start column
+        // (sug_col); `…tail` rows anchor at the caret recorded when the
+        // list was built, so the visible tails stay next to the input
+        // position. The input viewport may have scrolled since (a long
+        // command on a narrow terminal), so the anchor maps through the
+        // visible window; when the rectangle would run past the right edge
+        // it slides left so every candidate stays on screen.
         let text_left = display_width(":");
         let (_, _, shift) = ti_window(&s.ti, input_avail(self.width.saturating_sub(1), text_left));
         let line_right = self.width.saturating_sub(1);
         let rect =
             Self::suggestion_rect_width(&s.sug, idx, &s.sug_prefix, CMD_SUG_WINDOW, line_right);
-        let left =
-            (text_left + s.sug_col.saturating_sub(shift)).min(line_right.saturating_sub(rect));
+        let value = s.ti.value();
+        let base = if Self::sug_strip_active(&s.sug, idx, &s.sug_prefix, CMD_SUG_WINDOW) {
+            display_width(&value[..s.sug_end.min(value.len())])
+        } else {
+            s.sug_col
+        };
+        let left = (text_left + base.saturating_sub(shift)).min(line_right.saturating_sub(rect));
         let lines = Self::suggestion_overlay_lines(
             &s.sug,
             idx,
@@ -435,14 +454,31 @@ impl App {
         if w.sugs.is_empty() {
             return Vec::new();
         }
-        let left = display_width(&self.title_col("Write to", title_width));
+        let text_left = display_width(&self.title_col("Write to", title_width));
+        let (_, _, shift) = ti_window(&w.ti, input_avail(self.width.saturating_sub(1), text_left));
+        let line_right = self.width.saturating_sub(1);
+        let rect = Self::suggestion_rect_width(
+            &w.sugs,
+            w.sug_idx,
+            &w.sug_prefix,
+            CMD_SUG_WINDOW,
+            line_right,
+        );
+        // Full candidate rows anchor at the input text start; `…tail` rows
+        // anchor at the caret recorded when the list was rebuilt.
+        let base = if Self::sug_strip_active(&w.sugs, w.sug_idx, &w.sug_prefix, CMD_SUG_WINDOW) {
+            w.sug_col
+        } else {
+            0
+        };
+        let left = (text_left + base.saturating_sub(shift)).min(line_right.saturating_sub(rect));
         let lines = Self::suggestion_overlay_lines(
             &w.sugs,
             w.sug_idx,
             &w.sug_prefix,
             CMD_SUG_WINDOW,
             left,
-            self.width.saturating_sub(1),
+            line_right,
         );
         Self::indent_overlay(lines, left)
     }
@@ -946,22 +982,26 @@ impl App {
         let needed = e.sugs.len().min(CMD_SUG_WINDOW);
         let use_above = below < needed && above > below;
         let capacity = if use_above { above } else { below }.min(CMD_SUG_WINDOW);
-        // Anchor the window at the caret column recorded when the list was
-        // built, not at the input start: the rectangle then marks where
-        // completion was triggered. The input viewport may have scrolled
-        // since (a long value on a narrow terminal), so the anchor moves
-        // with the visible window.
+        // Full candidate rows anchor at the input text start: the edited
+        // value is the prefix being matched, and the rectangle must stay
+        // put while the user types. `…tail` rows anchor at the caret
+        // recorded when the list was built instead, keeping the visible
+        // tails next to the input position.
         let title = self.title_col(&self.row_title_text(row), title_width);
         let text_left = 2 + display_width(&title);
         let (_, _, shift) = ti_window(&e.ti, self.edit_input_avail(&title));
         let line_right = self.width.saturating_sub(1);
-        // Prefer the caret anchor; when the rectangle would run past the
-        // right edge, slide it left so every candidate stays on screen —
-        // the horizontal counterpart of the rows-above fallback above.
+        // When the rectangle would run past the right edge, slide it left so
+        // every candidate stays on screen — the horizontal counterpart of
+        // the rows-above fallback above.
         let rect =
             Self::suggestion_rect_width(&e.sugs, e.sug_idx, &e.sug_prefix, capacity, line_right);
-        let left =
-            (text_left + e.sug_col.saturating_sub(shift)).min(line_right.saturating_sub(rect));
+        let base = if Self::sug_strip_active(&e.sugs, e.sug_idx, &e.sug_prefix, capacity) {
+            e.sug_col
+        } else {
+            0
+        };
+        let left = (text_left + base.saturating_sub(shift)).min(line_right.saturating_sub(rect));
         let lines = Self::suggestion_overlay_lines(
             &e.sugs,
             e.sug_idx,
@@ -1046,12 +1086,19 @@ impl App {
                 };
                 let left = display_width(prompt);
                 let sugs = if s.mode == AnchorMode::RefSet && !s.sugs.is_empty() {
+                    // Full candidate rows anchor at the input text start;
+                    // `…tail` rows anchor at the recorded caret.
+                    let base = if Self::sug_strip_active(&s.sugs, s.sug, &s.sug_prefix, max) {
+                        s.sug_col
+                    } else {
+                        0
+                    };
                     Self::suggestion_overlay_lines(
                         &s.sugs,
                         s.sug,
                         &s.sug_prefix,
                         max,
-                        left,
+                        left + base,
                         self.width.saturating_sub(1),
                     )
                 } else {

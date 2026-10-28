@@ -225,14 +225,15 @@ fn completion_candidates_in(
 fn builtin_completion(prefix: &str, token_start: usize) -> Completion {
     let lead = prefix.len() - prefix.trim_start().len();
     let token = &prefix[token_start..];
-    // Typing the command word itself: filter the builtin list.
+    // Typing the command word itself: filter the builtin list. The typed
+    // token itself is already on the line and offers nothing to complete.
     if token_start <= lead {
         return Completion {
             start: token_start,
             prefix: token.to_string(),
             candidates: BUILTINS
                 .iter()
-                .filter(|c| c.starts_with(token))
+                .filter(|c| c.starts_with(token) && **c != token)
                 .map(|c| c.to_string())
                 .collect(),
         };
@@ -299,7 +300,8 @@ fn command_candidates(path_dirs: &[PathBuf], prefix: &str) -> Vec<String> {
         };
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
-            if !name.starts_with(prefix) || !is_executable_file(&e.path()) {
+            // the typed command itself offers nothing to complete
+            if name == prefix || !name.starts_with(prefix) || !is_executable_file(&e.path()) {
                 continue;
             }
             out.insert(name);
@@ -344,7 +346,12 @@ fn path_candidates(token: &str) -> Vec<String> {
             continue;
         }
         // Case-insensitive like the write-path completion: typing `al`
-        // should offer `Alpha.txt` too.
+        // should offer `Alpha.txt` too. The entry spelled exactly like the
+        // typed prefix is already on the line; a directory still differs by
+        // its trailing `/`.
+        if name.to_lowercase() == lower {
+            continue;
+        }
         if !name.to_lowercase().starts_with(&lower) {
             continue;
         }
@@ -502,11 +509,26 @@ mod tests {
         assert_eq!(c.prefix, "w");
         assert!(c.candidates.contains(&"wa".to_string()));
         assert!(c.candidates.contains(&"wq!".to_string()));
+        // the typed token itself is never offered
+        assert!(
+            !c.candidates.contains(&"w".to_string()),
+            "{:?}",
+            c.candidates
+        );
 
         let line = format!("w {base}/al");
         let c = completion_candidates(&line, line.len(), "");
         assert_eq!(c.start, 2);
         assert_eq!(c.candidates, vec![format!("{base}/alpha.txt")]);
+
+        // a fully typed file path has no differing tail to offer
+        let line = format!("w {base}/alpha.txt");
+        let c = completion_candidates(&line, line.len(), "");
+        assert!(
+            c.candidates.is_empty(),
+            "typed path offered: {:?}",
+            c.candidates
+        );
 
         // empty argument after r/a offers the shell marker
         let c = completion_candidates("r ", 2, "");
@@ -548,6 +570,15 @@ mod tests {
         );
         assert_eq!(c.prefix, "fr");
         assert_eq!(c.candidates, vec!["frobnicate"]);
+
+        // the typed command itself is never offered
+        let line = "!frobnicate";
+        let c = completion_candidates_in(line, line.len(), "", &dirs);
+        assert!(
+            c.candidates.is_empty(),
+            "typed command offered: {:?}",
+            c.candidates
+        );
     }
 
     #[test]

@@ -1026,6 +1026,7 @@ impl App {
         w.sugs.clear();
         let value = w.ti.value().to_string();
         w.sug_prefix = value.clone();
+        w.sug_col = display_width(&w.ti.value()[..w.ti.cursor_byte()]);
         let (dir, prefix) = match value.rfind('/') {
             Some(i) => (value[..=i].to_string(), value[i + 1..].to_string()),
             None => (String::new(), value.clone()),
@@ -1045,6 +1046,11 @@ impl App {
                 continue;
             }
             if !name.to_lowercase().starts_with(&lower) {
+                continue;
+            }
+            // The entry spelled exactly like the typed prefix is already on
+            // the input line; a directory still differs by its trailing `/`.
+            if name.to_lowercase() == lower {
                 continue;
             }
             let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false)
@@ -1086,6 +1092,7 @@ impl App {
         if let Some(k) = msg_key(&msg) {
             s.ti.handle_key(k);
             s.sug_prefix = s.ti.value().to_string();
+            s.sug_col = display_width(&s.ti.value()[..s.ti.cursor_byte()]);
             s.sugs = Self::anchor_filtered(&s);
             s.sug_line.clear();
         }

@@ -583,9 +583,11 @@ impl App {
             sugs: Vec::new(),
             sug_line: String::new(),
             sug: -1,
+            sug_col: 0,
             err: String::new(),
         };
         s.sug_prefix = s.ti.value().to_string();
+        s.sug_col = display_width(&s.ti.value()[..s.ti.cursor_byte()]);
         s.sugs = Self::anchor_filtered(&s);
         self.overlay = Some(Overlay::Anc(s));
     }
@@ -601,7 +603,11 @@ impl App {
         }
         s.cands
             .iter()
-            .filter(|c| c.to_lowercase().starts_with(&prefix))
+            // the typed name itself offers nothing to complete
+            .filter(|c| {
+                let lc = c.to_lowercase();
+                lc.starts_with(&prefix) && lc != prefix
+            })
             .cloned()
             .collect()
     }
@@ -616,6 +622,7 @@ impl App {
         // completed name would shrink it to that one candidate.
         if s.sug < 0 || s.ti.value() != s.sug_line {
             s.sug_prefix = s.ti.value().to_string();
+            s.sug_col = display_width(&s.ti.value()[..s.ti.cursor_byte()]);
             s.sugs = Self::anchor_filtered(s);
             s.sug = -1;
         }

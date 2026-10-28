@@ -891,16 +891,16 @@ fn pty_narrow_terminal_edit_scrolls_with_the_caret() {
 
 #[test]
 fn pty_right_edge_completion_window_stays_visible() {
-    // With the caret at the terminal's right edge the candidate rectangle
-    // used to clamp against the edge and shrink until the candidates were
-    // gone; it must slide left instead and stay fully on screen.
+    // A long value with the caret near the terminal's right edge: the
+    // candidate window anchors at the input text start and must stay fully
+    // on screen instead of shrinking or running past the edge.
     let dir = mktemp();
     let schema = dir.path().join("edge.schema.json");
     let cfg = dir.path().join("cfg.json");
     write_file(
         &schema,
         r#"{"type":"object","properties":{"name":{"anyOf":[{"type":"string"},
-          {"enum":["alpha-beta-gamma-1","alpha-beta-gamma-2","alpha-beta-gamma-3"]}]}}}"#,
+          {"enum":["alpha-beta-gamma-1x","alpha-beta-gamma-2y","alpha-beta-gamma-3z"]}]}}}"#,
     );
     write_file(&cfg, "{\"name\":\"alpha-beta-gamma-\"}\n");
     let schema_arg = arg(&schema);
@@ -913,18 +913,18 @@ fn pty_right_edge_completion_window_stays_visible() {
 
     pty.wait_frame("narrow root", 0, &["name"]);
     pty.send(b"\r"); // edit opens with the caret at the value end
-    let (snap, _) = pty.wait_frame("candidates", 0, &["…1", "…2", "…3"]);
+    let (snap, _) = pty.wait_frame("candidates", 0, &["1x", "2y", "3z"]);
     let row = snap
         .split("\r\n")
-        .find(|l| l.contains("…2"))
+        .find(|l| l.contains("2y"))
         .expect("a candidate row");
     assert!(
         row.chars().count() <= 35,
         "the candidate window must not run past 36 columns: {row:?}"
     );
-    pty.send(b"\t"); // select the first candidate; the 18-char value shows
-    // its tail in the 14-cell input window on a 36-column terminal
-    pty.wait_frame("candidate applied", 0, &["gamma-1"]);
+    pty.send(b"\t"); // select the first candidate; the 19-char value shows
+    // its tail in the input window on a 36-column terminal
+    pty.wait_frame("candidate applied", 0, &["gamma-1x"]);
     pty.send(b"\x1b");
     pty.send(b"\x03");
     pty.wait_exit(130);

@@ -1172,10 +1172,8 @@ impl App {
         let Some(Overlay::Edit(e)) = &mut self.overlay else {
             return;
         };
-        // Anchor the candidate window at the caret that triggered this list.
-        // Cycling a candidate (tab/arrows) does not refresh, so the window
-        // stays where completion was invoked instead of jumping with the
-        // replacement text.
+        // Record the caret column for the `…tail` row anchor; full rows
+        // anchor at the input text start instead.
         e.sug_col = display_width(&e.ti.value()[..e.ti.cursor_byte()]);
         let prefix = e.ti.value().to_string();
         e.sug_prefix = prefix.clone();

@@ -7692,7 +7692,8 @@ fn tag_reference_completion() {
     }
     press(&mut m, &["c", "2"]);
     match &m.overlay {
-        Some(Overlay::Edit(e)) => assert_eq!(e.sugs, vec!["c2".to_string()]),
+        // "c2" is already on the input line: nothing left to complete.
+        Some(Overlay::Edit(e)) => assert!(e.sugs.is_empty(), "sugs = {:?}", e.sugs),
         _ => panic!(),
     }
     press(&mut m, &["tab", "enter"]);
@@ -9292,7 +9293,9 @@ fn write_to_path_completion() {
 
     press(&mut m, &["W"]);
     match &m.overlay {
-        Some(Overlay::Write(w)) => assert!(!w.sugs.is_empty(), "W must compute candidates"),
+        // W pre-fills the session path, an exact existing file: with the
+        // identical candidate dropped there is nothing left to complete.
+        Some(Overlay::Write(w)) => assert!(w.sugs.is_empty(), "sugs = {:?}", w.sugs),
         _ => panic!(),
     }
     press(&mut m, &["ctrl+u"]);
@@ -9348,6 +9351,15 @@ fn write_to_path_completion() {
             "candidates = {:?}",
             w.sugs
         ),
+        _ => panic!(),
+    }
+
+    // the fully typed path itself is not offered as a candidate
+    press(&mut m, &["ctrl+u"]);
+    let typed = format!("{}/alpha.json", root.display());
+    press(&mut m, &[&typed]);
+    match &m.overlay {
+        Some(Overlay::Write(w)) => assert!(w.sugs.is_empty(), "sugs = {:?}", w.sugs),
         _ => panic!(),
     }
 }
@@ -10047,7 +10059,8 @@ fn edit_completion() {
     }
     press(&mut m, &["/", "d", "a", "t", "a", "2"]);
     match &m.overlay {
-        Some(Overlay::Edit(e)) => assert_eq!(e.sugs, vec!["/data2".to_string()]),
+        // "/data2" is fully typed: the identical candidate is dropped.
+        Some(Overlay::Edit(e)) => assert!(e.sugs.is_empty(), "sugs = {:?}", e.sugs),
         _ => panic!(),
     }
     press(&mut m, &["ctrl+u"]);
@@ -11552,23 +11565,29 @@ fn command_tab_completes_the_word_before_the_cursor_and_keeps_the_suffix() {
 
     let view = app.view();
     assert!(
-        view.contains("\x1b[7m…pha.txt"),
+        view.contains("\x1b[7mpha.txt"),
         "selected candidate must use reverse video: {view}"
     );
     assert!(
-        view.contains("…pine"),
+        view.contains("pine"),
         "the other candidate must be rendered too: {view}"
     );
     let line = view
         .lines()
-        .find(|l| l.contains("\x1b[7m…pha.txt"))
+        .find(|l| l.contains("\x1b[7mpha.txt"))
         .expect("selected command candidate line");
     let start = line.find("\x1b[7m").expect("candidate background");
-    let anchor = display_width(":") + display_width(&format!("!cat {base}/al"));
+    // The token shares a long prefix with the candidates, so the rows are
+    // stripped to their tails and anchor at the caret the completion
+    // applied (the end of the current candidate).
+    let caret_col = |app: &App| {
+        let value = command_value(app);
+        display_width(":") + display_width(&value[..command_cursor(app)])
+    };
     assert_eq!(
         display_width(&line[..start]),
-        anchor,
-        "command candidates anchor at the caret column that triggered completion"
+        caret_col(&app),
+        "stripped command candidates anchor at the caret column"
     );
     // While completion is active, the arrow keys move the candidate cursor
     // instead of recalling command history.
@@ -11576,18 +11595,18 @@ fn command_tab_completes_the_word_before_the_cursor_and_keeps_the_suffix() {
     assert_eq!(command_value(&app), format!("!cat {base}/alpineZZ"));
     let view = app.view();
     assert!(
-        view.contains("\x1b[7m…pine"),
+        view.contains("\x1b[7mpine"),
         "reverse-video selection must follow the arrow key: {view}"
     );
     let line = view
         .lines()
-        .find(|l| l.contains("\x1b[7m…pine"))
+        .find(|l| l.contains("\x1b[7mpine"))
         .expect("selected command candidate line");
     let start = line.find("\x1b[7m").expect("candidate background");
     assert_eq!(
         display_width(&line[..start]),
-        anchor,
-        "cycling candidates must keep the window at the trigger column: {view}"
+        caret_col(&app),
+        "cycling moves the window with the caret: {view}"
     );
     press(&mut app, &["up"]);
     assert_eq!(command_value(&app), format!("!cat {base}/alpha.txtZZ"));
@@ -11613,12 +11632,12 @@ fn viewport_cell_shift(value: &str, cursor_cell: usize, avail: usize) -> usize {
 }
 
 #[test]
-fn command_window_anchor_subtracts_scrolled_cells_not_chars() {
-    // A wide prefix scrolled out of the command viewport must be subtracted
-    // in display cells. Applying a longer candidate scrolls the viewport
-    // further while sug_col stays at the trigger caret, so an anchor that
-    // dropped the skipped prefix as a char count would land three columns
-    // (one extra cell per CJK char) too far right.
+fn command_window_anchors_at_the_caret_when_rows_are_stripped() {
+    // Long shared prefixes strip the candidate rows to `…tail` form; the
+    // window then anchors at the caret recorded when the list was built.
+    // A long command scrolls the input viewport, so the anchor maps through
+    // the skipped cells and clamps at the right edge instead of running
+    // past the terminal.
     let dir = tempfile::tempdir().unwrap();
     let inner = dir.path().join("日本語").join("b".repeat(40));
     std::fs::create_dir_all(&inner).unwrap();
@@ -11640,17 +11659,28 @@ fn command_window_anchor_subtracts_scrolled_cells_not_chars() {
     let view = app.view();
     let line = view
         .lines()
-        .find(|l| l.contains(&format!("\x1b[7m…{}lpha.txt", "a".repeat(23))))
+        .find(|l| l.contains(&format!("\x1b[7m{}lpha.txt", "a".repeat(23))))
         .expect("selected command candidate line");
     let start = line.find("\x1b[7m").expect("candidate background");
+    let body = &line[start + "\x1b[7m".len()..];
+    let rect = display_width(&body[..body.find("\x1b[0m").expect("candidate reset")]);
     let value = command_value(&app);
+    let sug_end = match &app.overlay {
+        Some(Overlay::Command(s)) => s.sug_end,
+        _ => panic!("command prompt is not open"),
+    };
     let avail = input_avail(app.width - 1, display_width(":"));
-    let expected_left = display_width(":") + display_width(&trigger)
-        - viewport_cell_shift(&value, display_width(&value), avail);
+    let shift = viewport_cell_shift(&value, display_width(&value), avail);
+    // Stripped rows anchor at the caret recorded when the list was built
+    // (the applied candidate's end, not the word start in sug_col); the
+    // anchor maps through the skipped viewport cells and the rectangle
+    // slides left when it would overflow the terminal.
+    let base = display_width(&value[..sug_end.min(value.len())]);
+    let expected_left = (display_width(":") + base.saturating_sub(shift)).min(app.width - 1 - rect);
     assert_eq!(
         display_width(&line[..start]),
         expected_left,
-        "the anchor must subtract the skipped display cells, not the char count: {view}"
+        "the stripped-row anchor maps the caret column through the skipped display cells: {view}"
     );
 }
 
@@ -11707,6 +11737,69 @@ fn command_completion_offers_builtins_but_not_shell_commands() {
     assert_eq!(prefix, "");
     assert!(!sugs.contains(&"waq".to_string()), "{sugs:?}");
     assert!(!sugs.contains(&"wq!".to_string()), "{sugs:?}");
+}
+
+#[test]
+fn command_sug_window_reanchors_only_at_word_starts() {
+    // sug_col is the completed word's start column: typing inside one word
+    // never moves the candidate window, a separator that starts a new word
+    // re-anchors it.
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    let col = |app: &App| match &app.overlay {
+        Some(Overlay::Command(s)) => s.sug_col,
+        _ => panic!("command prompt is not open"),
+    };
+    press(&mut app, &[":"]);
+    press(&mut app, &["w"]);
+    assert_eq!(col(&app), 0, "the first word starts at the prompt");
+    // Full candidate rows anchor at the word start in the rendered view.
+    let view = app.view();
+    let line = view
+        .lines()
+        .find(|l| l.contains("\x1b[2;48;5;236mwa"))
+        .expect("candidate row");
+    let start = line.find("\x1b[2;48;5;236m").expect("candidate background");
+    assert_eq!(
+        display_width(&line[..start]),
+        1,
+        "the window sits right after the prompt: {view}"
+    );
+    press(&mut app, &["a"]);
+    assert_eq!(
+        col(&app),
+        0,
+        "typing inside the word must not move the window"
+    );
+    press(&mut app, &[" "]);
+    assert_eq!(col(&app), 3, "the separator starts a new word after `wa `");
+    press(&mut app, &["/", "t"]);
+    assert_eq!(col(&app), 3, "path characters stay inside the same word");
+}
+
+#[test]
+fn command_sug_window_anchors_at_the_caret_for_stripped_rows() {
+    // Candidates sharing a long prefix with the typed token render as
+    // `…tail` rows, which anchor at the caret so the visible tails stay
+    // next to the input position.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("sing-geosite-steam.srs"), "").unwrap();
+    std::fs::write(dir.path().join("sing-geosite-star.srs"), "").unwrap();
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    press(&mut app, &[":"]);
+    let line = format!("!cat {}/sing-geosite-s", dir.path().display());
+    press(&mut app, &[line.as_str()]);
+    let value = command_value(&app);
+    let view = app.view();
+    let row = view
+        .lines()
+        .find(|l| l.contains("\x1b[2;48;5;236mteam"))
+        .expect("candidate row");
+    let start = row.find("\x1b[2;48;5;236m").expect("candidate background");
+    assert_eq!(
+        display_width(&row[..start]),
+        display_width(":") + display_width(&value),
+        "stripped rows anchor at the caret column: {view}"
+    );
 }
 
 #[test]
@@ -11897,7 +11990,69 @@ fn edit_input_arrows_move_completion_selection() {
 }
 
 #[test]
-fn edit_completion_overlay_starts_at_the_caret_column() {
+fn edit_completion_window_anchors_at_the_caret_for_stripped_rows() {
+    // Candidates sharing a long prefix with the typed value render as
+    // `…tail` rows, which anchor at the caret so the visible tails stay
+    // next to the input position.
+    let schema = schema_build(|b| {
+        let mut name = scalar("name", "Name", "string");
+        name.suggestions = vec![
+            "alpha-beta-gamma-1".into(),
+            "alpha-beta-gamma-2".into(),
+            "alpha-beta-gamma-3".into(),
+        ];
+        let name = b.id(name);
+        b.id(FormNode {
+            key: "$".into(),
+            kind: Kind::Object,
+            children: vec![name],
+            ..FormNode::default()
+        })
+    });
+    let doc = dbuild(|db| db.obj(vec![("name", db.s("alpha-beta-gamma-"))]));
+    let mut app = app_with(schema, doc, test_opts());
+    press(&mut app, &["enter"]); // caret at the end of the long value
+    let rows = app.menu_rows();
+    let tw = app.menu_title_col_width(&rows);
+    let input_left = 2 + display_width(&app.title_col("Name", tw));
+    let caret_left = input_left + display_width("alpha-beta-gamma-");
+    let view = app.view();
+    let line = view
+        .lines()
+        .find(|l| l.contains("\x1b[2;48;5;236m1"))
+        .expect("candidate line");
+    let start = line.find("\x1b[2;48;5;236m").expect("candidate background");
+    assert_eq!(
+        display_width(&line[..start]),
+        caret_left,
+        "stripped rows anchor at the caret column: {view}"
+    );
+
+    // Cycling to the applied candidate keeps the stripped-row anchor: the
+    // list (and its query) is unchanged until the next keystroke.
+    press(&mut app, &["tab"]);
+    match &app.overlay {
+        Some(Overlay::Edit(e)) => assert_eq!(e.ti.value(), "alpha-beta-gamma-1"),
+        _ => panic!("edit overlay is not open"),
+    }
+    let view = app.view();
+    let line = view
+        .lines()
+        .find(|l| l.contains("\x1b[7m1"))
+        .expect("selected candidate line");
+    let start = line.find("\x1b[7m").expect("selected candidate background");
+    assert_eq!(
+        display_width(&line[..start]),
+        caret_left,
+        "cycling keeps the stripped-row anchor: {view}"
+    );
+}
+
+#[test]
+fn edit_completion_window_stays_at_the_input_start() {
+    // The edited value is the prefix being matched, so the candidate window
+    // aligns with the input text start and must not follow the caret while
+    // the user types.
     let schema = schema_build(|b| {
         let mut name = scalar("name", "Name", "string");
         name.suggestions = vec!["alpha".into(), "alpine".into(), "alps".into()];
@@ -11923,12 +12078,7 @@ fn edit_completion_overlay_starts_at_the_caret_column() {
 
     let rows = app.menu_rows();
     let tw = app.menu_title_col_width(&rows);
-    let input_left = 2 + display_width(&app.title_col("Name", tw));
-    let expected = input_left + display_width("a");
-    assert!(
-        expected > input_left,
-        "the caret is right of the value start"
-    );
+    let expected = 2 + display_width(&app.title_col("Name", tw));
 
     let view = app.view();
     let line = view
@@ -11939,11 +12089,29 @@ fn edit_completion_overlay_starts_at_the_caret_column() {
     assert_eq!(
         display_width(&line[..start]),
         expected,
-        "the candidate window starts at the caret column: {view}"
+        "the candidate window starts at the input text: {view}"
     );
 
-    // Applying a candidate does not move the anchor: the window keeps
-    // marking where completion was triggered, not the new caret.
+    // Typing another character filters the list but must not move the
+    // window to the new caret column.
+    press(&mut app, &["l"]);
+    match &app.overlay {
+        Some(Overlay::Edit(e)) => assert_eq!(e.ti.value(), "al"),
+        _ => panic!("edit overlay is not open"),
+    }
+    let view = app.view();
+    let line = view
+        .lines()
+        .find(|l| l.contains("\x1b[2;48;5;236malpha"))
+        .expect("candidate line");
+    let start = line.find("\x1b[2;48;5;236m").expect("candidate background");
+    assert_eq!(
+        display_width(&line[..start]),
+        expected,
+        "typing must not move the window: {view}"
+    );
+
+    // Applying a candidate keeps the window in place too.
     press(&mut app, &["tab"]);
     match &app.overlay {
         Some(Overlay::Edit(e)) => assert_eq!(e.ti.value(), "alpha"),
@@ -11958,7 +12126,7 @@ fn edit_completion_overlay_starts_at_the_caret_column() {
     assert_eq!(
         display_width(&line[..start]),
         expected,
-        "the anchor stays at the trigger caret: {view}"
+        "applying a candidate must not move the window: {view}"
     );
 }
 
@@ -12016,10 +12184,9 @@ fn edit_input_window_keeps_the_caret_visible_on_a_narrow_terminal() {
 
 #[test]
 fn edit_completion_window_stays_inside_the_terminal_at_the_right_edge() {
-    // With the caret at the terminal's right edge the candidate rectangle
-    // used to clamp to width-2 and shrink to a single cell; now it slides
-    // left (the horizontal counterpart of the rows-above fallback) and
-    // every candidate stays fully visible.
+    // A long value puts the caret near the terminal's right edge; the
+    // candidate window anchors at the input text start and must still stay
+    // fully inside the terminal, with every candidate visible.
     let schema = schema_build(|b| {
         let mut name = scalar("name", "Name", "string");
         name.suggestions = vec![
@@ -12043,31 +12210,34 @@ fn edit_completion_window_stays_inside_the_terminal_at_the_right_edge() {
     let rows = app.menu_rows();
     let tw = app.menu_title_col_width(&rows);
     let input_left = 2 + display_width(&app.title_col("Name", tw));
-    let anchor = input_left + display_width("alpha-beta-gamma-");
+    let caret = input_left + display_width("alpha-beta-gamma-");
     assert!(
-        anchor > app.width - 1,
-        "fixture: the caret-anchored window must overflow the terminal"
+        caret > app.width - 1,
+        "fixture: the caret reaches past the terminal edge"
     );
     let view = app.view();
     let line = view
         .lines()
-        .find(|l| l.contains("\x1b[2;48;5;236m…2"))
+        .find(|l| l.contains("\x1b[2;48;5;236m2"))
         .expect("candidate line");
     let start = line.find("\x1b[2;48;5;236m").expect("candidate background");
     let body = &line[start + "\x1b[2;48;5;236m".len()..];
     let rect = display_width(&body[..body.find("\x1b[0m").expect("candidate reset")]);
     let left = display_width(&line[..start]);
     assert_eq!(rect, SUG_MIN_WIDTH, "the rectangle keeps its full width");
+    // input_left + rect would run past the edge, so the window slides left
+    // to the largest column that still fits it.
+    let expected_left = input_left.min(app.width - 1 - rect);
+    assert_eq!(
+        left, expected_left,
+        "the window anchors at the input text start and slides left only to fit"
+    );
     assert!(
         left + rect <= app.width - 1,
         "the candidate window must end inside the terminal: left {left} rect {rect}"
     );
     assert!(
-        left < anchor,
-        "the window must slide left of the caret anchor: left {left} anchor {anchor}"
-    );
-    assert!(
-        body.contains("…2"),
+        body.contains("2"),
         "candidates must not be cut at the right edge: {body:?}"
     );
     // Selecting a candidate keeps the window in place.
@@ -12075,7 +12245,7 @@ fn edit_completion_window_stays_inside_the_terminal_at_the_right_edge() {
     let view = app.view();
     let line = view
         .lines()
-        .find(|l| l.contains("\x1b[7m…1"))
+        .find(|l| l.contains("\x1b[7m1"))
         .expect("selected candidate line");
     let start = line.find("\x1b[7m").expect("selected candidate background");
     assert!(
@@ -12192,30 +12362,35 @@ fn write_path_arrows_move_completion_selection() {
         Some(Overlay::Write(w)) => (w.ti.value().to_string(), w.sug_idx, w.sugs.len()),
         _ => panic!("write overlay is not open"),
     };
+    let typed = write(&app).0;
     let view = app.view();
     assert!(
-        view.contains("\x1b[2;48;5;236m…pha.txt"),
+        view.contains("\x1b[2;48;5;236mpha.txt"),
         "write suggestions must appear on open: {view}"
     );
     press(&mut app, &["tab"]);
     assert_eq!(write(&app).2, 2);
     let view = app.view();
     assert!(
-        view.contains("\x1b[7m…pha.txt"),
+        view.contains("\x1b[7mpha.txt"),
         "write-path selection must use reverse video: {view}"
     );
     let line = view
         .lines()
-        .find(|l| l.contains("\x1b[7m…pha.txt"))
+        .find(|l| l.contains("\x1b[7mpha.txt"))
         .expect("selected write candidate line");
     let start = line.find("\x1b[7m").expect("candidate background");
     let rows = app.menu_rows();
     let tw = app.menu_title_col_width(&rows);
     let input_left = display_width(&app.title_col("Write to", tw));
+    // The typed path shares a long prefix with the candidates: stripped
+    // `…tail` rows anchor at the caret column recorded when the list was
+    // rebuilt (typing `{dir}/al`), and cycling keeps that anchor.
+    let anchor = input_left + display_width(&typed);
     assert_eq!(
         display_width(&line[..start]),
-        input_left,
-        "write candidates align with the path input text"
+        anchor,
+        "stripped write candidates anchor at the caret column"
     );
     press(&mut app, &["down"]);
     assert_eq!(
@@ -12310,6 +12485,31 @@ fn edit_completion_moves_above_a_row_at_the_bottom() {
         view.contains("alpine") && view.contains("alps"),
         "all candidates stay visible: {view}"
     );
+}
+
+#[test]
+fn anchor_completion_drops_the_typed_name() {
+    let mut m =
+        completion_model("sname: &alpha one\nsnum: &beta 2\nextra1: x\nextra2: y\nextra3: z\n");
+    set_cursor(&mut m, |r| {
+        r.kind == RowKind::Unknown && r.label == "extra1"
+    });
+    press(&mut m, &["*"]);
+    match &m.overlay {
+        Some(Overlay::Anc(s)) => assert_eq!(s.sugs.len(), 2, "sugs = {:?}", s.sugs),
+        _ => panic!("reference input did not open"),
+    }
+    press(&mut m, &["b", "e"]);
+    match &m.overlay {
+        Some(Overlay::Anc(s)) => assert_eq!(s.sugs, vec!["beta".to_string()]),
+        _ => panic!(),
+    }
+    press(&mut m, &["t", "a"]);
+    match &m.overlay {
+        // "beta" is fully typed: the identical candidate is dropped.
+        Some(Overlay::Anc(s)) => assert!(s.sugs.is_empty(), "sugs = {:?}", s.sugs),
+        _ => panic!(),
+    }
 }
 
 #[test]
@@ -12413,9 +12613,24 @@ fn candidate_overlay_hides_a_long_shared_prefix() {
         lines[0]
     );
     assert!(
-        lines[0].contains("…ad") && lines[1].contains("…ai"),
+        lines[0].contains("ad") && lines[1].contains("ai"),
         "the differing tails must stay visible: {:?}",
         lines
+    );
+    // Short tails fit the width: no ellipsis marker is added.
+    assert!(!lines[0].contains('…'), "{:?}", lines[0]);
+
+    // Below the length threshold the candidates keep their full text: a
+    // short typed prefix stays visible in every row.
+    let lines =
+        App::suggestion_overlay_lines(&["wa".to_string(), "wq".to_string()], -1, "w", 2, 0, 80);
+    assert!(
+        lines[0].contains("wa") && lines[1].contains("wq"),
+        "short typed prefixes must not be stripped: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains('…')),
+        "fitting candidates must not carry an ellipsis: {lines:?}"
     );
 }
 
