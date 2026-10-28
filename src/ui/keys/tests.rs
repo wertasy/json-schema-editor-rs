@@ -11636,3 +11636,211 @@ fn whole_document_raw_edit_adopts_format_meta() {
         Some("keep me")
     );
 }
+
+// --- disk change detection ---------------------------------------------------
+
+fn file_opts(path: &std::path::Path) -> Options {
+    let mut opts = test_opts();
+    opts.path = path.to_string_lossy().into_owned();
+    opts
+}
+
+fn name_doc(v: &str) -> Doc {
+    dbuild(|db| db.obj(vec![("name", db.s(v))]))
+}
+
+#[test]
+fn disk_change_prompts_and_yes_reloads() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("cfg.json");
+    std::fs::write(&path, r#"{"name":"old"}"#).expect("seed file");
+    let doc = name_doc("old");
+    let mut m = app_with(crate::smodel::untyped(&doc), doc, file_opts(&path));
+
+    // unchanged: no prompt, no overlay
+    assert!(!m.poll_disk_change());
+    assert!(m.overlay.is_none());
+
+    // external change opens the y/n confirm
+    std::fs::write(&path, r#"{"name":"fresh-on-disk","extra":true}"#).expect("rewrite");
+    assert!(m.poll_disk_change());
+    assert!(
+        matches!(&m.overlay, Some(Overlay::Confirm(c))
+            if c.title.contains("changed on disk") && c.title.contains("Reload")),
+        "overlay = {:?}",
+        m.overlay.is_some()
+    );
+
+    press(&mut m, &["y"]);
+    assert_eq!(str_at(&m.fs().doc, &["name"]), "fresh-on-disk");
+    assert!(!m.dirty(), "reload resets the change baseline");
+    assert_eq!(m.fs().stack.len(), 1, "stack resets to the root");
+    assert!(m.notice.contains("Reloaded"), "{}", m.notice);
+    // the drifted stat was recorded: the question does not re-fire
+    assert!(!m.poll_disk_change());
+    assert!(m.overlay.is_none());
+}
+
+#[test]
+fn disk_change_decline_keeps_doc_until_next_change() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("cfg.json");
+    std::fs::write(&path, r#"{"name":"old"}"#).expect("seed file");
+    let doc = name_doc("old");
+    let mut m = app_with(crate::smodel::untyped(&doc), doc, file_opts(&path));
+
+    std::fs::write(&path, r#"{"name":"on-disk","extra":1}"#).expect("rewrite");
+    assert!(m.poll_disk_change());
+    press(&mut m, &["n"]);
+    assert_eq!(
+        str_at(&m.fs().doc, &["name"]),
+        "old",
+        "decline keeps the doc"
+    );
+    assert!(!m.poll_disk_change(), "decline suppresses the re-prompt");
+
+    // the next external change asks again; esc declines the same way
+    std::fs::write(&path, r#"{"name":"again","extra":22}"#).expect("rewrite");
+    assert!(m.poll_disk_change());
+    press(&mut m, &["esc"]);
+    assert!(m.overlay.is_none());
+    assert_eq!(str_at(&m.fs().doc, &["name"]), "old");
+}
+
+#[test]
+fn disk_change_only_watches_the_active_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a = dir.path().join("a.json");
+    let b = dir.path().join("b.json");
+    std::fs::write(&a, r#"{"name":"a"}"#).expect("seed a");
+    std::fs::write(&b, r#"{"name":"b"}"#).expect("seed b");
+    let opts_a = file_opts(&a);
+    let doc_a = name_doc("a");
+    let mut opts_b = test_opts();
+    opts_b.path = b.to_string_lossy().into_owned();
+    let mut m = App::new(vec![
+        session(test_schema(), doc_a, opts_a),
+        session(test_schema(), name_doc("b"), opts_b),
+    ]);
+    // the inactive file changed: no prompt while a.json is active
+    std::fs::write(&b, r#"{"name":"b2","extra":1}"#).expect("rewrite b");
+    assert!(!m.poll_disk_change());
+    // switching makes it active and the drift shows
+    m.switch_file_state(1);
+    assert!(m.poll_disk_change());
+    press(&mut m, &["y"]);
+    assert_eq!(str_at(&m.fs().doc, &["name"]), "b2");
+}
+
+#[test]
+fn disk_reload_schema_less_follows_new_root_shape() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("cfg.json");
+    std::fs::write(&path, r#"{"name":"old"}"#).expect("seed file");
+    let doc = name_doc("old");
+    let mut m = app_with(crate::smodel::untyped(&doc), doc, file_opts(&path));
+    assert_eq!(m.top().expect("root").kind, MenuKind::Object);
+
+    // the root became an array: the schema-less menu follows it
+    std::fs::write(&path, "[1,2]").expect("rewrite");
+    assert!(m.poll_disk_change());
+    press(&mut m, &["y"]);
+    assert_eq!(m.top().expect("root").kind, MenuKind::Items);
+    assert!(m.fs().doc.get(&path_idx(1)).is_some());
+    assert!(!m.dirty());
+}
+
+#[test]
+fn disk_reload_schema_keeps_model_and_resets_stack() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("cfg.json");
+    std::fs::write(&path, r#"{"name":"old"}"#).expect("seed file");
+    let doc = dbuild(|db| db.obj(vec![("name", db.s("old"))]));
+    let mut m = app_with(test_schema(), doc, file_opts(&path));
+    // drill in, so the reload has a stack to reset
+    app_push_name(&mut m);
+    assert_eq!(m.fs().stack.len(), 2);
+    assert!(!m.fs().schema.schema_less);
+
+    std::fs::write(&path, r#"{"name":"from-disk"}"#).expect("rewrite");
+    assert!(m.poll_disk_change());
+    press(&mut m, &["y"]);
+    assert_eq!(str_at(&m.fs().doc, &["name"]), "from-disk");
+    assert_eq!(m.fs().stack.len(), 1, "stack resets to the root");
+    assert!(!m.fs().schema.schema_less, "the schema model is kept");
+    assert!(!m.dirty());
+}
+
+#[test]
+fn disk_reload_invalid_content_keeps_document() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("cfg.json");
+    std::fs::write(&path, r#"{"name":"old"}"#).expect("seed file");
+    let doc = name_doc("old");
+    let mut m = app_with(crate::smodel::untyped(&doc), doc, file_opts(&path));
+
+    std::fs::write(&path, "not json {").expect("rewrite");
+    assert!(m.poll_disk_change());
+    press(&mut m, &["y"]);
+    assert_eq!(
+        str_at(&m.fs().doc, &["name"]),
+        "old",
+        "bad parse keeps the doc"
+    );
+    assert!(
+        m.notice.starts_with("Reload failed"),
+        "notice = {}",
+        m.notice
+    );
+    assert!(
+        m.overlay.is_none(),
+        "the failed reload still closes the ask"
+    );
+}
+
+#[test]
+fn saving_refreshes_disk_stat_without_prompt() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("cfg.json");
+    std::fs::write(&path, r#"{"name":"old"}"#).expect("seed file");
+    let doc = name_doc("old");
+    let mut opts = file_opts(&path);
+    let sink = path;
+    opts.save = Some(Arc::new(move |_doc: &Doc, _meta: &crate::doc::Meta| {
+        std::fs::write(&sink, r#"{"name":"written-by-save"}"#).map_err(|e| e.to_string())
+    }));
+    let mut m = mk_app(doc, opts);
+
+    press(&mut m, &["ctrl+s"]);
+    assert!(m.notice.contains("Write to"), "{}", m.notice);
+    // our own write is not an external change: no reload question
+    assert!(!m.poll_disk_change());
+}
+
+#[test]
+fn missing_then_created_file_prompts_once() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("late.json");
+    let doc = name_doc("in-memory");
+    let mut m = app_with(crate::smodel::untyped(&doc), doc, file_opts(&path));
+
+    // the file does not exist: nothing to compare, no prompt
+    assert!(!m.poll_disk_change());
+    // it appears on disk: that is a drift, reload replaces the empty doc
+    std::fs::write(&path, r#"{"name":"created"}"#).expect("create");
+    assert!(m.poll_disk_change());
+    press(&mut m, &["y"]);
+    assert_eq!(str_at(&m.fs().doc, &["name"]), "created");
+}
+
+/// app_push_name drills into the name member (push + path) like enter would.
+fn app_push_name(m: &mut App) {
+    let root = m.fs().schema.root;
+    let name = child(&m.fs().schema, root, "name");
+    m.push(name, sp(&["name"]));
+}
+
+/// path_idx builds a single-index path segment path.
+fn path_idx(i: usize) -> Vec<PathSeg> {
+    vec![PathSeg::Idx(i)]
+}

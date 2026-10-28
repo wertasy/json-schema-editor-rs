@@ -271,7 +271,6 @@ fn compile_schema(loc: &str) -> Result<ui::LoadedSchema, String> {
     };
     let schema_member = smodel::root_has_property(&schema, "$schema");
     Ok(ui::LoadedSchema {
-        root: schema.root,
         schema,
         validate,
         status,

@@ -1234,7 +1234,6 @@ impl App {
         };
         let crate::ui::LoadedSchema {
             schema: model,
-            root,
             validate,
             status,
             schema_member,
@@ -1248,7 +1247,6 @@ impl App {
         };
         self.fs_mut().replace_schema_location(&loc, schema_member);
 
-        let kind = crate::ui::rows::menu_kind_for(&model, root);
         let f = self.fs_mut();
         f.schema = model;
         f.menu_cache.clear();
@@ -1260,21 +1258,7 @@ impl App {
         f.search_parked = None;
         f.jump_origin = None;
         f.jump_return = 0;
-        let mut st = MenuState {
-            kind,
-            node: root,
-            path: Vec::new(),
-            cursor: 0,
-            offset: 0,
-            variant_of: None,
-            one_of: None,
-            sel: HashSet::new(),
-            visual: false,
-            vanchor: 0,
-            filter: Default::default(),
-        };
-        crate::ui::rows::seed_variant_cursor(&f.schema, &mut st, &f.doc);
-        f.stack = vec![st];
+        f.stack = crate::ui::files::root_stack(&f.schema, &f.doc);
 
         self.nav = Default::default();
         self.hide_empty = false;

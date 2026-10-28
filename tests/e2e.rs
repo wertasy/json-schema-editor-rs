@@ -2895,3 +2895,49 @@ fn pty_internal_raw_textarea_is_windowed() {
     pty.send(b"\x03");
     pty.wait_exit(130);
 }
+
+#[test]
+fn pty_external_disk_change_prompts_and_reloads() {
+    let dir = mktemp();
+    let cfg = dir.path().join("watched.json");
+    write_file(&cfg, r#"{"name":"old"}"#);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(
+        &[cfg_arg.as_str()],
+        &[("JSE_CATALOG_URL", "http://127.0.0.1:1/catalog.json")],
+        &cache,
+    ) else {
+        return;
+    };
+    let (_, off) = pty.wait_frame("schema-less root", 0, &["name", "old", "↑/↓ move"]);
+
+    // Another process rewrites the file while the editor idles: the next
+    // poll tick (250ms) must surface the reload question.
+    write_file(&cfg, r#"{"name":"fresh-on-disk","extra":true}"#);
+    pty.wait_frame(
+        "reload question",
+        off,
+        &["changed on disk", "Reload? (y/n)"],
+    );
+
+    // n keeps the in-memory document and closes the ask.
+    pty.send(b"n");
+    let (snap, off) = pty.wait_frame("declined", off, &["old"]);
+    assert!(
+        !snap.get(off..).unwrap_or("").contains("changed on disk"),
+        "the ask must be gone after n"
+    );
+
+    // A second change asks again; this time reload and observe the new value.
+    write_file(&cfg, r#"{"name":"second-on-disk"}"#);
+    pty.wait_frame("reload question again", off, &["changed on disk"]);
+    pty.send(b"y");
+    let (snap, off) = pty.wait_frame("reloaded from disk", off, &["second-on-disk"]);
+    assert!(
+        !snap.get(off..).unwrap_or("").contains("changed on disk"),
+        "the ask must be gone after reload"
+    );
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+}

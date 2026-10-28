@@ -15,7 +15,7 @@ use regex::Regex;
 use crate::doc::jsondoc::path_string;
 use crate::doc::{Doc, NodeId, PathSeg, Value};
 use crate::smodel::{EnumOpt, FormNode, FormNodeId};
-use crate::ui::files::new_app;
+use crate::ui::files::{disk_stat_of, new_app};
 use crate::ui::nav::{Nav, NavGo};
 use crate::ui::rows::{
     MergeView, MergedKey, RowsEnv, SynthKey, dynamic_variants, match_variant_list, menu_rows_for,
@@ -1562,6 +1562,8 @@ impl App {
             f.with_errors = forced;
             f.baseline = Some(f.doc.clone()); // markers clear once saved
             f.comments_dirty = false;
+            // our own write is not an external change: re-record the stat
+            f.disk_stat = disk_stat_of(&f.opts.path);
             if exit {
                 self.exiting = true;
                 return;
@@ -2257,6 +2259,12 @@ pub fn run_menu(files: Vec<FileSession>) -> Outcome {
         // coalesced move + one frame.
         let events = read_event_burst();
         let mut redraw = false;
+        if events.is_empty() {
+            // Idle tick (the 250ms poll timeout): watch the active file's
+            // disk state. An external change opens the reload confirm; an
+            // unchanged file costs one stat per tick and no repaint.
+            redraw = app.poll_disk_change();
+        }
         let mut i = 0;
         while i < events.len() {
             match &events[i] {

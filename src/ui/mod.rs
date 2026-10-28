@@ -55,7 +55,6 @@ pub type ValidateFn = Arc<dyn Fn(&Doc) -> Vec<String> + Send + Sync>;
 /// through this shape so the UI never compiles schemas itself.
 pub struct LoadedSchema {
     pub schema: Schema,
-    pub root: FormNodeId,
     /// None when compilation failed or validation is disabled.
     pub validate: Option<ValidateFn>,
     /// Non-fatal status lines (offline cache, compile failure).

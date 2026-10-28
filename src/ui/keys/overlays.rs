@@ -1399,7 +1399,7 @@ impl App {
     /// schema-less model is a snapshot of the loaded shape, so a stale root
     /// would offer the wrong menu. Synth nodes and the stack are rebuilt
     /// against the new model.
-    pub(super) fn rebuild_schema_less_root(&mut self) {
+    pub(crate) fn rebuild_schema_less_root(&mut self) {
         let f = self.fs_mut();
         f.schema = crate::smodel::untyped(&f.doc);
         let root = f.schema.root;

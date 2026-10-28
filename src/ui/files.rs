@@ -13,13 +13,47 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::doc::PathSeg;
+use crate::doc::{Doc, PathSeg};
 use crate::smodel::Schema;
 use crate::ui::history::History;
-use crate::ui::menu::{App, FilePickState, FilterAction, IssuesState, Msg, Overlay, SearchState};
+use crate::ui::menu::{
+    App, ConfirmState, FilePickState, FilterAction, IssuesState, Msg, Overlay, SearchState,
+};
 use crate::ui::rows::{SynthKey, menu_kind_for, seed_variant_cursor};
 use crate::ui::util::wrap_cursor;
 use crate::ui::{FileSession, Issue, MenuState};
+
+/// diskStat is the coarse file identity the idle loop watches: modification
+/// time plus length (the length guards filesystems with coarse timestamps).
+pub type DiskStat = (std::time::SystemTime, u64);
+
+/// diskStatOf stats one session file; None when it cannot be stat'ed
+/// (missing file, empty path).
+pub fn disk_stat_of(path: &str) -> Option<DiskStat> {
+    let md = std::fs::metadata(path).ok()?;
+    Some((md.modified().ok()?, md.len()))
+}
+
+/// rootStack seeds the fresh top-of-stack menu for a (schema, document) pair:
+/// the root menu, opened on the matched variant when the root is a pinned
+/// oneOf. Session init, schema switching and disk reloads all start here.
+pub fn root_stack(schema: &Schema, doc: &Doc) -> Vec<MenuState> {
+    let mut st = MenuState {
+        kind: menu_kind_for(schema, schema.root),
+        node: schema.root,
+        path: Vec::new(),
+        cursor: 0,
+        offset: 0,
+        variant_of: None,
+        one_of: None,
+        sel: HashSet::new(),
+        visual: false,
+        vanchor: 0,
+        filter: Default::default(),
+    };
+    seed_variant_cursor(schema, &mut st, doc);
+    vec![st]
+}
 
 /// fileState is the per-file half of the Go listModel: everything that
 /// belongs to one document.
@@ -70,6 +104,11 @@ pub struct FileState {
     /// session info notices (aliases kept, schema source), dropped on the
     /// first key press
     pub startup: String,
+    /// the file's disk stat recorded at load and refreshed after each save,
+    /// reload or declined reload prompt; the idle loop re-stats the file and
+    /// opens the reload confirm when it drifted. None while the file does
+    /// not exist on disk (started empty) or cannot be stat'ed.
+    pub disk_stat: Option<DiskStat>,
 }
 
 impl FileState {
@@ -88,29 +127,15 @@ impl FileState {
     /// seeded root menu, the change baseline and the startup notices.
     pub fn new(session: FileSession) -> FileState {
         let schema = session.schema;
-        let root = session.root;
         let doc = session.doc;
         let meta = session.meta;
-        let mut stack = vec![MenuState {
-            kind: menu_kind_for(&schema, root),
-            node: root,
-            path: Vec::new(),
-            cursor: 0,
-            offset: 0,
-            variant_of: None,
-            one_of: None,
-            sel: HashSet::new(),
-            visual: false,
-            vanchor: 0,
-            filter: Default::default(),
-        }];
-        // oneOf root: open on the matched variant
-        seed_variant_cursor(&schema, stack.last_mut().expect("root pushed"), &doc);
+        let stack = root_stack(&schema, &doc);
         // Clone keeps merge-key members structurally while sharing nothing
         // with the live document, so edits through alias references keep
         // counting as changes.
         let baseline = doc.clone();
         let startup = session.opts.startup_notice.clone();
+        let disk_stat = disk_stat_of(&session.opts.path);
         FileState {
             schema,
             doc,
@@ -134,6 +159,7 @@ impl FileState {
             jump_return: 0,
             search_parked: None,
             startup,
+            disk_stat,
         }
     }
 }
@@ -207,6 +233,99 @@ impl App {
         }
         self.nav_forward();
         self.switch_file_state(i);
+    }
+
+    /// pollDiskChange re-stats the active file and opens the reload confirm
+    /// when its disk state drifted from the recorded one. The render loop
+    /// calls this only on idle ticks (no input pending) and never while a
+    /// surface is open: the confirm would steal its keys. The drifted stat is
+    /// recorded immediately so the question does not re-fire every tick; n
+    /// keeps the in-memory document until the next external change. A deleted
+    /// file is ignored (the in-memory copy stays editable and saving
+    /// recreates it). Returns true when the screen changed.
+    pub fn poll_disk_change(&mut self) -> bool {
+        if self.overlay.is_some() || self.exiting || self.aborted {
+            return false;
+        }
+        let path = self.fs().opts.path.clone();
+        if path.is_empty() {
+            return false;
+        }
+        let Some(stat) = disk_stat_of(&path) else {
+            return false;
+        };
+        if self.fs().disk_stat == Some(stat) {
+            return false;
+        }
+        self.fs_mut().disk_stat = Some(stat);
+        let idx = self.cur;
+        self.overlay = Some(Overlay::Confirm(ConfirmState {
+            title: format!("{} changed on disk. Reload? (y/n)", path),
+            hint: "y/enter/space reload from disk · n/esc keep editing".to_string(),
+            on_yes: Some(Box::new(move |m| m.reload_file(idx))),
+            on_no: None,
+        }));
+        true
+    }
+
+    /// reloadFile replaces the in-memory document of file `idx` with the
+    /// bytes on disk (yes arm of the reload confirm). The schema is kept: a
+    /// schema-driven file re-seeds the root menu against the same form tree,
+    /// a schema-less one re-derives the runtime root (the shape may have
+    /// changed). The baseline resets to the reloaded document so the change
+    /// marks clear; undo history is untouched — the dispatcher snapshots the
+    /// pre-reload document, so `u` reverts the reload like any other change.
+    /// A failed read or parse keeps the current document and reports it.
+    pub fn reload_file(&mut self, idx: usize) {
+        if idx >= self.files.len() {
+            return;
+        }
+        if idx != self.cur {
+            self.switch_file_state(idx);
+        }
+        let path = self.fs().opts.path.clone();
+        let codec = self.fs().codec;
+        let label = codec.label();
+        let data = match std::fs::read(&path) {
+            Ok(d) => d,
+            Err(e) => {
+                self.notice = format!("Reload failed: {}", e);
+                return;
+            }
+        };
+        let parsed = match codec.parse(&String::from_utf8_lossy(&data)) {
+            Ok(p) => p,
+            Err(e) => {
+                self.notice = format!("Reload failed: invalid {}: {}", label, e);
+                return;
+            }
+        };
+        let schema_less = self.fs().schema.schema_less;
+        {
+            let f = self.fs_mut();
+            f.doc = parsed.doc;
+            f.meta = parsed.meta;
+            f.baseline = Some(f.doc.clone());
+            f.comments_dirty = false;
+            f.issues_parked = None;
+            f.issues_return = 0;
+            f.issues_origin = None;
+            f.search_parked = None;
+            f.jump_origin = None;
+            f.jump_return = 0;
+            f.disk_stat = disk_stat_of(&f.opts.path);
+            if !schema_less {
+                f.stack = root_stack(&f.schema, &f.doc);
+            }
+        }
+        if schema_less {
+            self.rebuild_schema_less_root();
+        }
+        if self.opts().validate.is_none() {
+            let items = self.live_issues(Vec::new());
+            self.set_issues(items);
+        }
+        self.notice = format!("Reloaded {}", path);
     }
 
     /// keyFilePick drives the s-key file switcher: enter switches to the
