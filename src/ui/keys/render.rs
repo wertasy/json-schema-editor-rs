@@ -955,15 +955,10 @@ impl App {
         // Prefer the caret anchor; when the rectangle would run past the
         // right edge, slide it left so every candidate stays on screen —
         // the horizontal counterpart of the rows-above fallback above.
-        let rect = Self::suggestion_rect_width(
-            &e.sugs,
-            e.sug_idx,
-            &e.sug_prefix,
-            capacity,
-            line_right,
-        );
-        let left = (text_left + e.sug_col.saturating_sub(shift))
-            .min(line_right.saturating_sub(rect));
+        let rect =
+            Self::suggestion_rect_width(&e.sugs, e.sug_idx, &e.sug_prefix, capacity, line_right);
+        let left =
+            (text_left + e.sug_col.saturating_sub(shift)).min(line_right.saturating_sub(rect));
         let lines = Self::suggestion_overlay_lines(
             &e.sugs,
             e.sug_idx,
@@ -1403,7 +1398,11 @@ impl App {
         let mut lines = vec![format!(
             "{}{}",
             style::help(prompt),
-            ti_view(&s.ti, input_avail(self.width.saturating_sub(1), display_width(prompt))).1
+            ti_view(
+                &s.ti,
+                input_avail(self.width.saturating_sub(1), display_width(prompt))
+            )
+            .1
         )];
         if !s.err.is_empty() {
             lines.push(style::fg1(&format!("  {}", s.err)));

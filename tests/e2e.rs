@@ -867,7 +867,11 @@ fn pty_narrow_terminal_edit_scrolls_with_the_caret() {
 
     pty.wait_frame("narrow root", 0, &["name"]);
     pty.send(b"\r"); // inline edit, caret at the value end
-    pty.wait_frame("edit viewport shows the caret surroundings", 0, &["tailmarker"]);
+    pty.wait_frame(
+        "edit viewport shows the caret surroundings",
+        0,
+        &["tailmarker"],
+    );
     pty.send(b"ZZZ"); // typed at the caret; the head is far off screen
     let (snap, _) = pty.wait_frame("typed characters visible", 0, &["ZZZ"]);
     let row = snap

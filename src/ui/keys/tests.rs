@@ -11322,7 +11322,10 @@ fn narrow_title_keeps_the_dirty_dot_and_marks_the_cut() {
     let view = app.view();
     let ansi = regex::Regex::new("\x1b\\[[0-9;]*m").unwrap();
     let title = ansi.replace_all(view.lines().next().expect("title line"), "");
-    assert!(title.ends_with('●'), "the dirty dot must survive: {title:?}");
+    assert!(
+        title.ends_with('●'),
+        "the dirty dot must survive: {title:?}"
+    );
     assert!(title.contains('…'), "the cut must be marked: {title:?}");
     assert!(
         title.chars().count() <= app.width - 1,

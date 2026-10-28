@@ -89,7 +89,10 @@ mod tests {
         let lines = load(&file);
         assert_eq!(lines.len(), MAX_CMD_HISTORY);
         assert_eq!(lines[0], "!echo 5");
-        assert_eq!(lines[MAX_CMD_HISTORY - 1], format!("!echo {}", MAX_CMD_HISTORY + 4));
+        assert_eq!(
+            lines[MAX_CMD_HISTORY - 1],
+            format!("!echo {}", MAX_CMD_HISTORY + 4)
+        );
         assert!(lines.iter().all(|l| !l.trim().is_empty()));
     }
 
