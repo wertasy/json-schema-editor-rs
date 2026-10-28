@@ -297,15 +297,15 @@ impl App {
                     Some(tail) if !tail.is_empty() => format!("…{tail}"),
                     _ => raw.clone(),
                 };
-                display_width(&format!("{}{}", cursor_prefix(false), shown))
+                display_width(&shown)
             })
             .max()
             .unwrap_or(0);
         natural.max(SUG_MIN_WIDTH).min(avail)
     }
 
-    /// suggestion_overlay_lines renders one candidate window: `>` on the
-    /// selected row, accent-colored text for it, faint text for the rest.
+    /// suggestion_overlay_lines renders one candidate window: the selected
+    /// row is reverse-video across the full rectangle, the rest are faint.
     pub(super) fn suggestion_overlay_lines(
         sugs: &[String],
         idx: i64,
@@ -333,11 +333,7 @@ impl App {
             .collect();
         let natural = displays
             .iter()
-            .enumerate()
-            .map(|(j, shown)| {
-                let on = selected && start + j == sel;
-                display_width(&format!("{}{}", cursor_prefix(on), shown))
-            })
+            .map(|shown| display_width(shown))
             .max()
             .unwrap_or(0);
         let width = natural.max(SUG_MIN_WIDTH).min(avail);
@@ -348,15 +344,9 @@ impl App {
         for (j, shown) in displays.iter().enumerate() {
             let i = start + j;
             let on = selected && i == sel;
-            let marker = cursor_prefix(on);
-            let content_width = width.saturating_sub(display_width(marker));
-            let mut content = shown.clone();
-            if display_width(&content) > content_width {
-                content = clip_left_ellipsis(&content, content_width);
-            }
-            let mut line = format!("{marker}{content}");
+            let mut line = shown.clone();
             if display_width(&line) > width {
-                line = clip_display(&line, width);
+                line = clip_left_ellipsis(&line, width);
             }
             // Fill the row so the background paints a solid rectangle, not
             // just the glyphs of the candidate text.
@@ -412,15 +402,28 @@ impl App {
             } else {
                 -1
             };
+        // Anchor the window at the caret column recorded when the list was
+        // built — the same caret-following rectangle the inline edit input
+        // draws. The input viewport may have scrolled since (a long command
+        // on a narrow terminal), so the anchor moves with the visible
+        // window; when the rectangle would run past the right edge it
+        // slides left so every candidate stays on screen.
+        let text_left = display_width(":");
+        let (_, _, shift) = ti_window(&s.ti, input_avail(self.width.saturating_sub(1), text_left));
+        let line_right = self.width.saturating_sub(1);
+        let rect =
+            Self::suggestion_rect_width(&s.sug, idx, &s.sug_prefix, CMD_SUG_WINDOW, line_right);
+        let left =
+            (text_left + s.sug_col.saturating_sub(shift)).min(line_right.saturating_sub(rect));
         let lines = Self::suggestion_overlay_lines(
             &s.sug,
             idx,
             &s.sug_prefix,
             CMD_SUG_WINDOW,
-            1, // after the `:` prompt
-            self.width.saturating_sub(1),
+            left,
+            line_right,
         );
-        Self::indent_overlay(lines, 1)
+        Self::indent_overlay(lines, left)
     }
 
     /// writeSuggestionLines is the W write-path candidate window (above the
@@ -950,7 +953,7 @@ impl App {
         // with the visible window.
         let title = self.title_col(&self.row_title_text(row), title_width);
         let text_left = 2 + display_width(&title);
-        let (shift, ..) = ti_window(&e.ti, self.edit_input_avail(&title));
+        let (_, _, shift) = ti_window(&e.ti, self.edit_input_avail(&title));
         let line_right = self.width.saturating_sub(1);
         // Prefer the caret anchor; when the rectangle would run past the
         // right edge, slide it left so every candidate stays on screen —

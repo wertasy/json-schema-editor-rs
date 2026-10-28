@@ -64,6 +64,7 @@ fn cmd_sug_refresh(s: &mut CommandState, file_path: &str) {
     s.sug_line.clear();
     s.sug_start = done.start;
     s.sug_end = cursor;
+    s.sug_col = display_width(&s.ti.value()[..s.ti.cursor_byte()]);
 }
 
 /// cmd_complete applies the next/previous completion. A fresh cycle scans the

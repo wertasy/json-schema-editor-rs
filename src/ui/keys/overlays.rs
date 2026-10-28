@@ -636,6 +636,7 @@ impl App {
             sug_line: String::new(),
             sug_start: 0,
             sug_end: 0,
+            sug_col: 0,
         };
         let path = self.opts().path.clone();
         cmd_sug_refresh(&mut s, &path);

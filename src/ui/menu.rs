@@ -90,10 +90,10 @@ pub mod style {
     pub fn diff(s: &str) -> String {
         render("1;38;5;204", s)
     }
-    /// Completion candidate rows share a dark background; the selected one
-    /// keeps the accent foreground.
+    /// The selected completion candidate row renders in reverse video across
+    /// the whole padded row rectangle.
     pub fn sug_sel(s: &str) -> String {
-        render("38;5;39;48;5;236", s)
+        render("7", s)
     }
     pub fn sug_dim(s: &str) -> String {
         render("2;48;5;236", s)
@@ -479,6 +479,9 @@ pub struct CommandState {
     /// byte range of the current line owned by the selected candidate
     pub sug_start: usize,
     pub sug_end: usize,
+    /// display column of the caret when the current suggestion list was
+    /// built; the candidate window's left edge is anchored there
+    pub sug_col: usize,
 }
 
 /// Inline '/'-filter state shared by every list overlay.

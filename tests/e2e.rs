@@ -1303,25 +1303,25 @@ fn pty_shell_tab_arrows_keep_the_candidate_list() {
     pty.send(b":");
     let (_, off) = pty.wait_frame("command prompt", 0, &[": command"]);
     // Builtin commands appear on open; `!` switches to PATH completion.
-    pty.wait_frame("builtin candidates", off, &["  wa", "  wq", "  waq"]);
+    pty.wait_frame("builtin candidates", off, &["wa", "wq", "waq"]);
     pty.send(b"!zzal");
     let (_, off) = pty.wait_frame(
         "typed with automatic candidates",
         off,
-        &[":!zzal", "  zzalpha", "  zzalpine", "  zzalps"],
+        &[":!zzal", "zzalpha", "zzalpine", "zzalps"],
     );
     pty.send(b"\t");
     let (_, off) = pty.wait_frame(
         "candidate overlay",
         off,
-        &["> zzalpha", "  zzalpine", "  zzalps", ":!zzalpha"],
+        &["zzalpha", "zzalpine", "zzalps", ":!zzalpha"],
     );
     pty.send(b"\x1b[B"); // down
-    let (_, off) = pty.wait_frame("down candidate", off, &["> zzalpine", ":!zzalpine"]);
+    let (_, off) = pty.wait_frame("down candidate", off, &["zzalpine", ":!zzalpine"]);
     pty.send(b"\x1b[A"); // up
-    let (_, off) = pty.wait_frame("up candidate", off, &["> zzalpha", ":!zzalpha"]);
+    let (_, off) = pty.wait_frame("up candidate", off, &["zzalpha", ":!zzalpha"]);
     pty.send(b"\t");
-    pty.wait_frame("tab after arrows cycles", off, &["> zzalpine"]);
+    pty.wait_frame("tab after arrows cycles", off, &["zzalpine", ":!zzalpine"]);
     pty.send(b"\x03");
     pty.wait_exit(130);
 }

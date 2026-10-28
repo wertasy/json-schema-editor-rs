@@ -11161,24 +11161,23 @@ fn command_tab_completes_the_word_before_the_cursor_and_keeps_the_suffix() {
 
     let view = app.view();
     assert!(
-        view.contains("\x1b[38;5;39;48;5;236m> …pha.txt"),
-        "selected candidate must use the accent color: {view}"
+        view.contains("\x1b[7m…pha.txt"),
+        "selected candidate must use reverse video: {view}"
     );
     assert!(
-        view.contains("  …pine"),
+        view.contains("…pine"),
         "the other candidate must be rendered too: {view}"
     );
     let line = view
         .lines()
-        .find(|l| l.contains("\x1b[38;5;39;48;5;236m> …pha.txt"))
+        .find(|l| l.contains("\x1b[7m…pha.txt"))
         .expect("selected command candidate line");
-    let start = line
-        .find("\x1b[38;5;39;48;5;236m")
-        .expect("candidate background");
+    let start = line.find("\x1b[7m").expect("candidate background");
+    let anchor = display_width(":") + display_width(&format!("!cat {base}/al"));
     assert_eq!(
         display_width(&line[..start]),
-        1,
-        "command candidates align after the : prompt"
+        anchor,
+        "command candidates anchor at the caret column that triggered completion"
     );
     // While completion is active, the arrow keys move the candidate cursor
     // instead of recalling command history.
@@ -11186,14 +11185,82 @@ fn command_tab_completes_the_word_before_the_cursor_and_keeps_the_suffix() {
     assert_eq!(command_value(&app), format!("!cat {base}/alpineZZ"));
     let view = app.view();
     assert!(
-        view.contains("\x1b[38;5;39;48;5;236m> …pine"),
-        "selection marker must follow the arrow key: {view}"
+        view.contains("\x1b[7m…pine"),
+        "reverse-video selection must follow the arrow key: {view}"
+    );
+    let line = view
+        .lines()
+        .find(|l| l.contains("\x1b[7m…pine"))
+        .expect("selected command candidate line");
+    let start = line.find("\x1b[7m").expect("candidate background");
+    assert_eq!(
+        display_width(&line[..start]),
+        anchor,
+        "cycling candidates must keep the window at the trigger column: {view}"
     );
     press(&mut app, &["up"]);
     assert_eq!(command_value(&app), format!("!cat {base}/alpha.txtZZ"));
     // Tab after arrow movement keeps using the same candidate list.
     press(&mut app, &["tab"]);
     assert_eq!(command_value(&app), format!("!cat {base}/alpineZZ"));
+}
+
+/// viewport_cell_shift mirrors ti_window's scroll rule but returns the
+/// display cells skipped before the viewport start — the unit the window
+/// anchor must subtract. A char count undercounts wide prefixes (each CJK
+/// char is two cells), so this pins the unit independently of ti_window's
+/// tuple layout.
+fn viewport_cell_shift(value: &str, cursor_cell: usize, avail: usize) -> usize {
+    let mut skipped = 0usize;
+    for c in value.chars() {
+        if cursor_cell - skipped < avail.max(1) {
+            break;
+        }
+        skipped += char_width(c);
+    }
+    skipped
+}
+
+#[test]
+fn command_window_anchor_subtracts_scrolled_cells_not_chars() {
+    // A wide prefix scrolled out of the command viewport must be subtracted
+    // in display cells. Applying a longer candidate scrolls the viewport
+    // further while sug_col stays at the trigger caret, so an anchor that
+    // dropped the skipped prefix as a char count would land three columns
+    // (one extra cell per CJK char) too far right.
+    let dir = tempfile::tempdir().unwrap();
+    let inner = dir.path().join("日本語").join("b".repeat(40));
+    std::fs::create_dir_all(&inner).unwrap();
+    let long = format!("{}lpha.txt", "a".repeat(24));
+    std::fs::write(inner.join(&long), "").unwrap();
+    std::fs::write(inner.join(format!("{}lpine", "a".repeat(24))), "").unwrap();
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    app.width = 40;
+    app.height = 24;
+    press(&mut app, &[":"]);
+    let base = dir.path().display().to_string();
+    let trigger = format!("!cat {base}/日本語/{}/a", "b".repeat(40));
+    press(&mut app, &[trigger.as_str()]);
+    press(&mut app, &["tab"]);
+    assert_eq!(
+        command_value(&app),
+        format!("!cat {base}/日本語/{}/{long}", "b".repeat(40))
+    );
+    let view = app.view();
+    let line = view
+        .lines()
+        .find(|l| l.contains(&format!("\x1b[7m…{}lpha.txt", "a".repeat(23))))
+        .expect("selected command candidate line");
+    let start = line.find("\x1b[7m").expect("candidate background");
+    let value = command_value(&app);
+    let avail = input_avail(app.width - 1, display_width(":"));
+    let expected_left = display_width(":") + display_width(&trigger)
+        - viewport_cell_shift(&value, display_width(&value), avail);
+    assert_eq!(
+        display_width(&line[..start]),
+        expected_left,
+        "the anchor must subtract the skipped display cells, not the char count: {view}"
+    );
 }
 
 #[test]
@@ -11386,11 +11453,11 @@ fn edit_input_arrows_move_completion_selection() {
     // Entering the input starts completion without a tab press.
     let view = app.view();
     assert!(
-        view.contains("\x1b[2;48;5;236m  alpha"),
+        view.contains("\x1b[2;48;5;236malpha"),
         "candidates must appear as soon as the input opens: {view}"
     );
     assert!(
-        !view.contains("\x1b[38;5;39;48;5;236m> alpha"),
+        !view.contains("\x1b[7malpha"),
         "the popup must not preselect a candidate: {view}"
     );
 
@@ -11398,25 +11465,23 @@ fn edit_input_arrows_move_completion_selection() {
     assert_eq!(edit(&app), ("alpha".to_string(), 0, 3));
     let view = app.view();
     assert!(
-        view.contains("\x1b[38;5;39;48;5;236m> alpha"),
-        "selected candidate must use the accent color: {view}"
+        view.contains("\x1b[7malpha"),
+        "selected candidate must use reverse video: {view}"
     );
     assert!(
-        view.contains("\x1b[2;48;5;236m  alpine"),
+        view.contains("\x1b[2;48;5;236malpine"),
         "other candidates must be rendered faintly: {view}"
     );
     let line = view
         .lines()
-        .find(|l| l.contains("\x1b[38;5;39;48;5;236m> alpha"))
+        .find(|l| l.contains("\x1b[7malpha"))
         .expect("selected candidate line");
-    let start = line
-        .find("\x1b[38;5;39;48;5;236m")
-        .expect("candidate background");
+    let start = line.find("\x1b[7m").expect("candidate background");
     assert!(
         line[..start].contains("Other 1"),
         "the overlay must leave the row content left of its rectangle visible: {view}"
     );
-    let body = &line[start + "\x1b[38;5;39;48;5;236m".len()..];
+    let body = &line[start + "\x1b[7m".len()..];
     let end = body.find("\x1b[0m").expect("candidate reset");
     assert_eq!(
         display_width(&body[..end]),
@@ -11477,7 +11542,7 @@ fn edit_completion_overlay_starts_at_the_caret_column() {
     let view = app.view();
     let line = view
         .lines()
-        .find(|l| l.contains("\x1b[2;48;5;236m  alpha"))
+        .find(|l| l.contains("\x1b[2;48;5;236malpha"))
         .expect("candidate line");
     let start = line.find("\x1b[2;48;5;236m").expect("candidate background");
     assert_eq!(
@@ -11496,11 +11561,9 @@ fn edit_completion_overlay_starts_at_the_caret_column() {
     let view = app.view();
     let line = view
         .lines()
-        .find(|l| l.contains("\x1b[38;5;39;48;5;236m"))
+        .find(|l| l.contains("\x1b[7malpha"))
         .expect("selected candidate line");
-    let start = line
-        .find("\x1b[38;5;39;48;5;236m")
-        .expect("selected candidate background");
+    let start = line.find("\x1b[7m").expect("selected candidate background");
     assert_eq!(
         display_width(&line[..start]),
         expected,
@@ -11597,7 +11660,7 @@ fn edit_completion_window_stays_inside_the_terminal_at_the_right_edge() {
     let view = app.view();
     let line = view
         .lines()
-        .find(|l| l.contains("\x1b[2;48;5;236m  …2"))
+        .find(|l| l.contains("\x1b[2;48;5;236m…2"))
         .expect("candidate line");
     let start = line.find("\x1b[2;48;5;236m").expect("candidate background");
     let body = &line[start + "\x1b[2;48;5;236m".len()..];
@@ -11621,11 +11684,9 @@ fn edit_completion_window_stays_inside_the_terminal_at_the_right_edge() {
     let view = app.view();
     let line = view
         .lines()
-        .find(|l| l.contains("\x1b[38;5;39;48;5;236m> …1"))
+        .find(|l| l.contains("\x1b[7m…1"))
         .expect("selected candidate line");
-    let start = line
-        .find("\x1b[38;5;39;48;5;236m")
-        .expect("selected candidate background");
+    let start = line.find("\x1b[7m").expect("selected candidate background");
     assert!(
         display_width(&line[..start]) + rect <= app.width - 1,
         "the selected window stays inside the terminal: {view}"
@@ -11742,23 +11803,21 @@ fn write_path_arrows_move_completion_selection() {
     };
     let view = app.view();
     assert!(
-        view.contains("\x1b[2;48;5;236m  …pha.txt"),
+        view.contains("\x1b[2;48;5;236m…pha.txt"),
         "write suggestions must appear on open: {view}"
     );
     press(&mut app, &["tab"]);
     assert_eq!(write(&app).2, 2);
     let view = app.view();
     assert!(
-        view.contains("\x1b[38;5;39;48;5;236m> …pha.txt"),
-        "write-path selection must use the accent color: {view}"
+        view.contains("\x1b[7m…pha.txt"),
+        "write-path selection must use reverse video: {view}"
     );
     let line = view
         .lines()
-        .find(|l| l.contains("\x1b[38;5;39;48;5;236m> "))
+        .find(|l| l.contains("\x1b[7m…pha.txt"))
         .expect("selected write candidate line");
-    let start = line
-        .find("\x1b[38;5;39;48;5;236m")
-        .expect("candidate background");
+    let start = line.find("\x1b[7m").expect("candidate background");
     let rows = app.menu_rows();
     let tw = app.menu_title_col_width(&rows);
     let input_left = display_width(&app.title_col("Write to", tw));
@@ -11796,11 +11855,11 @@ fn edit_candidate_overlay_uses_free_rows_below_the_last_row() {
     press(&mut app, &["tab"]);
     let view = app.view();
     assert!(
-        view.contains("\x1b[38;5;39;48;5;236m> alpha"),
+        view.contains("\x1b[7malpha"),
         "candidate overlay must use free rows below the last menu row: {view}"
     );
     assert!(
-        view.contains("\x1b[2;48;5;236m  alpine") && view.contains("\x1b[2;48;5;236m  alps"),
+        view.contains("\x1b[2;48;5;236malpine") && view.contains("\x1b[2;48;5;236malps"),
         "all candidates must be visible: {view}"
     );
     assert!(
@@ -11863,7 +11922,7 @@ fn edit_completion_moves_above_a_row_at_the_bottom() {
 }
 
 #[test]
-fn anchor_candidate_overlay_uses_accent_and_arrow_selection() {
+fn anchor_candidate_overlay_uses_reverse_video_and_arrow_selection() {
     let mut m =
         completion_model("sname: &alpha one\nsnum: &beta 2\nextra1: x\nextra2: y\nextra3: z\n");
     set_cursor(&mut m, |r| {
@@ -11872,30 +11931,28 @@ fn anchor_candidate_overlay_uses_accent_and_arrow_selection() {
     press(&mut m, &["*"]);
     let view = m.view();
     assert!(
-        view.contains("\x1b[2;48;5;236m  alpha"),
+        view.contains("\x1b[2;48;5;236malpha"),
         "anchor suggestions must appear on open: {view}"
     );
     assert!(
-        !view.contains("\x1b[38;5;39;48;5;236m> alpha"),
+        !view.contains("\x1b[7malpha"),
         "the anchor popup must not preselect a candidate: {view}"
     );
     press(&mut m, &["tab"]);
     let view = m.view();
     assert!(
-        view.contains("\x1b[38;5;39;48;5;236m> alpha"),
-        "anchor candidate overlay must use the accent color: {view}"
+        view.contains("\x1b[7malpha"),
+        "anchor candidate overlay must use reverse video: {view}"
     );
     assert!(
-        view.contains("\x1b[2;48;5;236m  beta"),
+        view.contains("\x1b[2;48;5;236mbeta"),
         "the other anchor candidate must be faint: {view}"
     );
     let line = view
         .lines()
-        .find(|l| l.contains("\x1b[38;5;39;48;5;236m> alpha"))
+        .find(|l| l.contains("\x1b[7malpha"))
         .expect("selected anchor candidate line");
-    let start = line
-        .find("\x1b[38;5;39;48;5;236m")
-        .expect("candidate background");
+    let start = line.find("\x1b[7m").expect("candidate background");
     assert_eq!(
         display_width(&line[..start]),
         display_width("  reference: "),
@@ -11908,7 +11965,7 @@ fn anchor_candidate_overlay_uses_accent_and_arrow_selection() {
     }
     let view = m.view();
     assert!(
-        view.contains("\x1b[38;5;39;48;5;236m> beta"),
+        view.contains("\x1b[7mbeta"),
         "arrow selection must move the accent marker: {view}"
     );
 }
