@@ -3502,6 +3502,16 @@ fn clip_app(doc: Doc) -> (App, Arc<Mutex<Option<String>>>) {
     (app_with(test_schema(), doc, opts), clip)
 }
 
+/// clip_app_codec is clip_app with the session codec overridden.
+fn clip_app_codec(
+    doc: Doc,
+    codec: &'static dyn crate::doc::Codec,
+) -> (App, Arc<Mutex<Option<String>>>) {
+    let (mut m, clip) = clip_app(doc);
+    m.fs_mut().codec = codec;
+    (m, clip)
+}
+
 /// enter_tags drills root → logging → tags items menu (cursor on item 0).
 /// Root rows follow schema order: name, mode, server, logging, mounts, auth;
 /// logging rows are levels, tags.
@@ -3516,7 +3526,7 @@ fn paste_multi_selected_string_items_round_trip() {
     enter_tags(&mut m);
     press(&mut m, &["v", "j", "y"]);
     assert_eq!(m.notice, "Copied 2 values");
-    assert_eq!(clip.lock().as_deref(), Some("alpha\nbeta"));
+    assert_eq!(clip.lock().as_deref(), Some("alpha,beta"));
     // the copy ends the visual select; the marks go with it
     assert!(!m.top().unwrap().visual);
     assert!(m.top().unwrap().sel.is_empty());
@@ -3536,22 +3546,6 @@ fn paste_multi_selected_string_items_round_trip() {
     press(&mut m, &["j"]);
     assert!(!m.top().unwrap().visual);
     assert!(m.top().unwrap().sel.is_empty());
-}
-
-#[test]
-fn paste_multi_selected_string_items_above_cursor() {
-    let (mut m, clip) = clip_app(tags_doc());
-    enter_tags(&mut m);
-    press(&mut m, &["v", "j", "y"]);
-    assert_eq!(clip.lock().as_deref(), Some("alpha\nbeta"));
-    press(&mut m, &["up", "P"]); // item 0: P inserts above it
-    assert_eq!(m.notice, "pasted 2 items into $.logging.tags");
-    for (i, want) in ["alpha", "beta", "alpha", "beta"].iter().enumerate() {
-        assert_eq!(
-            sget(&m.fs().doc, &[ks("logging"), ks("tags"), PathSeg::Idx(i)]),
-            *want
-        );
-    }
 }
 
 #[test]
@@ -3643,6 +3637,202 @@ fn paste_clears_marked_selection() {
     press(&mut m, &["p"]);
     assert_eq!(m.notice, "pasted 2 items into $.logging.tags");
     assert!(m.top().unwrap().sel.is_empty());
+}
+
+#[test]
+fn paste_multi_selected_object_items_round_trip() {
+    // containers copy one compact line per element so the selection splices
+    // back as items in every format
+    for file in ["a.json", "a.jsonc", "a.yaml", "a.toml"] {
+        let (mut m, clip) = clip_app_codec(two_mount_doc(), crate::doc::codec_for(file));
+        press(&mut m, &["down", "down", "down", "down", "enter"]);
+        press(&mut m, &["v", "j", "y"]);
+        assert_eq!(m.notice, "Copied 2 values", "{file}");
+        assert_eq!(
+            clip.lock().as_deref(),
+            Some(r#"{"src":"/a","dst":"/1"},{"src":"/b","dst":"/2"}"#),
+            "{file}"
+        );
+
+        // cursor on item 1: p splices the copied objects below it
+        press(&mut m, &["p"]);
+        assert_eq!(m.notice, "pasted 2 items into $.mounts", "{file}");
+        assert_eq!(arr_len(&m.fs().doc, &sp(&["mounts"])), 4, "{file}");
+        assert_eq!(mount_src(&m.fs().doc, 2), "/a", "{file}");
+        assert_eq!(mount_src(&m.fs().doc, 3), "/b", "{file}");
+        assert_eq!(
+            sget(&m.fs().doc, &[ks("mounts"), PathSeg::Idx(3), ks("dst")]),
+            "/2",
+            "{file}"
+        );
+    }
+}
+
+#[test]
+fn cut_multi_selected_object_items_clipboard() {
+    let (mut m, clip) = clip_app_codec(two_mount_doc(), crate::doc::codec_for("a.jsonc"));
+    press(&mut m, &["down", "down", "down", "down", "enter"]);
+    press(&mut m, &["v", "j", "x"]);
+    assert_eq!(m.notice, "Cut 2 values");
+    assert_eq!(
+        clip.lock().as_deref(),
+        Some(r#"{"src":"/a","dst":"/1"},{"src":"/b","dst":"/2"}"#)
+    );
+    assert_eq!(arr_len(&m.fs().doc, &sp(&["mounts"])), 0);
+}
+
+#[test]
+fn paste_separator_split_into_array() {
+    let tag_at =
+        |m: &App, i: usize| sget(&m.fs().doc, &[ks("logging"), ks("tags"), PathSeg::Idx(i)]);
+
+    // commas split bare strings into items
+    let mut m = paste_app(tags_doc(), "alpha, beta");
+    enter_tags(&mut m);
+    press(&mut m, &["down", "p"]);
+    assert_eq!(m.notice, "pasted 2 items into $.logging.tags");
+    assert_eq!(tag_at(&m, 2), "alpha");
+    assert_eq!(tag_at(&m, 3), "beta");
+
+    // spaces split too
+    let mut m = paste_app(tags_doc(), "alpha beta gamma");
+    enter_tags(&mut m);
+    press(&mut m, &["down", "p"]);
+    assert_eq!(m.notice, "pasted 3 items into $.logging.tags");
+    assert_eq!(tag_at(&m, 2), "alpha");
+    assert_eq!(tag_at(&m, 3), "beta");
+    assert_eq!(tag_at(&m, 4), "gamma");
+
+    // pieces parse as JSON when they can
+    let mut m = paste_app(tags_doc(), "x, 7, true");
+    enter_tags(&mut m);
+    press(&mut m, &["down", "p"]);
+    assert_eq!(m.notice, "pasted 3 items into $.logging.tags");
+    assert_eq!(tag_at(&m, 2), "x");
+    let num = m
+        .fs()
+        .doc
+        .get(&[ks("logging"), ks("tags"), PathSeg::Idx(3)])
+        .map(|n| m.fs().doc.value(n));
+    assert!(matches!(num, Some(Value::Num(text)) if text == "7"));
+    let flag = m
+        .fs()
+        .doc
+        .get(&[ks("logging"), ks("tags"), PathSeg::Idx(4)])
+        .map(|n| m.fs().doc.value(n));
+    assert!(matches!(flag, Some(Value::Bool(true))));
+}
+
+#[test]
+fn paste_p_keeps_value_semantics_on_string_rows() {
+    // P on a string item row replaces that value with the whole text:
+    // single strings with separators must not split
+    let mut m = paste_app(tags_doc(), "alpha, beta");
+    enter_tags(&mut m);
+    press(&mut m, &["P"]);
+    assert_eq!(m.notice, "pasted value into $.logging.tags[0]");
+    assert_eq!(arr_len(&m.fs().doc, &sp(&["logging", "tags"])), 2);
+    assert_eq!(
+        sget(&m.fs().doc, &[ks("logging"), ks("tags"), PathSeg::Idx(0)]),
+        "alpha, beta"
+    );
+
+    // a parseable single value keeps the p notice, even in an items menu
+    let mut m = paste_app(tags_doc(), "99");
+    enter_tags(&mut m);
+    press(&mut m, &["p"]);
+    assert_eq!(
+        m.notice,
+        "a single value replaces a row's value — press P on the row"
+    );
+    assert_eq!(arr_len(&m.fs().doc, &sp(&["logging", "tags"])), 2);
+}
+
+#[test]
+fn paste_comma_separated_objects_into_array() {
+    // the exact form a multi-object selection copies: one line, top-level
+    // commas between units
+    let text = r#"{"src":"/c","dst":"/d"},{"src":"/e","dst":"/f"}"#;
+    let mut m = paste_app(two_mount_doc(), text);
+    press(&mut m, &["down", "down", "down", "down", "enter"]);
+    press(&mut m, &["down", "p"]);
+    assert_eq!(m.notice, "pasted 2 items into $.mounts");
+    assert_eq!(arr_len(&m.fs().doc, &sp(&["mounts"])), 4);
+    assert_eq!(mount_src(&m.fs().doc, 2), "/c");
+    assert_eq!(mount_src(&m.fs().doc, 3), "/e");
+    assert_eq!(
+        sget(&m.fs().doc, &[ks("mounts"), PathSeg::Idx(3), ks("dst")]),
+        "/f"
+    );
+
+    // P above the cursor item
+    let mut m = paste_app(two_mount_doc(), text);
+    press(&mut m, &["down", "down", "down", "down", "enter"]);
+    press(&mut m, &["down", "P"]);
+    assert_eq!(m.notice, "pasted 2 items into $.mounts");
+    assert_eq!(arr_len(&m.fs().doc, &sp(&["mounts"])), 4);
+    assert_eq!(mount_src(&m.fs().doc, 1), "/c");
+    assert_eq!(mount_src(&m.fs().doc, 2), "/e");
+    assert_eq!(mount_src(&m.fs().doc, 3), "/b");
+
+    // commas inside braces or brackets must not split
+    let mut m = paste_app(
+        two_mount_doc(),
+        r#"{ "src": "/c" },{ "src": "/d", "k": [1, 2] }"#,
+    );
+    press(&mut m, &["down", "down", "down", "down", "enter"]);
+    press(&mut m, &["p"]);
+    assert_eq!(m.notice, "pasted 2 items into $.mounts");
+    assert_eq!(mount_src(&m.fs().doc, 2), "/d");
+    let k = m
+        .fs()
+        .doc
+        .get(&[ks("mounts"), PathSeg::Idx(2), ks("k")])
+        .map(|n| m.fs().doc.compact(n));
+    assert_eq!(k.as_deref(), Some("[1,2]"));
+
+    // works into YAML documents too (JSON units are format-neutral)
+    let mut m = yaml_paste_app(two_mount_doc(), text);
+    press(&mut m, &["down", "down", "down", "down", "enter"]);
+    press(&mut m, &["down", "p"]);
+    assert_eq!(m.notice, "pasted 2 items into $.mounts");
+    assert_eq!(mount_src(&m.fs().doc, 2), "/c");
+    assert_eq!(mount_src(&m.fs().doc, 3), "/e");
+}
+
+#[test]
+fn selection_special_strings_round_trip() {
+    // strings that would corrupt a comma-joined line copy compact-quoted
+    let doc = dbuild(|db| {
+        db.obj(vec![(
+            "logging",
+            db.obj(vec![(
+                "tags",
+                db.arr(vec![
+                    db.s("a,b"),
+                    db.s("hello world"),
+                    db.s(""),
+                    db.s("plain"),
+                ]),
+            )]),
+        )])
+    });
+    let (mut m, clip) = clip_app(doc);
+    enter_tags(&mut m);
+    press(&mut m, &["v", "j", "j", "j", "y"]);
+    assert_eq!(m.notice, "Copied 4 values");
+    assert_eq!(
+        clip.lock().as_deref(),
+        Some(r#""a,b","hello world","",plain"#)
+    );
+    press(&mut m, &["p"]);
+    assert_eq!(m.notice, "pasted 4 items into $.logging.tags");
+    let tag_at =
+        |m: &App, i: usize| sget(&m.fs().doc, &[ks("logging"), ks("tags"), PathSeg::Idx(i)]);
+    assert_eq!(tag_at(&m, 4), "a,b");
+    assert_eq!(tag_at(&m, 5), "hello world");
+    assert_eq!(tag_at(&m, 6), "");
+    assert_eq!(tag_at(&m, 7), "plain");
 }
 
 #[test]
@@ -8933,7 +9123,7 @@ fn array_item_selection_copies_values() {
     assert_eq!(m.top().unwrap().kind, MenuKind::Items);
     press(&mut m, &["down", "m", "down", "m"]);
     press(&mut m, &["y"]);
-    assert_eq!(*copies.lock(), "prod\ndev");
+    assert_eq!(*copies.lock(), "prod,dev");
     assert_eq!(m.notice, "Copied 2 values");
     assert!(m.top().unwrap().sel.is_empty());
 }

@@ -179,7 +179,18 @@ impl App {
                 None => (String::new(), false, key_refusal.to_string()),
             }
         } else {
-            (self.copy_value_text(v), true, String::new())
+            // array item menus copy elements one per line: containers
+            // compact so the joined text splices back as items
+            let items_page = self.top().map(|st| st.kind) == Some(MenuKind::Items);
+            (
+                if items_page {
+                    self.item_copy_text(v)
+                } else {
+                    self.copy_value_text(v)
+                },
+                true,
+                String::new(),
+            )
         }
     }
 
@@ -193,6 +204,29 @@ impl App {
             return s.trim_end_matches('\n').to_string();
         }
         self.doc().compact(v)
+    }
+
+    /// itemCopyText is one array-element copy unit: containers compact onto
+    /// a single line so element selections join one element per line and
+    /// splice back as items; strings stay raw, scalars keep their literal.
+    pub(super) fn item_copy_text(&self, v: NodeId) -> String {
+        if matches!(self.doc().value(v), Value::Object(_) | Value::Array(_)) {
+            return self.doc().compact(v);
+        }
+        self.copy_value_text(v)
+    }
+
+    /// selectionItemText renders one element for a comma-joined selection
+    /// copy: containers compact, bare-safe strings raw, anything else
+    /// compact-quoted so the joined line splices back exactly.
+    fn selection_item_text(&self, v: NodeId) -> String {
+        match self.doc().value(v) {
+            Value::Object(_) | Value::Array(_) => self.doc().compact(v),
+            Value::Str(s) if !s.is_empty() && !s.contains([',', '"', ' ', '\t', '\n', '\r']) => {
+                s.clone()
+            }
+            _ => self.doc().compact(v),
+        }
     }
 
     /// copyPairText is the y text (Go copyPairText).
@@ -275,9 +309,9 @@ impl App {
             }
             let text = values
                 .iter()
-                .map(|v| self.copy_value_text(*v))
+                .map(|v| self.selection_item_text(*v))
                 .collect::<Vec<_>>()
-                .join("\n");
+                .join(",");
             if let Err(e) = self.write_clipboard_text(&text) {
                 self.notice = format!("copy failed: {e}");
                 return;
@@ -335,8 +369,9 @@ impl App {
                     self.notice = "no value to copy".to_string();
                     return;
                 }
-                let values: Vec<String> = vals.iter().map(|v| self.copy_value_text(*v)).collect();
-                (values.join("\n"), vals.len())
+                let values: Vec<String> =
+                    vals.iter().map(|v| self.selection_item_text(*v)).collect();
+                (values.join(","), vals.len())
             } else if pair {
                 let members = self.selection_members();
                 if members.is_empty() {
@@ -381,19 +416,26 @@ impl App {
 
     // --- paste -------------------------------------------------------------
 
-    /// pasteLinesDoc turns newline-joined clipboard text into array items
-    /// when the paste target is an array: y/X copy item selections as one
-    /// line per element with strings unquoted, so the same text must splice
-    /// back as items. Each line parses as JSON; anything else is that line's
-    /// literal string text. A single line is never items — single values
-    /// keep their own paste semantics.
+    /// pasteLinesDoc turns bare clipboard text into array items when the
+    /// paste target is an array: y/X copy item selections as one
+    /// comma-joined line of compact units, so the same text must splice back
+    /// as items. Multi-line text splits per line; a single line splits at
+    /// top-level commas and whitespace — separators inside quotes or
+    /// brackets stay (p always; P only when the rows under it cannot take
+    /// plain text, so P keeps its value-replace semantics there). Each unit
+    /// parses as JSON; anything else is that unit's literal string text.
     pub(super) fn paste_lines_doc(
-        &self,
+        &mut self,
         text: &str,
         r: &Row,
         under_cursor: bool,
     ) -> Option<(Doc, Vec<NodeId>)> {
-        if !text.contains('\n') {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let multiline = text.contains('\n');
+        if under_cursor && !multiline && self.paste_has_plain_string_target(r) {
             return None;
         }
         let (_, is_array, notice) = self.paste_target(r, under_cursor);
@@ -402,18 +444,71 @@ impl App {
         }
         let mut doc = Doc::new();
         let mut items = Vec::new();
-        for line in text.split('\n') {
-            let line = line.strip_suffix('\r').unwrap_or(line);
-            let node = match jsondoc::parse(line) {
-                Ok(parsed) => {
-                    let root = parsed.root;
-                    doc.copy_into(&parsed, root, CopyMode::Detached)
-                }
-                Err(_) => doc.new_str(line),
-            };
-            items.push(node);
+        if multiline {
+            for line in text.split('\n') {
+                let line = line.strip_suffix('\r').unwrap_or(line);
+                items.push(Self::line_value(&mut doc, line));
+            }
+        } else {
+            for piece in Self::top_level_units(trimmed) {
+                items.push(Self::line_value(&mut doc, piece));
+            }
+        }
+        if items.is_empty() {
+            return None;
         }
         Some((doc, items))
+    }
+
+    /// lineValue parses one clipboard unit as JSON, falling back to its
+    /// literal text as a string.
+    fn line_value(doc: &mut Doc, line: &str) -> NodeId {
+        match jsondoc::parse(line) {
+            Ok(parsed) => {
+                let root = parsed.root;
+                doc.copy_into(&parsed, root, CopyMode::Detached)
+            }
+            Err(_) => doc.new_str(line),
+        }
+    }
+
+    /// topLevelUnits splits one line at commas and whitespace that sit
+    /// outside any quotes or brackets: `{"a":1},{"b":2}` and `alpha beta`
+    /// come apart at their separators, `{"a b": [1, 2]}` stays whole.
+    fn top_level_units(line: &str) -> Vec<&str> {
+        let mut units = Vec::new();
+        let (mut depth, mut start) = (0i32, 0usize);
+        let (mut in_str, mut escaped) = (false, false);
+        for (i, ch) in line.char_indices() {
+            if in_str {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    in_str = false;
+                }
+                continue;
+            }
+            match ch {
+                '"' => in_str = true,
+                '{' | '[' => depth += 1,
+                '}' | ']' => depth -= 1,
+                ',' | ' ' | '\t' if depth == 0 => {
+                    let piece = line[start..i].trim();
+                    if !piece.is_empty() {
+                        units.push(piece);
+                    }
+                    start = i + ch.len_utf8();
+                }
+                _ => {}
+            }
+        }
+        let piece = line[start..].trim();
+        if !piece.is_empty() {
+            units.push(piece);
+        }
+        units
     }
 
     /// pastePlainStringDoc accepts unstructured clipboard text as a string
@@ -489,10 +584,13 @@ impl App {
         let mode = self.fs().codec.label();
         let (members, items, doc) = match parse_paste(&text, mode) {
             Ok((members, items, doc)) => {
-                // y/X copy item selections newline-joined with strings
-                // unquoted; such text also classifies as a single YAML
-                // scalar. An array target must take the lines back as items.
-                if members.is_none()
+                // y/X copy item selections one element per line; bare text
+                // also classifies as a single YAML/TOML scalar. An array
+                // target must take the units back as items — but text JSON
+                // itself parses keeps its single-value semantics.
+                let bare = jsondoc::parse(text.trim()).is_err();
+                if bare
+                    && members.is_none()
                     && items.is_none()
                     && let Some((ldoc, litems)) = self.paste_lines_doc(&text, r, under_cursor)
                 {
