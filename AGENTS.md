@@ -4,7 +4,7 @@ Guidance for coding agents and contributors working on this repository. Read thi
 
 ## What this is
 
-`jse` is a schema-driven terminal editor for JSON/JSONC/YAML configuration files. It is a Rust port of an upstream Go implementation; module comments name the Go source file each module ports, and tests were ported 1:1 where practical. Treat the Go behavior (documented in comments and tests) as the specification unless the user asks for a change.
+`jse` is a schema-driven terminal editor for JSON/JSONC/YAML configuration files. It began as a Rust port of an upstream Go implementation, but the port is complete and jse now evolves on its own: the Rust code, its tests and `docs/*.md` are the specification. Go references left in module doc comments are historical provenance — do not treat them as authoritative, do not add new ones, and never settle a behavior question by deferring to the Go implementation; decide from the existing tests and docs.
 
 - Binary crate: `jse` (`Cargo.toml`), edition 2024, Rust `stable` (`rust-toolchain.toml`).
 - `#![cfg_attr(not(test), forbid(unsafe_code))]` in `src/main.rs`: do not introduce `unsafe`.
@@ -14,7 +14,7 @@ Guidance for coding agents and contributors working on this repository. Read thi
 
 ```sh
 cargo test                          # full suite: unit + accessible/pty + schemastore e2e
-cargo test --test arch              # A1–A8 architecture invariants (fast)
+cargo test --test arch              # A1–A7 architecture invariants (fast)
 cargo test pty_multi_file_session   # one test by name
 cargo build --release
 cargo run -- -s examples/server.schema.json examples/server.config.json
@@ -75,12 +75,12 @@ src/ui/
   schema_picker.rs   SchemaStore picker (TUI + accessible)
   command.rs         vi-style `:` grammar: builtins (w/wa/wq/waq, q/q!), shell
                      escapes, cursor-aware completion, `%` expansion
-  cmd_history.rs     persistent `:` command history file (load/store; a jse
-                     extension, no Go counterpart; path arrives via Options)
+  cmd_history.rs     persistent `:` command history file (load/store;
+                     path arrives via Options)
   shell.rs           shell execution: `r !` stdout insert, `a !` line append,
                      `w !` document-to-stdin, `!` execute
 tests/
-  arch.rs            A1–A6 architecture invariants (source scan)
+  arch.rs            A1–A7 architecture invariants (source scan)
   common/mod.rs      pty + run helpers
   e2e.rs             CLI, accessible scripts, pty flows, YAML anchors/merge, multi-file
   schemastore.rs     catalog matching and picker against tiny_http
@@ -116,15 +116,15 @@ tests/
 - `q` aliases `esc` outside text inputs; inside inputs it is a literal character.
 - The TUI drains a whole terminal input burst and repaints once per burst (`menu.rs::read_event_burst`); runs of identical `j`/`k`/`up`/`down` collapse through `App::update_repeat`/`move_plain`. That fast path must stay side-effect free (no document mutation, history push or menu-stack change); inputs, overlays and macro recording fall back to one update per key. `KeyEventKind::Repeat` acts like a press; only `Release` is ignored.
 
-## Architecture invariants (enforced by `tests/arch.rs`)
+## Architecture invariants (enforced by `tests/arch.rs`; A8 by CI's clippy gate)
 
-These are mechanical gates, not suggestions. A change that violates one fails `cargo test`.
+These are mechanical gates, not suggestions. A change that violates A1–A7 fails `cargo test`; A8 fails the clippy gate.
 
 - **A1 `doc` is a leaf.** `src/doc/**` may reference only `crate::doc` and `crate::paths`. Formats never know about the UI, schema model, fetch layer or session.
 - **A2 the UI never loads or compiles schemas.** `src/ui/**` must not call `smodel::load`, `validate::new`, `crate::fetch` or `crate::session`; schema switching goes through `Options::load_schema` and the `LoadedSchema` shape. The catalog picker may query `catalog::` (terminal I/O).
 - **A3 core modules never depend on the UI.** `fetch`, `validate`, `catalog`, `smodel` must not name `crate::ui`.
 - **A4 `cli`/`paths` are std-only.** Flag parsing and lexical path helpers do not import other crate modules.
-- **A5 one definition per helper.** `copy_into`, `append_key`, `append_idx`, `wrap_cursor`, `page_cursor`, `write_indent`, `encode_value`, `array_len` are defined once. The legacy names `path_for`, `path_idx`, `doc_array_len` must not reappear. No `go_*` identifiers: Go semantics live in doc comments, not names. No module-wide `#![allow(dead_code)]`.
+- **A5 one definition per helper.** `copy_into`, `append_key`, `append_idx`, `wrap_cursor`, `page_cursor`, `write_indent`, `encode_value`, `array_len` are defined once. The legacy names `path_for`, `path_idx`, `doc_array_len` must not reappear, and no `go_*` identifiers may return (a port leftover; enforced by `no_go_named_helpers`). No module-wide `#![allow(dead_code)]`.
 - **A6 per-file state lives in `FileState`.** The document, its `Meta`, its `Codec` and its `Options` are owned per file; no `Arc<Mutex<Meta>>` or other shared mutable document state. `Options` holds only environment I/O (save/write-to targets, clipboard, schema loader).
 - **A7 one open surface.** `App.overlay: Option<Overlay>` is the only overlay switch: help and the file picker are variants, and `route_key` matches every variant exhaustively. Adding a surface means adding a variant plus its `typing()` arm, never a new `App` flag.
 - **A8 no monoliths.** `clippy::too_many_lines` (threshold 250 in `clippy.toml`) blocks new 250+ line functions; move a feature into its `keys/`/`rows/` submodule instead of appending.
@@ -150,7 +150,7 @@ Treat these as public API; tests and docs assert them:
 ## Changing behavior
 
 1. Locate the closest existing test and the doc section that states the behavior.
-2. Make the smallest change that preserves unrelated behavior; follow local patterns and Go-parity comments.
+2. Make the smallest change that preserves unrelated behavior; follow local patterns and module doc comments.
 3. Add/adjust tests for consumer-visible behavior: boundaries, precedence, errors, state transitions. Do not add tests that only restate implementation (wiring, mock echoes, source text).
 4. Update [README.md](README.md) if the feature list/keys change, the matching `docs/*.md` page for user behavior, and this file if architecture/invariants change.
 5. Run the focused test, then `cargo test`.
