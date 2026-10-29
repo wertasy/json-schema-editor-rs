@@ -91,15 +91,15 @@ jobs:
           mkdir -p dist
           pkg="jse-${GITHUB_REF_NAME}-${{ matrix.pkg_os }}-${{ matrix.pkg_arch }}"
           cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" dist/
-          cp README.md AGENTS.md LICENSE dist/
+          cp README.md README.en.md AGENTS.md LICENSE dist/
           cp -R docs dist/docs
           if [ "${{ matrix.pkg_os }}" = windows ]; then
-            powershell -NoProfile -Command "Compress-Archive -Path 'dist/${{ matrix.bin }}','dist/README.md','dist/AGENTS.md','dist/docs','dist/LICENSE' -DestinationPath 'dist/${pkg}.zip' -Force"
-            rm "dist/${{ matrix.bin }}" dist/README.md dist/AGENTS.md dist/LICENSE
+            powershell -NoProfile -Command "Compress-Archive -Path 'dist/${{ matrix.bin }}','dist/README.md','dist/README.en.md','dist/AGENTS.md','dist/docs','dist/LICENSE' -DestinationPath 'dist/${pkg}.zip' -Force"
+            rm "dist/${{ matrix.bin }}" dist/README.md dist/README.en.md dist/AGENTS.md dist/LICENSE
             rm -rf dist/docs
           else
-            (cd dist && tar -czf "${pkg}.tar.gz" "${{ matrix.bin }}" README.md AGENTS.md LICENSE docs \
-              && rm "${{ matrix.bin }}" README.md AGENTS.md LICENSE && rm -rf docs)
+            (cd dist && tar -czf "${pkg}.tar.gz" "${{ matrix.bin }}" README.md README.en.md AGENTS.md LICENSE docs \
+              && rm "${{ matrix.bin }}" README.md README.en.md AGENTS.md LICENSE && rm -rf docs)
           fi
       - uses: actions/upload-artifact@v4
         with:

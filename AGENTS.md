@@ -186,6 +186,7 @@ Local builds take the highest reachable semver tag (`v0.0.0` when there is none)
 
 - [README.md](README.md) is the human landing page: what it is, install, quick start, key highlights, doc index. Keep it short.
 - `docs/*.md` is the user manual (Chinese). Each page owns one topic; cross-link instead of duplicating details.
+- `docs/en/` mirrors `docs/*.md` 1:1 (same filenames), and `README.en.md` mirrors `README.md`; Chinese is primary. When a user-visible change touches a `docs/*.md` page or README, update the English mirror in the same change and keep cross-file anchors matching.
 - This file is for agents/contributors: architecture, invariants, commands, workflow. Do not put user-facing tutorials here.
 - Any user-visible change updates exactly one primary docs page (plus README if it changes the headline behavior/keys).
 - Avoid duplicating the same table in README and docs; README links to the full reference.

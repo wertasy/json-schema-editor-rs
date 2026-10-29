@@ -1,5 +1,7 @@
 # jse — JSON Schema 驱动的终端配置编辑器
 
+English documentation: [README.en.md](README.en.md) · [user manual (`docs/en/`)](docs/en/index.md)
+
 `jse` 读取一份 JSON Schema，把配置文件变成 menuconfig 风格的终端界面：单屏滚动列表、面包屑、就地编辑、层级钻取；保存前用 JSON Schema 做权威校验。适合编辑服务端配置、CI 工作流、sing-box 规则这类「有 schema、但手写 JSON/YAML/TOML 容易出错」的文件。
 
 支持 **JSON / JSONC / YAML / TOML**，保留注释、键序、数字字面量、YAML 锚点/别名与合并键；一个进程可同时打开多个配置文件。也提供 `--accessible` 行式问答模式，可在管道、脚本和屏幕阅读器中使用。

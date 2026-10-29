@@ -1,5 +1,7 @@
 # jse 用户手册
 
+English version of this manual: [docs/en/index.md](en/index.md)（镜像 `docs/*.md`；中文为主文档）.
+
 `jse` 是一个 schema 驱动的终端配置编辑器：按 JSON Schema 生成表单，把编辑结果写回原文件。本手册面向使用者；贡献者和编码代理请看仓库根目录的 [AGENTS.md](../AGENTS.md)。
 
 ## 目录
