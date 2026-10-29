@@ -387,6 +387,7 @@ impl App {
         if !replaced.is_empty() {
             let first = replaced[0].clone();
             self.fs_mut().change_jump = Some(replaced);
+            self.nav_forward();
             self.jump_to_row(&first);
         }
         self.notice = format!("replaced {} occurrence(s) in {} value(s)", occ, vals);

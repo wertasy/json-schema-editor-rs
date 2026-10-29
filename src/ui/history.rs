@@ -88,9 +88,11 @@ impl History {
 
 /// diffPaths walks two documents of the same clone lineage and reports the
 /// paths of every location whose content differs, plus paths that only
-/// exist on the `to` side (additions). Removals are not reported: their
-/// path no longer resolves in `to`, so it cannot be jumped to. Order is
-/// `to`'s document order; paths never repeat.
+/// exist on the `to` side (additions). A removal has no resolvable path,
+/// so it is reported as its nearest surviving ancestor: the container that
+/// lost a member or element. Container anchor renames are reported at the
+/// container itself. Changes and additions come in `to` document order,
+/// then removal containers in `from` order; paths never repeat.
 pub fn diff_paths(from: &Doc, to: &Doc) -> Vec<Vec<crate::doc::jsondoc::PathSeg>> {
     let mut out = Vec::new();
     let mut path = Vec::new();
@@ -111,6 +113,10 @@ fn diff_node(
     let (fv, tv) = (from.value(fi), to.value(ti));
     match (fv, tv) {
         (Value::Object(fm), Value::Object(tm)) => {
+            // an anchor rename changes this container itself, not a child
+            if from.node(fi).anchor != to.node(ti).anchor {
+                out.push(path.clone());
+            }
             for m in tm {
                 path.push(Seg::Key(m.key.clone()));
                 match fm.iter().find(|f| f.key == m.key) {
@@ -118,6 +124,14 @@ fn diff_node(
                     None => out.push(path.clone()), // added on the `to` side
                 }
                 path.pop();
+            }
+            // keys removed on the `to` side have no resolvable path: report
+            // the nearest surviving ancestor (this container) so the ring
+            // still has somewhere to land
+            for f in fm {
+                if !tm.iter().any(|t| t.key == f.key) && !out.contains(&path) {
+                    out.push(path.clone());
+                }
             }
         }
         (Value::Array(fa), Value::Array(ta)) => {
@@ -128,6 +142,11 @@ fn diff_node(
                     None => out.push(path.clone()),
                 }
                 path.pop();
+            }
+            // truncated on the `to` side: the removed elements' indices are
+            // gone, so the array itself is the surviving location
+            if fa.len() > ta.len() && !out.contains(&path) {
+                out.push(path.clone());
             }
         }
         _ => {
@@ -225,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_paths_reports_changes_and_additions_not_removals() {
+    fn diff_paths_reports_changes_additions_and_removal_containers() {
         use crate::doc::jsondoc::PathSeg;
         let from = doc(r#"{"a":1,"b":{"x":1},"c":[1,2],"z":9}"#);
         let to = doc(r#"{"a":2,"b":{"x":1,"y":2},"c":[1,9]}"#);
@@ -235,12 +254,17 @@ mod tests {
                 vec![ks("a")],                  // changed leaf
                 vec![ks("b"), ks("y")],         // added key
                 vec![ks("c"), PathSeg::Idx(1)], // changed element
+                vec![],                         // the removed z reports its container (root)
             ]
         );
-        // removals resolve nowhere in the new doc: not reported
+        // removals report the nearest surviving ancestor: the container
         let from = doc(r#"{"a":1,"z":9}"#);
         let to = doc(r#"{"a":1}"#);
-        assert!(diff_paths(&from, &to).is_empty());
+        assert_eq!(diff_paths(&from, &to), vec![vec![]]);
+        // several removed members collapse into one container report
+        let from = doc(r#"{"x":{"y":1,"z":2}}"#);
+        let to = doc(r#"{"x":{}}"#);
+        assert_eq!(diff_paths(&from, &to), vec![vec![ks("x")]]);
         // identical docs produce nothing
         let d = doc(r#"{"a":{"b":[1,{"c":2}]}}"#);
         assert!(diff_paths(&d, &d).is_empty());
@@ -248,6 +272,26 @@ mod tests {
         let from = doc(r#"{"a":{"b":1}}"#);
         let to = doc(r#"{"a":[1,2]}"#);
         assert_eq!(diff_paths(&from, &to), vec![vec![ks("a")]]);
+    }
+
+    #[test]
+    fn diff_paths_reports_container_anchor_changes() {
+        // a mapping anchor rename changes the mapping itself, not a child
+        let from = doc(r#"{"a":{"b":1}}"#);
+        let mut to = doc(r#"{"a":{"b":1}}"#);
+        let id = to.get(&[ks("a")]).expect("key a");
+        to.node_mut(id).anchor = "mapping".into();
+        assert_eq!(diff_paths(&from, &to), vec![vec![ks("a")]]);
+
+        // an anchor rename beside a child change reports both locations
+        let mut to = doc(r#"{"a":{"b":2}}"#);
+        let id = to.get(&[ks("a")]).expect("key a");
+        to.node_mut(id).anchor = "mapping".into();
+        let from = doc(r#"{"a":{"b":1}}"#);
+        assert_eq!(
+            diff_paths(&from, &to),
+            vec![vec![ks("a")], vec![ks("a"), ks("b")]]
+        );
     }
 
     #[test]
@@ -261,8 +305,8 @@ mod tests {
         // back; b was never touched
         assert_eq!(r.paths, vec![vec![ks("a")], vec![ks("c")]]);
         let r = h.redo(&mut d);
-        // redo re-applied the edit: a back to 1, the c addition disappeared
-        // (removals are not reported — the path no longer resolves)
-        assert_eq!(r.paths, vec![vec![ks("a")]]);
+        // redo re-applied the edit: a back to 1; the removed c has no
+        // resolvable path, so the surviving container (root) is reported
+        assert_eq!(r.paths, vec![vec![ks("a")], vec![]]);
     }
 }

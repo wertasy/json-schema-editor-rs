@@ -3093,6 +3093,94 @@ fn edit_clears_the_change_ring_and_ctrl_j_falls_back() {
 }
 
 #[test]
+fn undo_of_an_addition_lands_on_the_surviving_container() {
+    let doc = dbuild(|db| {
+        db.obj(vec![
+            ("name", db.s("alpha")),
+            ("server", db.obj(vec![("host", db.s("h"))])),
+        ])
+    });
+    let mut m = items_app(doc);
+    // add a key inside server through the real add-key flow
+    set_cursor_path(&mut m, &sp(&["server"]));
+    press(&mut m, &["enter"]);
+    press(&mut m, &["a"]);
+    match &mut m.overlay {
+        Some(Overlay::Add(s)) => s.ti.set_value("extra"),
+        _ => panic!("add-key input missing"),
+    }
+    press(&mut m, &["enter"]);
+    assert!(has(&m.fs().doc, &sp(&["server", "extra"])));
+
+    // undo removes the added key: it has no resolvable row, so the ring
+    // points at the surviving container and the cursor lands there
+    press(&mut m, &["u"]);
+    assert!(!has(&m.fs().doc, &sp(&["server", "extra"])));
+    assert_eq!(
+        m.fs().change_jump,
+        Some(vec![vec![ks("server")]]),
+        "the removal reports its surviving container"
+    );
+    assert_eq!(
+        row_at(&mut m).path,
+        sp(&["server"]),
+        "undo of an addition lands on the container row"
+    );
+    // a single-entry ring wraps on itself
+    press(&mut m, &["ctrl+j"]);
+    assert_eq!(row_at(&mut m).path, sp(&["server"]));
+}
+
+#[test]
+fn undo_without_diffs_does_not_arm_the_ring() {
+    let doc = dbuild(|db| db.obj(vec![("a", db.s("1"))]));
+    let mut m = app_with(crate::smodel::untyped(&doc), doc, test_opts());
+    // a snapshot identical to the current document: undoing it reports no
+    // paths, so no ring arms and the cursor stays put
+    let pre = m.fs().doc.clone();
+    m.fs_mut().history.push_undo(pre);
+    set_cursor_path(&mut m, &sp(&["a"]));
+    press(&mut m, &["u"]);
+    assert_eq!(m.notice, "undone");
+    assert!(
+        m.fs().change_jump.is_none(),
+        "an empty diff must not arm a ring"
+    );
+    assert_eq!(row_at(&mut m).path, sp(&["a"]), "cursor untouched");
+}
+
+#[test]
+fn ctrl_k_enters_the_ring_at_the_last_entry_from_outside() {
+    let doc = dbuild(|db| {
+        db.obj(vec![
+            ("name", db.s("alpha")),
+            ("server", db.obj(vec![("host", db.s("alpha.example.com"))])),
+        ])
+    });
+    let mut m = items_app(doc);
+    press(
+        &mut m,
+        &[
+            "r", "a", "l", "p", "h", "a", "tab", "b", "e", "t", "a", "ctrl+a",
+        ],
+    );
+    // ring = [name, server.host], cursor on name
+    set_cursor_path(&mut m, &sp(&["server"])); // a row outside the ring
+    press(&mut m, &["ctrl+k"]);
+    assert_eq!(
+        row_at(&mut m).path,
+        sp(&["server", "host"]),
+        "ctrl+k from outside the ring enters at the last entry"
+    );
+    press(&mut m, &["ctrl+j"]);
+    assert_eq!(
+        row_at(&mut m).path,
+        sp(&["name"]),
+        "then wraps to the first"
+    );
+}
+
+#[test]
 fn a_inserts_after_and_A_inserts_before_array_items() {
     let schema = schema_build(|b| {
         let it = b.id(scalar("items", "", "string"));
@@ -6198,6 +6286,12 @@ fn alias_expand_undoable() {
         "undo must restore the reference"
     );
     assert!(!m.dirty());
+    // the undo lands on the restored reference (its materialized copy
+    // differs from the shared alias node); the expand affordance lives one
+    // drill below it
+    assert_eq!(m.fs().change_jump, Some(vec![vec![ks("copy")]]));
+    assert_eq!(row_at(&mut m).path, sp(&["copy"]));
+    press(&mut m, &["enter"]);
     assert!(find_row(&mut m, |r, _| r.kind == RowKind::Expand).is_some());
 }
 

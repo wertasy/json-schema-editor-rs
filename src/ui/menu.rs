@@ -857,8 +857,9 @@ pub struct App {
     pub aborted: bool,
     /// the session ended cleanly (root quit)
     pub exiting: bool,
-    /// set while a key arms the change ring (replace/undo/redo), so the
+    /// set while the replace-all key arms the change ring, so the
     /// dispatcher's edited-check does not clear what that key just set
+    /// (undo/redo arm the ring before the edited-check and return early)
     pub ring_keep: bool,
     /// run $EDITOR for real (false in tests: the pending edit is stashed
     /// instead so `finish_external_value` can deliver the content)
@@ -1486,13 +1487,15 @@ impl App {
             _ => None,
         };
         match res {
-            Some(res) => {
+            Some(mut res) => {
                 self.notice = res.notice.to_string();
                 if res.changed {
                     self.repair_stack();
                     if !res.paths.is_empty() {
-                        self.fs_mut().change_jump = Some(res.paths.clone());
-                        self.jump_to_row(&res.paths[0]);
+                        let first = res.paths[0].clone();
+                        self.fs_mut().change_jump = Some(std::mem::take(&mut res.paths));
+                        self.nav_forward();
+                        self.jump_to_row(&first);
                     }
                 }
                 true
