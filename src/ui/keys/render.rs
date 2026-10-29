@@ -985,7 +985,18 @@ impl App {
         // value is the prefix being matched, and the rectangle must stay
         // put while the user types. `…tail` rows anchor at the caret
         // recorded when the list was built instead, keeping the visible
-        // tails next to the input position.
+        // tails next to the input position. The enum dropdown is exempt:
+        // its input is a search keyword, not the options' prefix, so its
+        // rows always show the full option text anchored at the text
+        // start (an empty strip query never activates).
+        let query: &str = if e
+            .fn_
+            .is_some_and(|id| !self.fs().schema.nodes[id as usize].enum_.is_empty())
+        {
+            ""
+        } else {
+            &e.sug_prefix
+        };
         let title = self.title_col(&self.row_title_text(row), title_width);
         let text_left = 2 + display_width(&title);
         let (_, _, shift) = ti_window(&e.ti, self.edit_input_avail(&title));
@@ -993,22 +1004,15 @@ impl App {
         // When the rectangle would run past the right edge, slide it left so
         // every candidate stays on screen — the horizontal counterpart of
         // the rows-above fallback above.
-        let rect =
-            Self::suggestion_rect_width(&e.sugs, e.sug_idx, &e.sug_prefix, capacity, line_right);
-        let base = if Self::sug_strip_active(&e.sugs, e.sug_idx, &e.sug_prefix, capacity) {
+        let rect = Self::suggestion_rect_width(&e.sugs, e.sug_idx, query, capacity, line_right);
+        let base = if Self::sug_strip_active(&e.sugs, e.sug_idx, query, capacity) {
             e.sug_col
         } else {
             0
         };
         let left = (text_left + base.saturating_sub(shift)).min(line_right.saturating_sub(rect));
-        let lines = Self::suggestion_overlay_lines(
-            &e.sugs,
-            e.sug_idx,
-            &e.sug_prefix,
-            capacity,
-            left,
-            line_right,
-        );
+        let lines =
+            Self::suggestion_overlay_lines(&e.sugs, e.sug_idx, query, capacity, left, line_right);
         if lines.is_empty() {
             return None;
         }

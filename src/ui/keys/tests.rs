@@ -887,6 +887,63 @@ fn enum_dropdown_sits_below_the_input() {
 }
 
 #[test]
+fn enum_dropdown_anchors_at_the_input_start() {
+    // The enum input is a search keyword, not the options' prefix: the
+    // window always anchors at the input text start with full option
+    // rows, even when a long prefilled value or keyword would trigger
+    // the `…tail` caret anchoring used by prefix completions.
+    let schema = schema_build(|b| {
+        let mut mode = fnode("mode", "Mode", Kind::Enum);
+        mode.enum_ = tenum(b, &["production-alpha", "production-beta", "staging"]);
+        let mode = b.id(mode);
+        b.id(FormNode {
+            key: "$".into(),
+            kind: Kind::Object,
+            children: vec![mode],
+            ..FormNode::default()
+        })
+    });
+    let doc = dbuild(|db| db.obj(vec![("mode", db.s("production-alpha"))]));
+    let mut m = app_with(schema, doc, test_opts());
+    m.width = 80;
+    m.height = 12;
+    press(&mut m, &["enter"]); // enum edit opens prefilled + highlighted
+    let rows = m.menu_rows();
+    let tw = m.menu_title_col_width(&rows);
+    let input_left = 2 + display_width(&m.title_col("Mode", tw));
+    let anchor = |m: &mut App| {
+        let view = m.view();
+        let line = view
+            .lines()
+            .find(|l| l.contains("\x1b[7mproduction"))
+            .expect("highlighted option row")
+            .to_string();
+        let start = line.find("\x1b[7m").expect("reverse video");
+        (display_width(&line[..start]), view)
+    };
+
+    // on open the query is the prefilled current value (16 chars)
+    let (left, view) = anchor(&mut m);
+    assert_eq!(
+        left, input_left,
+        "dropdown must anchor at the input text start on open:\n{view}"
+    );
+
+    // retyping a long keyword keeps the anchor there (select-all-on-type
+    // restarts the keyword search) and rows keep the full option text
+    press(&mut m, &["p", "r", "o", "d", "u", "c", "t", "i", "o", "n"]);
+    let (left, view) = anchor(&mut m);
+    assert_eq!(
+        left, input_left,
+        "long keyword must not re-anchor the dropdown at the caret:\n{view}"
+    );
+    assert!(
+        view.contains("production-beta"),
+        "options must keep their full text, not `…tail` rows:\n{view}"
+    );
+}
+
+#[test]
 fn oneof_picker_search_sits_above_the_list() {
     let schema = schema_from_json(
         r#"{
