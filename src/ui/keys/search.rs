@@ -604,11 +604,7 @@ impl App {
         }
         s.cands
             .iter()
-            // the typed name itself offers nothing to complete
-            .filter(|c| {
-                let lc = c.to_lowercase();
-                lc.starts_with(&prefix) && lc != prefix
-            })
+            .filter(|c| c.to_lowercase().starts_with(&prefix))
             .cloned()
             .collect()
     }

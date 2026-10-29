@@ -1046,11 +1046,6 @@ impl App {
             if !name.to_lowercase().starts_with(&lower) {
                 continue;
             }
-            // The entry spelled exactly like the typed prefix is already on
-            // the input line; a directory still differs by its trailing `/`.
-            if name.to_lowercase() == lower {
-                continue;
-            }
             let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false)
                 || std::fs::metadata(e.path())
                     .map(|m| m.is_dir())
@@ -1156,7 +1151,7 @@ impl App {
                 self.refilter(&mut s);
                 return Some(Overlay::Search(s));
             }
-            "ctrl+a" => {
+            "ctrl+r" => {
                 if s.replace {
                     self.replace_search_all(s);
                     // replace_search_all clears the overlay on a real

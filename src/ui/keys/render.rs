@@ -905,7 +905,7 @@ impl App {
         }
         let help = if s.replace {
             format!(
-                "↑/↓ ctrl+j/k · pgup/dn · enter jump/replace · ctrl+a all · tab focus · alt+i {} · alt+x {} · esc",
+                "↑/↓ ctrl+j/k · pgup/dn · enter jump/replace · ctrl+r all · tab focus · alt+i {} · alt+x {} · esc",
                 case_txt, mode_txt
             )
         } else {

@@ -3074,7 +3074,7 @@ fn replace_all_lands_on_first_replaced_and_ctrl_j_cycles() {
     press(
         &mut m,
         &[
-            "r", "a", "l", "p", "h", "a", "tab", "b", "e", "t", "a", "ctrl+a",
+            "r", "a", "l", "p", "h", "a", "tab", "b", "e", "t", "a", "ctrl+r",
         ],
     );
     assert_eq!(m.notice, "replaced 2 occurrence(s) in 2 value(s)");
@@ -3263,7 +3263,7 @@ fn ctrl_k_enters_the_ring_at_the_last_entry_from_outside() {
     press(
         &mut m,
         &[
-            "r", "a", "l", "p", "h", "a", "tab", "b", "e", "t", "a", "ctrl+a",
+            "r", "a", "l", "p", "h", "a", "tab", "b", "e", "t", "a", "ctrl+r",
         ],
     );
     // ring = [name, server.host], cursor on name
@@ -7885,8 +7885,7 @@ fn tag_reference_completion() {
     }
     press(&mut m, &["c", "2"]);
     match &m.overlay {
-        // "c2" is already on the input line: nothing left to complete.
-        Some(Overlay::Edit(e)) => assert!(e.sugs.is_empty(), "sugs = {:?}", e.sugs),
+        Some(Overlay::Edit(e)) => assert_eq!(e.sugs, vec!["c2".to_string()]),
         _ => panic!(),
     }
     press(&mut m, &["tab", "enter"]);
@@ -9486,9 +9485,7 @@ fn write_to_path_completion() {
 
     press(&mut m, &["W"]);
     match &m.overlay {
-        // W pre-fills the session path, an exact existing file: with the
-        // identical candidate dropped there is nothing left to complete.
-        Some(Overlay::Write(w)) => assert!(w.sugs.is_empty(), "sugs = {:?}", w.sugs),
+        Some(Overlay::Write(w)) => assert!(!w.sugs.is_empty(), "W must compute candidates"),
         _ => panic!(),
     }
     press(&mut m, &["ctrl+u"]);
@@ -9544,15 +9541,6 @@ fn write_to_path_completion() {
             "candidates = {:?}",
             w.sugs
         ),
-        _ => panic!(),
-    }
-
-    // the fully typed path itself is not offered as a candidate
-    press(&mut m, &["ctrl+u"]);
-    let typed = format!("{}/alpha.json", root.display());
-    press(&mut m, &[&typed]);
-    match &m.overlay {
-        Some(Overlay::Write(w)) => assert!(w.sugs.is_empty(), "sugs = {:?}", w.sugs),
         _ => panic!(),
     }
 }
@@ -10252,8 +10240,7 @@ fn edit_completion() {
     }
     press(&mut m, &["/", "d", "a", "t", "a", "2"]);
     match &m.overlay {
-        // "/data2" is fully typed: the identical candidate is dropped.
-        Some(Overlay::Edit(e)) => assert!(e.sugs.is_empty(), "sugs = {:?}", e.sugs),
+        Some(Overlay::Edit(e)) => assert_eq!(e.sugs, vec!["/data2".to_string()]),
         _ => panic!(),
     }
     press(&mut m, &["ctrl+u"]);
@@ -10406,7 +10393,7 @@ fn menu_search_replace() {
         "/mnt"
     );
 
-    // ctrl+a replaces every hit in scope; numbers stay untouched
+    // ctrl+r replaces every hit in scope; numbers stay untouched
     let doc2 = dbuild(|db| {
         db.obj(vec![
             ("name", db.s("alpha")),
@@ -10423,7 +10410,7 @@ fn menu_search_replace() {
     press(
         &mut m2,
         &[
-            "r", "a", "l", "p", "h", "a", "tab", "b", "e", "t", "a", "ctrl+a",
+            "r", "a", "l", "p", "h", "a", "tab", "b", "e", "t", "a", "ctrl+r",
         ],
     );
     assert_eq!(str_at(&m2.fs().doc, &["name"]), "beta");
@@ -10447,7 +10434,7 @@ fn menu_search_replace() {
     assert_eq!(search_state(&m3).results.len(), 2);
     press(&mut m3, &["alt+i"]);
     assert_eq!(search_state(&m3).results.len(), 0);
-    press(&mut m3, &["enter", "ctrl+a"]);
+    press(&mut m3, &["enter", "ctrl+r"]);
     assert_eq!(str_at(&m3.fs().doc, &["name"]), "alpha");
     press(&mut m3, &["alt+i"]);
     assert_eq!(search_state(&m3).results.len(), 2);
@@ -10464,7 +10451,7 @@ fn menu_search_replace() {
     press(
         &mut m6,
         &[
-            "r", "s", "a", "m", "e", "tab", "o", "t", "h", "e", "r", "ctrl+a",
+            "r", "s", "a", "m", "e", "tab", "o", "t", "h", "e", "r", "ctrl+r",
         ],
     );
     assert_eq!(str_at(&m6.fs().doc, &["server", "host"]), "other");
@@ -10567,11 +10554,11 @@ fn search_help_lists_only_the_active_mode() {
     let view = m.view();
     assert!(view.contains("tab replace"), "search help:\n{view}");
     assert!(view.contains("esc close"), "search help:\n{view}");
-    assert!(!view.contains("ctrl+a"), "search help:\n{view}");
+    assert!(!view.contains("ctrl+r"), "search help:\n{view}");
 
     press(&mut m, &["tab"]);
     let view = m.view();
-    assert!(view.contains("ctrl+a all"), "replace help:\n{view}");
+    assert!(view.contains("ctrl+r all"), "replace help:\n{view}");
     assert!(view.contains("tab focus"), "replace help:\n{view}");
     assert!(!view.contains("tab replace"), "replace help:\n{view}");
     assert!(!view.contains("esc close"), "replace help:\n{view}");
@@ -10580,7 +10567,7 @@ fn search_help_lists_only_the_active_mode() {
     press(&mut m, &["esc"]);
     let view = m.view();
     assert!(view.contains("tab replace"), "search help:\n{view}");
-    assert!(!view.contains("ctrl+a"), "search help:\n{view}");
+    assert!(!view.contains("ctrl+r"), "search help:\n{view}");
 }
 
 #[test]
@@ -10670,7 +10657,7 @@ fn search_replace_unknown_key() {
     );
     press(&mut m, &["tab"]);
     press(&mut m, &["g", "o", "o", "d", "b", "y", "e"]);
-    press(&mut m, &["ctrl+a"]);
+    press(&mut m, &["ctrl+r"]);
     assert_eq!(str_at(&m.fs().doc, &["comment"]), "goodbye world");
     assert!(
         m.notice.contains("replaced 1 occurrence"),
@@ -12681,7 +12668,7 @@ fn edit_completion_moves_above_a_row_at_the_bottom() {
 }
 
 #[test]
-fn anchor_completion_drops_the_typed_name() {
+fn anchor_completion_keeps_the_typed_name() {
     let mut m =
         completion_model("sname: &alpha one\nsnum: &beta 2\nextra1: x\nextra2: y\nextra3: z\n");
     set_cursor(&mut m, |r| {
@@ -12692,15 +12679,10 @@ fn anchor_completion_drops_the_typed_name() {
         Some(Overlay::Anc(s)) => assert_eq!(s.sugs.len(), 2, "sugs = {:?}", s.sugs),
         _ => panic!("reference input did not open"),
     }
-    press(&mut m, &["b", "e"]);
+    // "beta" is fully typed: the identical candidate stays offered.
+    press(&mut m, &["b", "e", "t", "a"]);
     match &m.overlay {
         Some(Overlay::Anc(s)) => assert_eq!(s.sugs, vec!["beta".to_string()]),
-        _ => panic!(),
-    }
-    press(&mut m, &["t", "a"]);
-    match &m.overlay {
-        // "beta" is fully typed: the identical candidate is dropped.
-        Some(Overlay::Anc(s)) => assert!(s.sugs.is_empty(), "sugs = {:?}", s.sugs),
         _ => panic!(),
     }
 }

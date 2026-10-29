@@ -49,7 +49,7 @@ pub const CMD_SUG_WINDOW: usize = 8;
 /// terminal's available width is the only ceiling.
 pub const SUG_MIN_WIDTH: usize = 24;
 /// Candidates sharing at least this many leading characters hide the shared
-/// prefix (shown as a leading `…`) so their differing tails stay visible.
+/// prefix so their differing tails stay visible.
 pub const SUG_STRIP_PREFIX_MIN: usize = 8;
 
 /// cmd_sug_refresh rebuilds the auto-completion list for the word before
@@ -227,20 +227,13 @@ fn completion_candidate(v: &str) -> bool {
     !v.is_empty() && !v.contains('\r') && !v.contains('\n')
 }
 
-/// filterCompletions keeps candidates starting with prefix (case-insensitive)
-/// but not equal to it: a candidate identical to what the user typed has no
-/// differing tail to offer. An empty prefix keeps everything.
+/// filterCompletions keeps candidates starting with prefix
+/// (case-insensitive); an empty prefix keeps everything.
 fn filter_completions(cands: &[String], prefix: &str) -> Vec<String> {
     let lp = prefix.to_lowercase();
     cands
         .iter()
-        .filter(|c| {
-            completion_candidate(c)
-                && (lp.is_empty() || {
-                    let lc = c.to_lowercase();
-                    lc.starts_with(&lp) && lc != lp
-                })
-        })
+        .filter(|c| completion_candidate(c) && (lp.is_empty() || c.to_lowercase().starts_with(&lp)))
         .cloned()
         .collect()
 }
