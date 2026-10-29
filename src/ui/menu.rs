@@ -852,6 +852,10 @@ pub struct App {
     /// `:` command lines executed, oldest first; seeded from and persisted
     /// to Options::cmd_history_file, so it spans sessions
     pub cmd_history: Vec<String>,
+    /// built-in clipboard: the last text y/X copied this session, serving
+    /// paste when no system clipboard tool exists or reading it fails (a
+    /// jse extension, no Go counterpart)
+    pub builtin_clipboard: Option<String>,
 }
 
 impl App {
@@ -886,6 +890,7 @@ impl App {
             exec_editor: false,
             pending_edit: None,
             cmd_history,
+            builtin_clipboard: None,
         }
     }
 

@@ -91,7 +91,7 @@ jse v0.6.0 (commit 1a2b3c4, built 2026-10-22T09:00:00Z)
 - **配置路径**：必须是本地文件；`http(s)://` 作为配置参数会被拒绝（schema 才支持远端）。
 - **Schema**：本地路径、`http(s)://` 或 `file://`；解析顺序见 [Schema 来源与缓存](schema-sources.md)。
 - **外部编辑器**：可选。设置了 `$EDITOR` 用它，否则用 `$VISUAL`，再退回 `vi`。GUI 编辑器需要等待模式（如 `code --wait`），否则 jse 会在编辑器还没写完时就读取临时文件。
-- **剪贴板**：可选，只在 `y`/`x`/`p` 等操作时用到。Linux 依次尝试 `wl-copy`/`wl-paste`（Wayland）、`xclip`、`xsel`；macOS 用 `pbcopy`/`pbpaste`；Windows 写入用 `clip`，读取不受支持。缺少工具时操作只提示失败，不改文档。
+- **剪贴板**：可选，只在 `y`/`x`/`p` 等操作时用到。Linux 依次尝试 `wl-copy`/`wl-paste`（Wayland）、`xclip`、`xsel`；macOS 用 `pbcopy`/`pbpaste`；Windows 写入用 `clip`，读取不受支持。缺少工具（或工具执行失败）时 jse 退回会话内置剪贴板，会话内复制/粘贴照常可用，提示带 `(built-in clipboard)` 后缀；细节见[编辑功能](editing.md#复制--剪切)。
 - **字体**：`<err>`/`<warn>` 图标需要 Nerd Font / Font Awesome 私用区字体；没有时显示空白方块，功能不受影响。
 - **网络**：远端 schema 与 SchemaStore 目录走 HTTP(S)，遵循 `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` 与 `NO_PROXY`，超时 15 秒，响应体上限 32 MiB。
 

@@ -94,16 +94,16 @@ jse 按终端单元格宽度裁剪；如果终端字体把全角字符当半角�
 
 安装了 Nerd Font / Font Awesome 私用区图标的终端字体才会显示图标；否则显示空白方块。功能不受影响。
 
-### `y` / `p` 失败
-
-剪贴板工具缺失：
+### 剪贴板工具缺失
 
 - Linux Wayland：`wl-copy` / `wl-paste`
 - Linux X11：`xclip` 或 `xsel`
 - macOS：`pbcopy` / `pbpaste`
 - Windows：写入用 `clip`；**读取（粘贴）不受支持**
 
-错误提示如 `clipboard: no clipboard tool found` 或 `clipboard: cannot read without paste support`。安装工具后重试；失败不会修改文档。
+没有剪贴板工具时 jse 自动退回会话内置剪贴板（回退规则与生效范围见[编辑功能](editing.md#复制--剪切)）：`y`/`x` 仍然成功（提示带 ` (built-in clipboard)` 后缀），`p`/`P`/`ctrl+v` 读不到系统剪贴板时贴回本次会话复制的内容。
+
+`clipboard: no clipboard tool found` / `clipboard: cannot read without paste support` 只在本次会话还没复制过任何内容时出现；安装工具后即可与其它应用交换剪贴板。失败不会修改文档。
 
 ### `$EDITOR` 打开后内容没生效
 

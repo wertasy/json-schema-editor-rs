@@ -2266,6 +2266,48 @@ fn pty_command_wq_saves_and_exits() {
 }
 
 #[test]
+fn pty_builtin_clipboard_round_trip_without_clipboard_tools() {
+    // Empty PATH leaves no wl-copy/xclip/xsel/pbcopy: y must fall back to
+    // the session's built-in clipboard and P must read it back.
+    let dir = mktemp();
+    let schema = dir.path().join("mini.schema.json");
+    let cfg = dir.path().join("clip.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{"$schema":{"type":"string"},"a":{"type":"string"},"b":{"type":"string"}}}"#,
+    );
+    write_file(&cfg, r#"{"a":"keep","b":"copy-me"}"#);
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(
+        &["-s", schema_arg.as_str(), cfg_arg.as_str()],
+        &[("PATH", "")],
+        &cache,
+    ) else {
+        return;
+    };
+
+    pty.wait_frame("root menu", 0, &["↑/↓ move"]);
+    pty.send(b"jjY"); // copy b's value with no system clipboard tool
+    pty.wait_frame(
+        "built-in copy notice",
+        0,
+        &["Copied value (built-in clipboard)"],
+    );
+    pty.send(b"kP"); // paste onto a's string value
+    pty.wait_frame("paste notice", 0, &["pasted value into $.a"]);
+    pty.send(b":wq\r");
+    pty.wait_exit(0);
+    assert_eq!(
+        read_json(&cfg)["a"],
+        json!("copy-me"),
+        "paste must come from the built-in clipboard"
+    );
+    assert_eq!(read_json(&cfg)["b"], json!("copy-me"));
+}
+
+#[test]
 fn pty_command_percent_expands_to_the_session_file() {
     let dir = mktemp();
     let schema = dir.path().join("mini.schema.json");

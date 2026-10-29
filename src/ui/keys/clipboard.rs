@@ -10,28 +10,52 @@ impl App {
             self.notice = refusal;
             return;
         }
-        if let Err(e) = self.write_clipboard_text(&text) {
-            self.notice = format!("copy failed: {e}");
-            return;
-        }
-        self.notice = if pair {
-            "Copied key-value pair".to_string()
-        } else {
-            "Copied value".to_string()
+        let suffix = match self.write_clipboard_text(&text) {
+            Err(e) => {
+                self.notice = format!("copy failed: {e}");
+                return;
+            }
+            Ok(suffix) => suffix,
         };
+        let what = if pair {
+            "Copied key-value pair"
+        } else {
+            "Copied value"
+        };
+        self.notice = format!("{what}{suffix}");
     }
 
-    pub(super) fn write_clipboard_text(&self, text: &str) -> Result<(), String> {
-        match &self.opts().copy {
-            Some(w) => w(text),
-            None => write_clipboard(text),
+    /// write_clipboard_text sends copy/cut text to the system clipboard when
+    /// opts.copy doesn't override it. The text always lands in the built-in
+    /// clipboard too, so paste keeps working where no system clipboard tool
+    /// exists (or its helper fails, e.g. Windows reads or headless ssh).
+    /// Returns the notice suffix: empty when the system clipboard took the
+    /// text, " (built-in clipboard)" when only the built-in one did.
+    pub(super) fn write_clipboard_text(&mut self, text: &str) -> Result<&'static str, String> {
+        const BUILTIN: &str = " (built-in clipboard)";
+        if let Some(w) = &self.opts().copy {
+            return w(text).map(|()| "");
         }
+        let system = write_clipboard(text);
+        self.builtin_clipboard = Some(text.to_string());
+        system.map(|()| "").or(Ok(BUILTIN))
     }
 
+    /// read_clipboard_text reads the system clipboard when opts.paste doesn't
+    /// override it, falling back to the built-in clipboard — the last text
+    /// this session copied — when the system side is unavailable.
     pub(crate) fn read_clipboard_text(&self) -> Result<String, String> {
-        match &self.opts().paste {
-            Some(r) => r(),
-            None => read_clipboard(),
+        if let Some(r) = &self.opts().paste {
+            return r();
+        }
+        match read_clipboard() {
+            Ok(text) => Ok(text),
+            // Some("") means an empty value was copied: hand it back so the
+            // paste paths report "clipboard is empty" instead of a tool error
+            Err(e) => match self.builtin_clipboard.as_deref() {
+                Some(text) => Ok(text.to_string()),
+                _ => Err(e),
+            },
         }
     }
 
@@ -305,11 +329,14 @@ impl App {
                 .map(|v| self.selection_item_text(*v))
                 .collect::<Vec<_>>()
                 .join(",");
-            if let Err(e) = self.write_clipboard_text(&text) {
-                self.notice = format!("copy failed: {e}");
-                return;
-            }
-            self.notice = format!("Copied {} values", values.len());
+            let suffix = match self.write_clipboard_text(&text) {
+                Err(e) => {
+                    self.notice = format!("copy failed: {e}");
+                    return;
+                }
+                Ok(suffix) => suffix,
+            };
+            self.notice = format!("Copied {} values{suffix}", values.len());
             if let Some(st) = self.top_mut() {
                 st.sel.clear();
             }
@@ -321,11 +348,14 @@ impl App {
             return;
         }
         let text = self.copy_value_text_of_members(&members);
-        if let Err(e) = self.write_clipboard_text(&text) {
-            self.notice = format!("copy failed: {e}");
-            return;
-        }
-        self.notice = format!("Copied {} key-value pairs", members.len());
+        let suffix = match self.write_clipboard_text(&text) {
+            Err(e) => {
+                self.notice = format!("copy failed: {e}");
+                return;
+            }
+            Ok(suffix) => suffix,
+        };
+        self.notice = format!("Copied {} key-value pairs{suffix}", members.len());
         if let Some(st) = self.top_mut() {
             st.sel.clear();
         }
@@ -389,20 +419,23 @@ impl App {
             }
             (t, 1)
         };
-        if let Err(e) = self.write_clipboard_text(&text) {
-            self.notice = format!("cut failed: {e}");
-            return;
-        }
+        let suffix = match self.write_clipboard_text(&text) {
+            Err(e) => {
+                self.notice = format!("cut failed: {e}");
+                return;
+            }
+            Ok(suffix) => suffix,
+        };
         self.delete_row(r); // clears the selection; refusals surface their notice
         if self.notice.is_empty() {
             if !batch && pair {
-                self.notice = "Cut key-value pair".to_string();
+                self.notice = format!("Cut key-value pair{suffix}");
             } else if !batch {
-                self.notice = "Cut value".to_string();
+                self.notice = format!("Cut value{suffix}");
             } else if pair {
-                self.notice = format!("Cut {} key-value pairs", count);
+                self.notice = format!("Cut {} key-value pairs{suffix}", count);
             } else {
-                self.notice = format!("Cut {} values", count);
+                self.notice = format!("Cut {} values{suffix}", count);
             }
         }
     }
