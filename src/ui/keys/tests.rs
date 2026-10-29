@@ -5903,6 +5903,31 @@ fn merge_completion_filters_candidates() {
     assert_eq!(mrg_value(&m), "b ", "tab must complete the mapping anchor");
 }
 
+#[test]
+fn merge_ctrl_j_k_cycle_anchor_candidates() {
+    // ctrl+j applies the first merge candidate just like tab while
+    // candidates exist (the window is open).
+    let mut m = completion_model("sobj: &n3\n  k: v\nsobj2: &n4\n  m: w\n");
+    let rows = m.menu_rows();
+    let i = rows
+        .iter()
+        .position(|r| r.fn_.is_some() && m.fs().schema.nodes[r.fn_.unwrap() as usize].key == "sobj")
+        .expect("sobj row");
+    m.top_mut().unwrap().cursor = i;
+    press(&mut m, &["enter", "<"]);
+    let cands = match &m.overlay {
+        Some(Overlay::Mrg(s)) => merge_filtered(s),
+        _ => panic!("merge input did not open"),
+    };
+    assert_eq!(cands, vec!["n4".to_string()]);
+    press(&mut m, &["ctrl+j"]);
+    assert_eq!(
+        mrg_value(&m),
+        "n4 ",
+        "ctrl+j must complete the mapping anchor"
+    );
+}
+
 // ===========================================================================
 // menu_alias_test.go
 // ===========================================================================
@@ -6124,6 +6149,25 @@ fn reference_set_with_completion() {
     press(&mut m, &["enter"]);
     assert_eq!(num_at(&m.fs().doc, &["base", "p"]), "9");
     assert_eq!(num_at(&m.fs().doc, &["copy", "p"]), "9");
+}
+
+#[test]
+fn reference_ctrl_j_k_cycle_anchor_candidates() {
+    // ctrl+j/ctrl+k cycle reference candidates like tab/shift+tab; the
+    // first press starts the cycle from the empty input.
+    let mut m = completion_model("sname: &alpha one\nsname2: &beta two\n");
+    open_reference_on(&mut m, "target");
+    assert_eq!(anc_cands(&m).join(","), "alpha,beta");
+    let val = |m: &App| match &m.overlay {
+        Some(Overlay::Anc(s)) => s.ti.value().to_string(),
+        _ => panic!("reference input is not open"),
+    };
+    press(&mut m, &["ctrl+j"]);
+    assert_eq!(val(&m), "alpha");
+    press(&mut m, &["ctrl+j"]);
+    assert_eq!(val(&m), "beta");
+    press(&mut m, &["ctrl+k"]);
+    assert_eq!(val(&m), "alpha");
 }
 
 #[test]
@@ -11977,6 +12021,39 @@ fn command_completion_offers_builtins_but_not_shell_commands() {
 }
 
 #[test]
+fn command_ctrl_j_k_cycle_candidates_while_active() {
+    let st = |app: &App| match &app.overlay {
+        Some(Overlay::Command(s)) => (s.sug.clone(), s.sug_idx, s.ti.value().to_string()),
+        _ => panic!("command prompt is not open"),
+    };
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    press(&mut app, &[":", "w", "tab"]);
+    let (cands, i0, v0) = st(&app);
+    assert!(i0.is_some(), "the first tab must start a completion cycle");
+    press(&mut app, &["ctrl+j"]);
+    let (cands1, i1, v1) = st(&app);
+    assert_eq!(cands1, cands, "ctrl+j must cycle the stored list");
+    assert_ne!(i1, i0);
+    assert_eq!(v1, cands[i1.unwrap()]);
+    press(&mut app, &["ctrl+k"]);
+    let (_, i2, v2) = st(&app);
+    assert_eq!(i2, i0);
+    assert_eq!(v2, v0);
+}
+
+#[test]
+fn command_ctrl_k_still_kills_when_no_completion_is_active() {
+    // Without a live completion cycle ctrl+j/ctrl+k keep their input
+    // bindings: ctrl+k kills to the end of the line.
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    press(&mut app, &[":", "w", "a", "left", "ctrl+k"]);
+    match &app.overlay {
+        Some(Overlay::Command(s)) => assert_eq!(s.ti.value(), "w"),
+        _ => panic!("command prompt is not open"),
+    }
+}
+
+#[test]
 fn command_sug_window_reanchors_only_at_word_starts() {
     // sug_col is the completed word's start column: typing inside one word
     // never moves the candidate window, a separator that starts a new word
@@ -12224,6 +12301,37 @@ fn edit_input_arrows_move_completion_selection() {
     // Tab keeps cycling the same list after arrow movement.
     press(&mut app, &["tab"]);
     assert_eq!(edit(&app), ("alpine".to_string(), 1, 3));
+}
+
+#[test]
+fn edit_input_ctrl_j_k_move_completion_selection() {
+    // ctrl+j/ctrl+k are aliases of ctrl+n/ctrl+p while the candidate
+    // window is up.
+    let schema = schema_build(|b| {
+        let mut name = scalar("name", "Name", "string");
+        name.suggestions = vec!["alpha".into(), "alpine".into(), "alps".into()];
+        let name = b.id(name);
+        b.id(FormNode {
+            key: "$".into(),
+            kind: Kind::Object,
+            children: vec![name],
+            ..FormNode::default()
+        })
+    });
+    let doc = dbuild(|db| db.obj(vec![("name", db.s(""))]));
+    let mut app = app_with(schema, doc, test_opts());
+    press(&mut app, &["enter"]);
+    let edit = |app: &App| match &app.overlay {
+        Some(Overlay::Edit(e)) => (e.ti.value().to_string(), e.sug_idx),
+        _ => panic!("edit overlay is not open"),
+    };
+    assert_eq!(edit(&app), (String::new(), -1));
+    press(&mut app, &["ctrl+j"]);
+    assert_eq!(edit(&app), ("alpha".to_string(), 0));
+    press(&mut app, &["ctrl+j"]);
+    assert_eq!(edit(&app), ("alpine".to_string(), 1));
+    press(&mut app, &["ctrl+k"]);
+    assert_eq!(edit(&app), ("alpha".to_string(), 0));
 }
 
 #[test]
@@ -12637,6 +12745,28 @@ fn write_path_arrows_move_completion_selection() {
     );
     press(&mut app, &["up"]);
     assert_eq!(write(&app).2, 2);
+}
+
+#[test]
+fn write_path_ctrl_j_k_move_completion_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("alpha.txt"), "").unwrap();
+    std::fs::write(dir.path().join("alpine"), "").unwrap();
+    let mut app = app_with(shell_schema(), shell_doc(), test_opts());
+    app.fs_mut().opts.path = format!("{}/al", dir.path().display());
+    press(&mut app, &["W", "tab"]);
+    let write = |app: &App| match &app.overlay {
+        Some(Overlay::Write(w)) => (w.ti.value().to_string(), w.sug_idx, w.sugs.len()),
+        _ => panic!("write overlay is not open"),
+    };
+    let (v0, i0, n) = write(&app);
+    assert_eq!(n, 2);
+    press(&mut app, &["ctrl+j"]);
+    let (v1, i1, _) = write(&app);
+    assert_eq!(i1, i0 + 1, "ctrl+j moves to the next candidate");
+    assert_ne!(v1, v0);
+    press(&mut app, &["ctrl+k"]);
+    assert_eq!(write(&app), (v0, i0, n), "ctrl+k moves back");
 }
 
 #[test]

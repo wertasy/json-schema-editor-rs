@@ -495,6 +495,18 @@ impl App {
                 cycle_text_sugs(&mut e.ti, &e.sugs, &mut e.sug_idx, delta);
                 return Some(Overlay::Edit(e));
             }
+            // ctrl+j/ctrl+k mirror ctrl+n/ctrl+p while candidates are
+            // listed; without a dropdown they keep their input bindings
+            // (ctrl+k still kills to the end of the line).
+            "ctrl+j" | "ctrl+k" if !e.sugs.is_empty() => {
+                cycle_text_sugs(
+                    &mut e.ti,
+                    &e.sugs,
+                    &mut e.sug_idx,
+                    if msg.key_str() == "ctrl+k" { -1 } else { 1 },
+                );
+                return Some(Overlay::Edit(e));
+            }
             _ => {}
         }
         if let Some(k) = msg_key(&msg) {
@@ -684,6 +696,12 @@ impl App {
             }
             "shift+tab" | "ctrl+p" => {
                 cmd_complete(&mut s, false, &path);
+                Some(Overlay::Command(s))
+            }
+            // ctrl+j/ctrl+k cycle like the arrows only while a completion
+            // cycle is live; an idle prompt keeps ctrl+k as kill-to-end.
+            "ctrl+j" | "ctrl+k" if cmd_completion_active(&s) => {
+                cmd_complete_step(&mut s, msg.key_str() == "ctrl+j");
                 Some(Overlay::Command(s))
             }
             _ => {
@@ -998,6 +1016,18 @@ impl App {
                 cycle_text_sugs(&mut w.ti, &w.sugs, &mut w.sug_idx, delta);
                 Some(Overlay::Write(w))
             }
+            // Same guard as key_edit: ctrl+j/ctrl+k cycle only while the
+            // candidate window is up, so ctrl+k keeps killing to the end
+            // of the line otherwise.
+            "ctrl+j" | "ctrl+k" if !w.sugs.is_empty() => {
+                cycle_text_sugs(
+                    &mut w.ti,
+                    &w.sugs,
+                    &mut w.sug_idx,
+                    if msg.key_str() == "ctrl+k" { -1 } else { 1 },
+                );
+                Some(Overlay::Write(w))
+            }
             "esc" => None,
             _ => {
                 w.err = String::new();
@@ -1079,6 +1109,14 @@ impl App {
                 self.cycle_anchor_sug(&mut s, -1);
                 return Some(Overlay::Anc(s));
             }
+            // ctrl+j/ctrl+k mirror the arrows while reference candidates
+            // exist (RefSet mode); otherwise ctrl+k keeps its kill
+            // binding. The guard uses cands so the first press can start
+            // the cycle exactly like ctrl+n/ctrl+p.
+            "ctrl+j" | "ctrl+k" if s.mode == AnchorMode::RefSet && !s.cands.is_empty() => {
+                self.cycle_anchor_sug(&mut s, if msg.key_str() == "ctrl+k" { -1 } else { 1 });
+                return Some(Overlay::Anc(s));
+            }
             _ => {}
         }
         s.sug = -1;
@@ -1103,6 +1141,13 @@ impl App {
             }
             "shift+tab" | "ctrl+p" => {
                 self.cycle_merge_sug(&mut s, -1);
+                return Some(Overlay::Mrg(s));
+            }
+            // ctrl+j/ctrl+k mirror ctrl+n/ctrl+p only while merge
+            // candidates exist (the same condition that renders the
+            // window); otherwise ctrl+k keeps its kill binding.
+            "ctrl+j" | "ctrl+k" if !merge_filtered(&s).is_empty() => {
+                self.cycle_merge_sug(&mut s, if msg.key_str() == "ctrl+k" { -1 } else { 1 });
                 return Some(Overlay::Mrg(s));
             }
             _ => {}

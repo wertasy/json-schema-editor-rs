@@ -215,7 +215,7 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
     },
     HelpEntry {
         keys: "tab / shift+tab",
-        desc: "complete next / previous candidate (ctrl+n / ctrl+p)",
+        desc: "complete next / previous candidate (ctrl+n / ctrl+p, ctrl+j / ctrl+k)",
     },
     HelpEntry {
         keys: "left / h",

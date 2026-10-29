@@ -18,7 +18,7 @@ All edits are **written back immediately** to the in-memory document; saving jus
 Inside the input box:
 
 - `enter` applies, `esc` cancels.
-- `tab`/`ctrl+n`, `shift+tab`/`ctrl+p` cycle through completion candidates.
+- `tab`/`ctrl+n`, `shift+tab`/`ctrl+p` (aliases `ctrl+j`/`ctrl+k`, active while the candidate window is open) cycle through completion candidates.
 - Normal inline movement/deletion keys work; `alt+f`/`alt+b` move by word (whitespace and `,.+-=_/\:?!$#@*` split words), `ctrl+a`/`ctrl+e` go to line start/end, `ctrl+k`/`ctrl+u`/`ctrl+w` delete.
 - When the terminal is narrow and the value is wider than the input area, the input box scrolls horizontally and the viewport always follows the cursor (the cursor and the text around it stay visible); text outside the viewport is taken from the original value and is never modified or truncated.
 
