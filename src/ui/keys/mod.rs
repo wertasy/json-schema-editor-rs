@@ -20,9 +20,9 @@ use crate::ui::menu::{
     AddState, AnchorMode, AnchorState, App, CommandState, CommentEditState, CommentState,
     ConfirmState, DESC_BLOCK_PREVIEW_LINES, DescLine, DescSource, EditState, ErrsState,
     ExternalEdit, FastMoveState, FilePickState, FilterAction, HelpState, IssuesState, ListFilter,
-    MergeState, Msg, Overlay, RefPickState, SearchState, SelState, ShellOutState, TextState,
-    WriteState, anchor_defs, anchor_holder, anchor_holder_path, anchor_merge_use_paths,
-    anchor_role, count_anchor_uses, cursor_ancestor, cursor_by_path, cursor_for_row, cursor_prefix,
+    MergeState, Msg, Overlay, RefPickState, SearchState, ShellOutState, TextState, WriteState,
+    anchor_defs, anchor_holder, anchor_holder_path, anchor_merge_use_paths, anchor_role,
+    count_anchor_uses, cursor_ancestor, cursor_by_path, cursor_for_row, cursor_prefix,
     is_path_prefix, merge_ref_uses, nodes_equal, nodes_equal_doc, page_delta, read_clipboard,
     ref_would_cycle, remap_state_cursor, vertical_delta, write_clipboard,
 };
@@ -273,20 +273,29 @@ fn enum_index(schema: &Schema, fn_: FormNodeId, vdoc: &Doc, v: Option<NodeId>) -
     0
 }
 
-/// selMatches iterates the enum picker's options allowed by its search
-/// query: a case-insensitive substring over the display label. An empty
-/// query keeps every option.
-fn sel_matches(s: &SelState) -> impl Iterator<Item = &EnumOpt> {
-    let q = s.filter.ti.value().to_lowercase();
-    s.opts
-        .iter()
-        .filter(move |o| q.is_empty() || o.display.to_lowercase().contains(&q))
-}
-
 /// listSearchMatch reports whether text contains the query
 /// (case-insensitive); an empty query matches everything.
 fn list_search_match(q: &str, text: &str) -> bool {
     q.is_empty() || text.to_lowercase().contains(&q.to_lowercase())
+}
+
+/// filter_enum_keywords keeps options whose display contains the query as
+/// a case-insensitive substring (keyword search in the enum dropdown); an
+/// empty query keeps every option. Unlike filter_completions an exact
+/// match stays listed: the input text itself names a selectable option.
+fn filter_enum_keywords(opts: &[EnumOpt], query: &str) -> Vec<String> {
+    let lq = query.to_lowercase();
+    opts.iter()
+        .filter(|o| lq.is_empty() || o.display.to_lowercase().contains(&lq))
+        .map(|o| o.display.clone())
+        .collect()
+}
+
+/// enumChoiceError names the options a failed enum input must choose from,
+/// spelled as JSON literals so empty-string members stay visible.
+fn enum_choice_error(opts: &[EnumOpt]) -> String {
+    let names: Vec<&str> = opts.iter().map(|o| o.encoded.as_str()).collect();
+    format!("must be one of: {}", names.join(", "))
 }
 
 /// issueIndices lists the issues matching the overlay's search query.
@@ -312,17 +321,6 @@ fn err_indices(s: &ErrsState) -> impl Iterator<Item = usize> + '_ {
         .enumerate()
         .filter(move |(_, line)| list_search_match(q, line))
         .map(|(i, _)| i)
-}
-
-/// selMatchCount is the number of options the picker currently lists.
-fn sel_match_count(s: &SelState) -> usize {
-    sel_matches(s).count()
-}
-
-/// selOptionAt resolves the option under the picker cursor in the filtered
-/// list.
-fn sel_option_at(s: &SelState, cursor: usize) -> Option<&EnumOpt> {
-    sel_matches(s).nth(cursor)
 }
 
 /// variantContains reports whether target is one of the oneOf node's

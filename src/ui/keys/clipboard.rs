@@ -120,14 +120,6 @@ impl App {
                 self.refilter(&mut s);
                 self.overlay = Some(Overlay::Search(s));
             }
-            Overlay::Sel(mut s) if s.filter.active => {
-                let before = s.filter.ti.value().to_string();
-                s.filter.ti.insert_str(&text);
-                if s.filter.ti.value() != before {
-                    s.cursor = 0;
-                }
-                self.overlay = Some(Overlay::Sel(s));
-            }
             Overlay::Issues(mut s) if s.filter.active => {
                 let before = s.filter.ti.value().to_string();
                 s.filter.ti.insert_str(&text);

@@ -2519,7 +2519,7 @@ fn pty_search_replace() {
 }
 
 #[test]
-fn pty_enum_picker_search() {
+fn pty_enum_dropdown_search() {
     let dir = mktemp();
     let cfg = dir.path().join("server.config.json");
     let src = std::fs::read_to_string(repo_root().join("examples/server.config.json")).unwrap();
@@ -2538,13 +2538,11 @@ fn pty_enum_picker_search() {
     pty.pause(Duration::from_millis(300)); // let the TUI finish raw-mode setup
     // the unknown-key status row sits above Name: ↓ Name, ↓ Mode, enter
     pty.send(b"\x1b[B\x1b[B\r");
-    (_, off) = pty.wait_frame("enum picker", off, &["Mode", "http", "grpc", "tcp"]);
-    pty.send(b"/");
-    (_, off) = pty.wait_frame("enum search", off, &["search: "]);
-    pty.send(b"GR"); // filtering is case-insensitive; only grpc matches
-    (_, off) = pty.wait_frame("enum search narrowed", off, &["search: GR", "grpc"]);
+    (_, off) = pty.wait_frame("enum dropdown", off, &["Mode", "http"]);
+    pty.send(b"GR"); // typing over the highlighted option searches; only grpc matches
+    (_, off) = pty.wait_frame("enum search narrowed", off, &["GR", "grpc"]);
     pty.send(b"\r");
-    (_, off) = pty.wait_frame("picker closed", off, &["Mode"]);
+    (_, off) = pty.wait_frame("dropdown closed", off, &["Mode"]);
     pty.send(b"\x13"); // ctrl+s: persist the picked option
     pty.wait_frame("saved", off, &["Write to "]);
     let content = read_text(&cfg);

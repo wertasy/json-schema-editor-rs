@@ -8,7 +8,7 @@ jse 把表单当作编辑辅助，把 **JSON Schema 校验**当作权威判定�
 |---|---|---|
 | 元信息 | `title` `description` `default` `examples[0]` | 标题、描述、预填值、占位符 |
 | 标量 | `type: string \| integer \| number \| boolean` | 文本输入；布尔切换 |
-| 枚举 | `enum` / `const` | 选项少时行内选择，多时选择器；全 const/单值 enum 变体合并为一个枚举 |
+| 枚举 | `enum` / `const` | 行内下拉（`enter` 就地编辑并键入关键词过滤，见[编辑功能：枚举下拉](editing.md#枚举下拉)）；全 const/单值 enum 变体合并为一个枚举 |
 | 数值约束 | `minimum` `maximum` `exclusiveMinimum` `exclusiveMaximum` `multipleOf` | 输入时即时校验 |
 | 字符串约束 | `minLength` `maxLength` `pattern` | 输入时即时校验 |
 | 对象 | `properties` `required` | 字段按 schema 顺序；required 空值拦截 |

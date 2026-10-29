@@ -393,70 +393,6 @@ impl App {
         }
     }
 
-    /// keySel drives the enum option picker (Go keySel).
-    pub fn key_sel(&mut self, msg: Msg, mut s: SelState) -> Option<Overlay> {
-        if s.filter.active {
-            return self.key_sel_search(msg, s);
-        }
-        let matches = sel_match_count(&s);
-        if self.jump_keys(&msg, &mut s.cursor, matches) {
-            return Some(Overlay::Sel(s));
-        }
-        match msg.key_str().as_str() {
-            "/" => s.filter.open(s.cursor),
-            "t" => {
-                if let Some(one_of) = s.one_of {
-                    let path = s.path.clone();
-                    self.push(one_of, path);
-                    return None;
-                }
-                return Some(Overlay::Sel(s));
-            }
-            "up" | "k" => s.cursor = wrap_cursor(s.cursor, -1, sel_match_count(&s)),
-            "down" | "j" => s.cursor = wrap_cursor(s.cursor, 1, sel_match_count(&s)),
-            "enter" => {
-                if self.apply_sel(&s) {
-                    return None;
-                }
-            }
-            "esc" => return None,
-            _ => {}
-        }
-        Some(Overlay::Sel(s))
-    }
-
-    /// keySelSearch consumes keys while the enum picker's filter is active.
-    pub(super) fn key_sel_search(&mut self, msg: Msg, mut s: SelState) -> Option<Overlay> {
-        let n = sel_match_count(&s);
-        let total = s.opts.len();
-        let page = self.overlay_page_size(0, true);
-        if matches!(
-            s.filter.key(&msg, &mut s.cursor, n, total, page),
-            FilterAction::Commit
-        ) {
-            // no match: stay in the filter so backspace can undo it
-            if self.apply_sel(&s) {
-                return None;
-            }
-        }
-        Some(Overlay::Sel(s))
-    }
-
-    /// applySel writes the option under the picker cursor. It reports
-    /// whether a (matching) option was selected.
-    pub(super) fn apply_sel(&mut self, s: &SelState) -> bool {
-        let Some(opt) = sel_option_at(s, s.cursor) else {
-            return false;
-        };
-        let val = opt.val;
-        let path = s.path.clone();
-        let fi = self.cur;
-        let f = &mut self.files[fi];
-        let n = f.doc.copy_into(&f.schema.doc, val, CopyMode::Preserve);
-        let _ = f.doc.set(&path, n);
-        true
-    }
-
     /// keyEdit drives the in-place scalar input (Go keyEdit).
     pub fn key_edit(&mut self, msg: Msg, mut e: EditState) -> Option<Overlay> {
         match msg.key_str().as_str() {
@@ -474,6 +410,55 @@ impl App {
                 };
                 let val = e.ti.value().to_string();
                 let path = e.path.clone();
+                if !node.enum_.is_empty() {
+                    // enum dropdown: commit the highlighted option; without
+                    // a highlight the input must name an option itself
+                    // (case-insensitive). Applying copies the option's
+                    // schema node so non-string members and exact numeric
+                    // literals survive. A query with no matches (no
+                    // highlight, no exact option) errors instead of
+                    // writing — enter never picks an invisible value.
+                    let picked = if e.sug_idx >= 0 {
+                        e.sugs.get(e.sug_idx as usize).cloned()
+                    } else {
+                        None
+                    };
+                    let want = picked.unwrap_or_else(|| val.clone()).to_lowercase();
+                    // duplicate displays: the highlighted row picks which
+                    // member sharing the text is committed. Equal-display
+                    // options match any query identically, so they appear
+                    // together in sugs and the visible ordinal is the list
+                    // ordinal.
+                    let ordinal = if e.sug_idx > 0 {
+                        e.sugs[..e.sug_idx as usize]
+                            .iter()
+                            .filter(|d| d.to_lowercase() == want)
+                            .count()
+                    } else {
+                        0
+                    };
+                    let named = node
+                        .enum_
+                        .iter()
+                        .filter(|o| o.display.to_lowercase() == want)
+                        .map(|o| o.val)
+                        .nth(ordinal);
+                    let res = match named {
+                        Some(opt) => {
+                            let f = &mut self.files[self.cur];
+                            let n = f.doc.copy_into(&f.schema.doc, opt, CopyMode::Preserve);
+                            f.doc.set(&path, n).map(|_| ()).map_err(|e| e.msg)
+                        }
+                        None => Err(enum_choice_error(&node.enum_)),
+                    };
+                    match res {
+                        Err(err) => {
+                            e.err = err;
+                            return Some(Overlay::Edit(e));
+                        }
+                        Ok(()) => return None,
+                    }
+                }
                 let res = {
                     let f = &mut self.files[self.cur];
                     apply_scalar(&mut f.doc, &node, &f.schema.doc, &path, &val)
@@ -513,7 +498,20 @@ impl App {
             _ => {}
         }
         if let Some(k) = msg_key(&msg) {
-            e.ti.handle_key(k);
+            // enum dropdown: typing while the box holds a highlighted option
+            // starts a fresh keyword search instead of appending to the
+            // applied value (combobox select-all-on-type)
+            let holds_option = e.sug_idx >= 0
+                && e.sugs.get(e.sug_idx as usize).map(String::as_str) == Some(e.ti.value());
+            let over_option = holds_option
+                && e.fn_
+                    .is_some_and(|id| !self.fs().schema.nodes[id as usize].enum_.is_empty());
+            if let (Key::Char(c), true) = (k, over_option) {
+                e.ti.set_value(c.to_string());
+                e.ti.cursor_end();
+            } else {
+                e.ti.handle_key(k);
+            }
         }
         self.overlay = Some(Overlay::Edit(e));
         self.refresh_edit_suggestions();

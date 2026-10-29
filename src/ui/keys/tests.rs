@@ -651,68 +651,83 @@ fn menu_enum_cycle() {
 fn menu_enum_overlay() {
     let doc = test_doc();
     let mut m = mk_app(doc.clone(), test_opts());
-    press(&mut m, &["down", "enter"]); // open enum picker on Mode
-    assert!(
-        matches!(m.overlay, Some(Overlay::Sel(_))),
-        "enum overlay should open"
-    );
+    press(&mut m, &["down", "enter"]); // open the enum dropdown on Mode
+    match &m.overlay {
+        Some(Overlay::Edit(e)) => {
+            assert_eq!(e.sugs, vec!["http", "grpc", "tcp"], "all options listed");
+            assert_eq!(e.sug_idx, 0, "the default value http is highlighted");
+            assert_eq!(e.ti.value(), "http", "the input is prefilled");
+        }
+        _ => panic!("enum dropdown should open"),
+    }
     press(&mut m, &["down", "enter"]); // pick grpc
-    assert!(
-        !matches!(m.overlay, Some(Overlay::Sel(_))),
-        "picker must close on enter"
-    );
+    assert!(m.overlay.is_none(), "dropdown must close on enter");
     assert_eq!(str_at(&m.fs().doc, &["mode"]), "grpc");
 }
 
 #[test]
 fn menu_enum_overlay_search_filters_and_selects() {
-    let doc = test_doc();
-    let mut m = mk_app(doc.clone(), test_opts());
-    press(&mut m, &["down", "enter"]); // open enum picker on Mode
-    press(&mut m, &["/", "G", "R"]); // case-insensitive query
-    match &m.overlay {
-        Some(Overlay::Sel(s)) => {
-            assert!(s.filter.active);
-            assert_eq!(s.filter.ti.value(), "GR");
-            assert_eq!(sel_match_count(s), 1, "only grpc matches");
-            let view = m.sel_view(s);
-            assert!(view.contains("grpc"));
-            assert!(!view.contains("http"), "non-matching options are hidden");
-        }
-        _ => panic!("enum picker should stay open while searching"),
-    }
-    press(&mut m, &["enter"]);
-    assert!(
-        !matches!(m.overlay, Some(Overlay::Sel(_))),
-        "enter selects the match and closes the picker"
+    let schema = schema_from_json(
+        r#"{"type":"object","properties":{
+          "mode":{"type":"string","enum":["http","grpc","tcp"]}}}"#,
     );
+    let doc = dbuild(|db| db.obj(vec![("mode", db.s("tcp"))]));
+    let mut m = app_with(schema, doc, test_opts());
+    press(&mut m, &["enter"]); // open the enum dropdown on Mode
+    press(&mut m, &["G", "R"]); // keyword search is case-insensitive
+    match &m.overlay {
+        Some(Overlay::Edit(e)) => {
+            assert_eq!(
+                e.ti.value(),
+                "GR",
+                "typing over the highlighted option starts a fresh search"
+            );
+            assert_eq!(e.sugs, vec!["grpc"], "only grpc matches");
+            assert_eq!(e.sug_idx, 0, "the top match stays highlighted");
+        }
+        _ => panic!("enum dropdown should stay open while searching"),
+    }
+    let view = m.view();
+    assert!(view.contains("grpc"), "matching option is listed:\n{view}");
+    assert!(
+        !view.contains("http"),
+        "non-matching options are hidden:\n{view}"
+    );
+    press(&mut m, &["enter"]);
+    assert!(m.overlay.is_none(), "enter applies the named option");
     assert_eq!(str_at(&m.fs().doc, &["mode"]), "grpc");
 }
 
 #[test]
-fn menu_enum_overlay_search_cancel_and_no_match() {
+fn menu_enum_overlay_search_no_match_stays() {
     let doc = test_doc();
     let mut m = mk_app(doc.clone(), test_opts());
-    press(&mut m, &["down", "enter", "/", "z", "z"]);
+    press(&mut m, &["down", "enter", "z", "z"]);
     match &m.overlay {
-        Some(Overlay::Sel(s)) => {
-            assert_eq!(sel_match_count(s), 0);
-            assert!(m.sel_view(s).contains("(no matches)"));
+        Some(Overlay::Edit(e)) => {
+            assert_eq!(e.ti.value(), "zz");
+            assert!(e.sugs.is_empty(), "no option matches zz");
         }
-        _ => panic!("enum picker should stay open"),
+        _ => panic!("enum dropdown should stay open"),
     }
-    press(&mut m, &["enter"]); // no match: must not write the hidden option
-    assert!(matches!(m.overlay, Some(Overlay::Sel(_))));
+    press(&mut m, &["enter"]); // no match: must not write anything
+    match &m.overlay {
+        Some(Overlay::Edit(e)) => {
+            assert!(e.err.contains("must be one of"), "err = {}", e.err);
+            assert!(e.err.contains("grpc"), "err names the options: {}", e.err);
+        }
+        _ => panic!("invalid enum input keeps the editor open"),
+    }
     assert!(!has(&m.fs().doc, &sp(&["mode"])), "no option was written");
 
-    press(&mut m, &["esc"]); // leave search, keep the picker
+    press(&mut m, &["backspace", "backspace"]); // query cleared: full list back
     match &m.overlay {
-        Some(Overlay::Sel(s)) => {
-            assert!(!s.filter.active);
-            assert_eq!(s.filter.ti.value(), "");
-            assert_eq!(sel_match_count(s), 3, "the full option list is back");
+        Some(Overlay::Edit(e)) => {
+            assert_eq!(e.ti.value(), "");
+            assert_eq!(e.sugs, vec!["http", "grpc", "tcp"]);
+            assert_eq!(e.sug_idx, 0, "the first option is highlighted");
         }
-        _ => panic!("esc must only cancel the search"),
+        _ => panic!("backspace restores the option list"),
     }
     press(&mut m, &["down", "enter"]); // grpc from the restored list
     assert_eq!(str_at(&m.fs().doc, &["mode"]), "grpc");
@@ -720,7 +735,7 @@ fn menu_enum_overlay_search_cancel_and_no_match() {
 }
 
 #[test]
-fn menu_enum_overlay_search_takes_q_literally() {
+fn menu_enum_overlay_takes_q_literally() {
     let schema = schema_from_json(
         r#"{
           "type": "object",
@@ -731,18 +746,105 @@ fn menu_enum_overlay_search_takes_q_literally() {
     );
     let doc = dbuild(|db| db.obj(vec![("mode", db.s("http"))]));
     let mut m = app_with(schema, doc, test_opts());
-    press(&mut m, &["enter"]); // open enum picker on the only field
-    press(&mut m, &["/", "q"]);
+    press(&mut m, &["enter"]); // open the enum dropdown on the only field
+    press(&mut m, &["q"]); // q searches; there is no separate search mode
     match &m.overlay {
-        Some(Overlay::Sel(s)) => {
-            assert!(s.filter.active, "q must be a query character, not esc");
-            assert_eq!(s.filter.ti.value(), "q");
-            assert_eq!(sel_match_count(s), 1);
+        Some(Overlay::Edit(e)) => {
+            assert_eq!(e.ti.value(), "q");
+            assert_eq!(e.sugs, vec!["quiet"]);
         }
-        _ => panic!("enum picker should stay open"),
+        _ => panic!("enum dropdown should stay open"),
     }
     press(&mut m, &["enter"]);
     assert_eq!(str_at(&m.fs().doc, &["mode"]), "quiet");
+}
+
+#[test]
+fn menu_enum_dropdown_applies_non_string_members() {
+    let schema = schema_from_json(
+        r#"{"type":"object","properties":{
+          "level":{"enum":[true,1,null,"auto"]}}}"#,
+    );
+    let doc = dbuild(|db| db.obj(vec![("level", db.s("auto"))]));
+    let mut m = app_with(schema, doc, test_opts());
+    press(&mut m, &["enter"]); // current value auto is highlighted
+    match &m.overlay {
+        Some(Overlay::Edit(e)) => {
+            assert_eq!(e.sugs, vec!["true", "1", "null", "auto"]);
+            assert_eq!(e.sug_idx, 3);
+        }
+        _ => panic!("enum dropdown should open"),
+    }
+    // typing "t" over the highlighted auto starts a search: true and auto
+    // contain it; the highlighted top match is true
+    press(&mut m, &["t"]);
+    match &m.overlay {
+        Some(Overlay::Edit(e)) => assert_eq!(e.sugs, vec!["true", "auto"]),
+        _ => panic!(),
+    }
+    press(&mut m, &["enter"]);
+    assert!(
+        matches!(
+            m.fs().doc.get(&path(&["level"])),
+            Some(n) if matches!(m.fs().doc.value(n), Value::Bool(true))
+        ),
+        "the boolean member is applied as a bool"
+    );
+
+    // a null member is reachable by keyword too
+    set_cursor_path(&mut m, &sp(&["level"]));
+    press(&mut m, &["enter", "n"]);
+    match &m.overlay {
+        Some(Overlay::Edit(e)) => assert_eq!(e.sugs, vec!["null"]),
+        _ => panic!(),
+    }
+    press(&mut m, &["enter"]);
+    assert!(
+        matches!(
+            m.fs().doc.get(&path(&["level"])),
+            Some(n) if matches!(m.fs().doc.value(n), Value::Null)
+        ),
+        "the null member is applied as null"
+    );
+}
+
+#[test]
+fn menu_enum_dropdown_disambiguates_duplicate_displays() {
+    // `enum: ["1", 1]` renders two identical rows; enter must commit the
+    // highlighted member, not the first textual match
+    let schema = schema_from_json(
+        r#"{"type":"object","properties":{
+          "level":{"enum":["1",1]}}}"#,
+    );
+    let doc = dbuild(|db| db.obj(vec![("level", db.n("1"))]));
+    let mut m = app_with(schema, doc, test_opts());
+    press(&mut m, &["enter"]); // the number member is highlighted
+    match &m.overlay {
+        Some(Overlay::Edit(e)) => {
+            assert_eq!(e.sugs, vec!["1", "1"]);
+            assert_eq!(e.sug_idx, 1, "the current number member is highlighted");
+        }
+        _ => panic!("enum dropdown should open"),
+    }
+    press(&mut m, &["enter"]); // no-op commit must not flip number → string
+    assert!(
+        matches!(
+            m.fs().doc.get(&path(&["level"])),
+            Some(n) if matches!(m.fs().doc.value(n), Value::Num(s) if s == "1")
+        ),
+        "the number member survives a no-op enter"
+    );
+
+    // cycling onto the second row commits the number by keyword too
+    set_cursor_path(&mut m, &sp(&["level"]));
+    press(&mut m, &["enter", "1", "down", "enter"]);
+    assert!(
+        matches!(
+            m.fs().doc.get(&path(&["level"])),
+            Some(n) if matches!(m.fs().doc.value(n), Value::Num(s) if s == "1")
+        ),
+        "the highlighted duplicate row commits the number member"
+    );
 }
 
 /// assertHintBottom checks that the view fills the terminal exactly and its
@@ -762,28 +864,26 @@ fn assert_hint_bottom(m: &mut App, needle: &str) {
 }
 
 #[test]
-fn enum_picker_search_sits_above_the_list() {
+fn enum_dropdown_sits_below_the_input() {
     let doc = test_doc();
     let mut m = mk_app(doc, test_opts());
     m.width = 80;
     m.height = 12;
-    press(&mut m, &["down", "enter", "/", "g", "r"]);
+    press(&mut m, &["down", "enter", "g", "r"]);
     let view = m.view();
     let lines: Vec<&str> = view.lines().collect();
-    let search = lines
+    // the edited Mode row carries the keyword being typed; the matching
+    // option is listed right below it
+    let input = lines
         .iter()
-        .position(|l| l.contains("search: gr"))
-        .expect("search row");
+        .position(|l| l.contains("gr"))
+        .expect("input row");
     let option = lines
         .iter()
         .position(|l| l.contains("grpc"))
         .expect("matched option");
-    assert!(search < option, "search must be above the list:\n{view}");
-    assert!(
-        !lines[search].contains("\x1b[38;5;248m"),
-        "the search row must use the default white foreground:\n{view}"
-    );
-    assert_hint_bottom(&mut m, "esc cancel search");
+    assert!(input < option, "dropdown must sit below the input:\n{view}");
+    assert_hint_bottom(&mut m, "ctrl+s/w save");
 }
 
 #[test]
@@ -918,7 +1018,8 @@ fn search_opens_empty_on_the_current_value() {
         "cancelling restores the value cursor"
     );
 
-    // enum: same rule for the single-select picker
+    // enum: opening highlights the current value in the dropdown; typing
+    // over it searches the options by keyword
     let schema = schema_from_json(
         r#"{"type":"object","properties":{
           "mode":{"type":"string","enum":["http","grpc","tcp"]}}}"#,
@@ -927,20 +1028,21 @@ fn search_opens_empty_on_the_current_value() {
     let mut m = app_with(schema, doc, test_opts());
     press(&mut m, &["enter"]);
     match &m.overlay {
-        Some(Overlay::Sel(s)) => assert_eq!(s.cursor, 2, "current value tcp"),
-        _ => panic!("enum picker should open"),
-    }
-    press(&mut m, &["/"]);
-    match &m.overlay {
-        Some(Overlay::Sel(s)) => {
-            assert!(s.filter.active);
-            assert_eq!(s.filter.ti.value(), "");
-            assert_eq!(s.cursor, 2, "cursor stays on the current value");
-            assert_eq!(s.filter.restore, 2);
+        Some(Overlay::Edit(e)) => {
+            assert_eq!(e.sug_idx, 2, "current value tcp is highlighted");
+            assert_eq!(e.ti.value(), "tcp");
+            assert_eq!(e.sugs, vec!["http", "grpc", "tcp"]);
         }
-        _ => panic!("enum picker should stay open"),
+        _ => panic!("enum dropdown should open"),
     }
     press(&mut m, &["g", "r"]);
+    match &m.overlay {
+        Some(Overlay::Edit(e)) => {
+            assert_eq!(e.ti.value(), "gr");
+            assert_eq!(e.sugs, vec!["grpc"], "keyword narrowed the options");
+        }
+        _ => panic!("enum dropdown should stay open"),
+    }
     press(&mut m, &["enter"]);
     assert_eq!(str_at(&m.fs().doc, &["mode"]), "grpc");
 }
@@ -2713,21 +2815,21 @@ fn jump_keys_overlays() {
     press(&mut m, &["home"]);
     press(&mut m, &["esc"]);
 
-    // enum select overlay
+    // enum select dropdown: the highlight wraps over the options
     press(&mut m, &["down", "down"]); // issues row → Name → Mode
     press(&mut m, &["enter"]);
-    let last = match &m.overlay {
-        Some(Overlay::Sel(s)) => s.opts.len() - 1,
-        _ => panic!("enum select should open"),
+    let n = match &m.overlay {
+        Some(Overlay::Edit(e)) => e.sugs.len(),
+        _ => panic!("enum dropdown should open"),
     };
-    press(&mut m, &["G"]);
+    press(&mut m, &["up"]);
     match &m.overlay {
-        Some(Overlay::Sel(s)) => assert_eq!(s.cursor, last),
+        Some(Overlay::Edit(e)) => assert_eq!(e.sug_idx, n as i64 - 1),
         _ => panic!(),
     }
-    press(&mut m, &["g", "g"]);
+    press(&mut m, &["down"]);
     match &m.overlay {
-        Some(Overlay::Sel(s)) => assert_eq!(s.cursor, 0),
+        Some(Overlay::Edit(e)) => assert_eq!(e.sug_idx, 0),
         _ => panic!(),
     }
     press(&mut m, &["esc"]);
@@ -6804,14 +6906,11 @@ fn one_of_item_add_infer() {
 
     press(&mut m, &["enter"]);
     assert!(
-        matches!(m.overlay, Some(Overlay::Sel(_))),
+        matches!(m.overlay, Some(Overlay::Edit(_))),
         "type picker should open"
     );
-    if let Some(Overlay::Sel(s)) = &m.overlay {
-        assert!(
-            s.opts.iter().any(|o| o.display == "trojan"),
-            "union discriminator"
-        );
+    if let Some(Overlay::Edit(e)) = &m.overlay {
+        assert!(e.sugs.iter().any(|s| s == "trojan"), "union discriminator");
     }
     press(&mut m, &["enter"]);
     assert_eq!(
@@ -6829,7 +6928,7 @@ fn one_of_item_add_infer() {
     // switching in place keeps the union discriminator
     press(&mut m, &["enter"]);
     match &m.overlay {
-        Some(Overlay::Sel(s)) => assert!(s.opts.iter().any(|o| o.display == "trojan")),
+        Some(Overlay::Edit(e)) => assert!(e.sugs.iter().any(|s| s == "trojan")),
         _ => panic!("pinned menu must keep the union discriminator"),
     }
     press(&mut m, &["down", "enter"]);
@@ -6897,15 +6996,14 @@ fn one_of_union_enum_keeps_all_discriminator_options() {
     m.top_mut().unwrap().cursor = type_idx;
     press(&mut m, &["enter"]);
     match &m.overlay {
-        Some(Overlay::Sel(s)) => {
-            let labels: Vec<&str> = s.opts.iter().map(|o| o.display.as_str()).collect();
+        Some(Overlay::Edit(e)) => {
+            let labels: Vec<&str> = e.sugs.iter().map(String::as_str).collect();
             assert_eq!(labels, ["inline", "", "local", "remote"]);
+            assert_eq!(e.sug_idx, 0, "unset type highlights the first option");
         }
         _ => panic!("type picker should open"),
     }
-    if let Some(Overlay::Sel(s)) = &mut m.overlay {
-        s.cursor = 3; // remote
-    }
+    press(&mut m, &["down", "down", "down"]); // remote
     press(&mut m, &["enter"]);
     assert_eq!(
         sget(
@@ -6932,9 +7030,10 @@ fn one_of_union_enum_keeps_all_discriminator_options() {
     m.top_mut().unwrap().cursor = type_idx;
     press(&mut m, &["enter"]);
     match &m.overlay {
-        Some(Overlay::Sel(s)) => {
-            let labels: Vec<&str> = s.opts.iter().map(|o| o.display.as_str()).collect();
+        Some(Overlay::Edit(e)) => {
+            let labels: Vec<&str> = e.sugs.iter().map(String::as_str).collect();
             assert_eq!(labels, ["inline", "", "local", "remote"]);
+            assert_eq!(e.sug_idx, 3, "current value remote is highlighted");
         }
         _ => panic!("pinned type picker should open"),
     }
@@ -8176,7 +8275,7 @@ fn enum_variant_add_returns_to_parent_menu() {
         .expect("enum variant row");
     m.top_mut().unwrap().cursor = pos;
     press(&mut m, &["enter"]); // choose the enum variant
-    assert!(matches!(m.overlay, Some(Overlay::Sel(_))));
+    assert!(matches!(m.overlay, Some(Overlay::Edit(_))));
     press(&mut m, &["enter"]); // choose its first option
     assert!(m.overlay.is_none());
     assert_eq!(
@@ -9867,7 +9966,7 @@ fn menu_one_of_variants() {
     assert!(matches!(m.overlay, Some(Overlay::Confirm(_))));
     press(&mut m, &["y"]);
     assert!(!has(&m.fs().doc, &sp(&["auth"])));
-    assert!(matches!(m.overlay, Some(Overlay::Sel(_))));
+    assert!(matches!(m.overlay, Some(Overlay::Edit(_))));
     press(&mut m, &["enter"]);
     assert_eq!(str_at(&m.fs().doc, &["auth"]), "none");
 
@@ -9877,7 +9976,7 @@ fn menu_one_of_variants() {
     press(
         &mut m2,
         &[
-            "down", "down", "down", "down", "down", "enter", "t", "down", "enter",
+            "down", "down", "down", "down", "down", "enter", "esc", "t", "down", "enter",
         ],
     );
     assert!(matches!(m2.overlay, Some(Overlay::Confirm(_))));
@@ -9896,20 +9995,20 @@ fn cursor_wrap() {
     press(&mut m, &["down"]);
     assert_eq!(cursor_cursor(&mut m), 0);
 
-    // enum picker wraps
+    // enum dropdown wraps
     press(&mut m, &["down", "enter"]);
     let n = match &m.overlay {
-        Some(Overlay::Sel(s)) => s.opts.len(),
-        _ => panic!("picker did not open"),
+        Some(Overlay::Edit(e)) => e.sugs.len(),
+        _ => panic!("dropdown did not open"),
     };
     press(&mut m, &["up"]);
     match &m.overlay {
-        Some(Overlay::Sel(s)) => assert_eq!(s.cursor, n - 1),
+        Some(Overlay::Edit(e)) => assert_eq!(e.sug_idx, n as i64 - 1),
         _ => panic!(),
     }
     press(&mut m, &["down"]);
     match &m.overlay {
-        Some(Overlay::Sel(s)) => assert_eq!(s.cursor, 0),
+        Some(Overlay::Edit(e)) => assert_eq!(e.sug_idx, 0),
         _ => panic!(),
     }
     press(&mut m, &["esc"]);
@@ -9988,22 +10087,22 @@ fn vim_keys() {
     }
     press(&mut m, &["esc"]);
 
-    // enum picker: j/k move like arrows
+    // enum dropdown: arrows move the highlight
     let mut m2 = items_app(test_doc());
     set_cursor_path(&mut m2, &sp(&["mode"]));
     press(&mut m2, &["enter"]);
     let start = match &m2.overlay {
-        Some(Overlay::Sel(s)) => s.cursor,
-        _ => panic!("picker should open"),
+        Some(Overlay::Edit(e)) => e.sug_idx,
+        _ => panic!("dropdown should open"),
     };
-    press(&mut m2, &["j"]);
+    press(&mut m2, &["down"]);
     match &m2.overlay {
-        Some(Overlay::Sel(s)) => assert_ne!(s.cursor, start),
+        Some(Overlay::Edit(e)) => assert_ne!(e.sug_idx, start),
         _ => panic!(),
     }
-    press(&mut m2, &["k"]);
+    press(&mut m2, &["up"]);
     match &m2.overlay {
-        Some(Overlay::Sel(s)) => assert_eq!(s.cursor, start),
+        Some(Overlay::Edit(e)) => assert_eq!(e.sug_idx, start),
         _ => panic!(),
     }
 }

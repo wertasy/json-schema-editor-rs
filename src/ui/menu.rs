@@ -14,7 +14,7 @@ use regex::Regex;
 
 use crate::doc::jsondoc::path_string;
 use crate::doc::{Doc, NodeId, PathSeg, Value};
-use crate::smodel::{EnumOpt, FormNode, FormNodeId};
+use crate::smodel::{FormNode, FormNodeId};
 use crate::ui::files::{disk_stat_of, new_app};
 use crate::ui::nav::{Nav, NavGo};
 use crate::ui::rows::{
@@ -102,7 +102,6 @@ pub mod style {
 
 pub const MENU_HELP: &str =
     "↑/↓ move · enter edit/open · esc back · ctrl+s/w save · / search · : command · ? help";
-pub const OVERLAY_HELP: &str = "enter select · / search · esc cancel";
 /// Collapsed description cap per source: the schema help and the document
 /// comment each show at most this many wrapped lines; a cut block gets an
 /// emphasized trailing `…`.
@@ -582,20 +581,6 @@ pub struct HelpState {
     pub scroll: usize,
 }
 
-/// selState is the full-screen enum option picker.
-pub struct SelState {
-    pub fn_: FormNodeId,
-    pub path: Vec<PathSeg>,
-    pub opts: Vec<EnumOpt>,
-    /// index into the options matched by the filter (all of them when the
-    /// query is empty)
-    pub cursor: usize,
-    /// inline '/'-search over the option list
-    pub filter: ListFilter,
-    /// set for enum variant editors: t type switch
-    pub one_of: Option<FormNodeId>,
-}
-
 /// textState is the built-in raw textarea overlay; its syntax follows
 /// Options.Raw (JSON, YAML, or TOML). `path` is None for the whole-document
 /// editor.
@@ -785,7 +770,6 @@ pub enum Overlay {
     Errs(ErrsState),
     RefPick(RefPickState),
     Text(TextState),
-    Sel(SelState),
     Search(SearchState),
     Edit(EditState),
     Add(AddState),
@@ -816,7 +800,6 @@ impl Overlay {
             | Overlay::Mrg(_) => true,
             Overlay::Issues(s) => s.filter.active,
             Overlay::Errs(s) => s.filter.active,
-            Overlay::Sel(s) => s.filter.active,
             Overlay::RefPick(s) => s.filter.active,
             Overlay::FilePick(s) => s.filter.active,
             _ => false,
@@ -1459,7 +1442,6 @@ impl App {
             Overlay::Errs(s) => self.key_errs(msg, s),
             Overlay::RefPick(s) => self.key_ref_pick(msg, s),
             Overlay::Text(s) => self.key_text(msg, s),
-            Overlay::Sel(s) => self.key_sel(msg, s),
             Overlay::Search(s) => self.key_search(msg, s),
             Overlay::Edit(s) => self.key_edit(msg, s),
             Overlay::Add(s) => self.key_add(msg, s),

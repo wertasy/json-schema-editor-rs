@@ -233,6 +233,38 @@ impl App {
         self.open_field_synth(f, path, is_new, Some(fn_))
     }
 
+    /// openEnumEdit opens a scalar enum editor as an inline input with the
+    /// options in the completion dropdown (Go used a full-screen selState;
+    /// the Rust UI folds the picker into the edit surface). The current
+    /// value is prefilled and highlighted, typing searches the options by
+    /// keyword, and enter applies the named option's schema node so
+    /// non-string members and exact literals survive.
+    pub(super) fn open_enum_edit(&mut self, fn_id: FormNodeId, path: Vec<PathSeg>, is_new: bool) {
+        let opts = self.fs().schema.nodes[fn_id as usize].enum_.clone();
+        let cur = self.doc().get(&path);
+        let cursor = enum_index(&self.fs().schema, fn_id, self.doc(), cur);
+        let pre = opts
+            .get(cursor)
+            .map(|o| o.display.clone())
+            .unwrap_or_default();
+        let mut ti = TextInput::default();
+        ti.set_value(pre.clone());
+        ti.cursor_end();
+        self.overlay = Some(Overlay::Edit(EditState {
+            fn_: Some(fn_id),
+            synth: None,
+            path,
+            ti,
+            err: String::new(),
+            is_new,
+            cands: Vec::new(),
+            sug_prefix: pre.clone(),
+            sugs: opts.iter().map(|o| o.display.clone()).collect(),
+            sug_idx: cursor as i64,
+            sug_col: display_width(&pre),
+        }));
+    }
+
     /// openField with an inlined FormNode: schema node or the synthetic one
     /// of a schema-less scalar edit.
     pub(super) fn open_field_synth(
@@ -292,21 +324,12 @@ impl App {
                 self.refresh_edit_suggestions();
             }
             Kind::Enum => {
-                let cur = self.doc().get(&path);
                 let Some(fn_id) = fn_id else {
                     // synthetic nodes are never enums; fall back to raw edit
                     self.open_raw_at(None, Some(path));
                     return;
                 };
-                let cursor = enum_index(&self.fs().schema, fn_id, self.doc(), cur);
-                self.overlay = Some(Overlay::Sel(SelState {
-                    fn_: fn_id,
-                    path,
-                    opts: f.enum_,
-                    cursor,
-                    filter: Default::default(),
-                    one_of: None,
-                }));
+                self.open_enum_edit(fn_id, path, is_new);
             }
             Kind::Boolean => {
                 // resolve against a schema id when possible (default lookup)
@@ -943,19 +966,7 @@ impl App {
                 }
             }
             Kind::Boolean => self.toggle_bool(variant, &path),
-            Kind::Enum => {
-                let cur = self.doc().get(&path);
-                let cursor = enum_index(&self.fs().schema, variant, self.doc(), cur);
-                let opts = self.fs().schema.nodes[variant as usize].enum_.clone();
-                self.overlay = Some(Overlay::Sel(SelState {
-                    fn_: variant,
-                    path,
-                    opts,
-                    cursor,
-                    filter: Default::default(),
-                    one_of,
-                }));
-            }
+            Kind::Enum => self.open_enum_edit(variant, path, false),
             _ => {
                 // scalar / raw: edit at the field row in the parent menu
                 self.open_field(variant, path.clone(), false);
@@ -1178,6 +1189,15 @@ impl App {
         let prefix = e.ti.value().to_string();
         e.sug_prefix = prefix.clone();
         if let Some(src) = src {
+            if !src.enum_.is_empty() {
+                // enum dropdown: the whole input is the search keyword (not
+                // a prefix), and matching options stay listed. The first
+                // match is highlighted so enter always commits a visible
+                // option — the picker's old cursor-to-top-match rule.
+                e.sugs = filter_enum_keywords(&src.enum_, &prefix);
+                e.sug_idx = if e.sugs.is_empty() { -1 } else { 0 };
+                return;
+            }
             if src.tag_ref.is_empty() && !src.suggestions.is_empty() {
                 let opts = filter_completions(&src.suggestions, &prefix);
                 if !opts.is_empty() {

@@ -50,7 +50,6 @@ impl App {
             Some(Overlay::RefPick(s)) => return self.ref_pick_view(s),
             Some(Overlay::Text(s)) => return self.text_view(s),
             Some(Overlay::CommentEdit(s)) => return self.comment_edit_view(s),
-            Some(Overlay::Sel(s)) => return self.sel_view(s),
             Some(Overlay::Comment(s)) => return self.comment_view(s),
             Some(Overlay::ShellOut(s)) => return self.shell_out_view(s),
             Some(Overlay::Help(s)) => return self.help_view(s.scroll),
@@ -2230,76 +2229,6 @@ impl App {
         b.push_str(&ta_view(&s.ta));
         b.push('\n');
         self.finish_with_hint(b, style::help("ctrl+s apply · esc cancel"))
-    }
-
-    pub(super) fn sel_view(&self, s: &SelState) -> String {
-        let mut cur_enc = String::new();
-        if let Some(v) = self.doc().get(&s.path) {
-            if !is_null_val(self.doc(), v) {
-                cur_enc = self.doc().encode_value(v);
-            }
-        }
-        let mut b = clip_display(
-            &style::bold(&display_title(&self.fs().schema, s.fn_)),
-            self.width.saturating_sub(1),
-        );
-        b.push('\n');
-        if s.filter.active {
-            b.push_str(&clip_display(
-                &search_input_line("search: ", &s.filter.ti, self.width.saturating_sub(1)),
-                self.width.saturating_sub(1),
-            ));
-            b.push('\n');
-        }
-        // Reserve the title, optional search row and the bottom help row;
-        // the option window scrolls with the cursor.
-        let list_height = self
-            .height
-            .saturating_sub(1 + usize::from(s.filter.active) + 1)
-            .max(1);
-        let total = sel_match_count(s);
-        let cursor = s.cursor.min(total.saturating_sub(1));
-        let mut off = cursor.saturating_sub(list_height - 1);
-        let max_off = total.saturating_sub(list_height);
-        if off > max_off {
-            off = max_off;
-        }
-        for (i, o) in sel_matches(s).skip(off).take(list_height).enumerate() {
-            let pos = off + i;
-            let (mark, mark_style) = if o.encoded == cur_enc {
-                ("●", style::accent("●"))
-            } else {
-                ("○", style::faint("○"))
-            };
-            let mut line = format!(
-                "{}{} {}",
-                cursor_prefix(pos == cursor),
-                mark_style,
-                o.display
-            );
-            if pos == cursor {
-                line = style::sel(&line);
-            }
-            let _ = mark;
-            b.push_str(&clip_display(&line, self.width.saturating_sub(1)));
-            b.push('\n');
-        }
-        if total == 0 {
-            b.push_str(&clip_display(
-                &style::faint("(no matches)"),
-                self.width.saturating_sub(1),
-            ));
-            b.push('\n');
-        }
-        let hint = if s.filter.active {
-            "enter select · ↑/↓ or tab move · esc cancel search"
-        } else {
-            crate::ui::menu::OVERLAY_HELP
-        };
-        self.finish_with_hint(
-            b,
-            clip_display(&style::help(hint), self.width.saturating_sub(1)),
-        )
     }
 
     pub(super) fn file_pick_view(&self, pick: &FilePickState) -> String {
