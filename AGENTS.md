@@ -179,6 +179,8 @@ git tag -a vX.Y.Z -m "jse vX.Y.Z"
 git push origin vX.Y.Z
 ```
 
+Once the workflow has created the GitHub Release, replace the auto-generated body with curated release notes (`gh release edit vX.Y.Z --notes-file <file>`): user-facing changes only — what a user of the previous version gains or must watch out for, in Chinese with a short English section, ending with the `Full Changelog` compare link. The workflow's `--generate-notes` only seeds that body; do not ship a release whose notes are just the changelog link.
+
 Do not hand-edit build metadata; `build.rs` and the workflow own it.
 
 Local builds take the highest reachable semver tag (`v0.0.0` when there is none), plus `+dirty` for an uncommitted worktree (untracked files count). Commits after the tag keep its version; `COMMIT` and `BUILD_DATE` identify the exact build. `JSE_VERSION_OVERRIDE` replaces the git-derived version. `src/vcsver.rs` only parses, canonicalizes and orders tags; `build.rs` `include!`s it and the crate compiles it under `cfg(test)` for unit tests. Build scripts rerun only for declared paths, so `build.rs` watches tracked files, their top-level directories, `HEAD`, `index`, `refs`, and `packed-refs`.
