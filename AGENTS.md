@@ -179,7 +179,7 @@ git tag -a vX.Y.Z -m "jse vX.Y.Z"
 git push origin vX.Y.Z
 ```
 
-Once the workflow has created the GitHub Release, replace the auto-generated body with curated release notes (`gh release edit vX.Y.Z --notes-file <file>`): user-facing changes only — what a user of the previous version gains or must watch out for, in Chinese with a short English section, ending with the `Full Changelog` compare link. The workflow's `--generate-notes` only seeds that body; do not ship a release whose notes are just the changelog link.
+Once the workflow has created the GitHub Release, replace the auto-generated body with curated release notes (`gh release edit vX.Y.Z --notes-file <file>`): user-facing changes only — what a user of the previous version gains or must watch out for — written as two self-contained sections, Chinese first and English after, with category headings (features / fixes / upgrade notes); never interleave the two languages line-by-line. End with the `Full Changelog` compare link. The workflow's `--generate-notes` only seeds that body; do not ship a release whose notes are just the changelog link.
 
 Do not hand-edit build metadata; `build.rs` and the workflow own it.
 
