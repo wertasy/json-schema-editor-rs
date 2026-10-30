@@ -3,11 +3,17 @@
 //! The command line is a normal one-line [`TextInput`](crate::ui::widgets::TextInput),
 //! so completion works at the cursor, not on the whole buffer. `!` switches
 //! to shell completion (executables from `PATH`, then filesystem paths);
-//! without it the builtin command names complete. In a shell command `%`
-//! stands for the session file and tab expands it to the absolute path.
+//! without it the builtin command names complete. An explicit tab press on
+//! a shell argument first asks bash's programmable completion and keeps the
+//! local scan when bash-completion has no rule for the command. In a shell
+//! command `%` stands for the session file and tab expands it to the
+//! absolute path.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
+// the module owns `Command` (the parsed `:` line), so the process type
+// needs an alias
+use std::process::{Command as Process, Stdio};
 
 use crate::ui::shell::ShellMode;
 
@@ -198,10 +204,7 @@ fn completion_candidates_in(
     let cursor = line.floor_char_boundary(cursor);
     let prefix = &line[..cursor];
     let token_start = word_start(prefix);
-    if let Some(region) = shell_region(prefix).filter(|&r| cursor >= r) {
-        let start = token_start.max(region);
-        let token = &prefix[start..];
-        let command_word = prefix[region..start].trim().is_empty();
+    if let Some((_, start, token, command_word)) = shell_token(prefix) {
         let candidates = if token == "%" {
             if file_path.is_empty() {
                 Vec::new()
@@ -221,6 +224,194 @@ fn completion_candidates_in(
     }
     builtin_completion(prefix, token_start)
 }
+
+/// shell_token describes the word before the cursor when it sits in the
+/// shell region: the byte offset just past the `!`, the word start, the
+/// word itself and whether it is the shell command word (empty text after
+/// the `!`).
+fn shell_token(prefix: &str) -> Option<(usize, usize, &str, bool)> {
+    let region = shell_region(prefix)?;
+    let start = word_start(prefix).max(region);
+    let token = &prefix[start..];
+    let command_word = prefix[region..start].trim().is_empty();
+    Some((region, start, token, command_word))
+}
+
+/// tab_candidates is the completion behind an explicit tab press: it adds
+/// bash's programmable completion on top of the cheap local scan. For a
+/// shell argument word, bash-completion results (subcommands, branch names,
+/// service actions, ...) replace the filesystem candidates when the command
+/// has a completion rule; the command word itself, `%`, builtin words and
+/// everything outside a shell region never consult bash. Typing keeps
+/// calling [`completion_candidates`] — completion scripts may spawn the
+/// command's binary, which is too slow for the auto-filtering window.
+pub fn tab_candidates(line: &str, cursor: usize, file_path: &str) -> Completion {
+    let base = completion_candidates(line, cursor, file_path);
+    let cursor = line.floor_char_boundary(cursor);
+    let prefix = &line[..cursor];
+    let Some((region, start, token, command_word)) = shell_token(prefix) else {
+        return base;
+    };
+    if command_word || token == "%" {
+        return base;
+    }
+    let candidates = bash_completion(&line[region..], cursor - region);
+    if candidates.is_empty() {
+        return base;
+    }
+    Completion {
+        start,
+        prefix: token.to_string(),
+        candidates,
+    }
+}
+
+/// bash_completion runs bash's programmable completion for `line`, the
+/// shell command after `!` with the caret at `point`. Returns the COMPREPLY
+/// words in the completion script's order; an empty result means bash, the
+/// bash-completion machinery or a rule for this command is missing and the
+/// caller keeps its local candidates.
+fn bash_completion(line: &str, point: usize) -> Vec<String> {
+    bash_completion_env(line, point, &[])
+}
+
+/// bash_completion_env is [`bash_completion`] with extra environment
+/// entries for the driver; tests use it to point JSE_BASH_COMPLETION at a
+/// fake core script and JSE_FAKE_DIR at fake completion files.
+fn bash_completion_env(line: &str, point: usize, extra_envs: &[(&str, &str)]) -> Vec<String> {
+    if !cfg!(unix) {
+        return Vec::new();
+    }
+    let (words, cword) = comp_words(line, point);
+    let Some(cmd) = words.first() else {
+        return Vec::new();
+    };
+    let Ok(out) = Process::new("bash")
+        .arg("-c")
+        .arg(BASH_COMPLETION_DRIVER)
+        .arg("jse")
+        .arg(cmd)
+        .arg(cword.to_string())
+        .args(&words)
+        .env("COMP_LINE", line)
+        .env("COMP_POINT", point.to_string())
+        .env("COMP_KEY", "9")
+        .env("COMP_TYPE", "9")
+        .envs(extra_envs.iter().copied())
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+    for word in String::from_utf8_lossy(&out.stdout).lines() {
+        let word = word.trim_end_matches('\r');
+        if !word.is_empty() && seen.insert(word.to_string()) {
+            candidates.push(word.to_string());
+        }
+    }
+    candidates
+}
+
+/// comp_words splits the shell line the way readline builds COMP_WORDS
+/// (unquoted ASCII whitespace, quotes kept) and picks COMP_CWORD: the word
+/// under the caret, or one past the last word for the empty word in a
+/// trailing whitespace run.
+fn comp_words(line: &str, point: usize) -> (Vec<String>, usize) {
+    let bytes = line.as_bytes();
+    let mut words: Vec<(usize, &str)> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let start = i;
+        while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i > start {
+            words.push((start, &line[start..i]));
+        }
+    }
+    let cword = words
+        .iter()
+        .position(|(s, w)| *s <= point && point <= s + w.len())
+        .unwrap_or(words.len());
+    (
+        words.into_iter().map(|(_, w)| w.to_string()).collect(),
+        cword,
+    )
+}
+
+/// BASH_COMPLETION_DRIVER is the bash program behind [`bash_completion`]:
+/// it sources the bash-completion machinery (JSE_BASH_COMPLETION overrides
+/// the core script), loads the command's completion, finds the registered
+/// rule and runs it with COMP_* arranged like a real tab press. Exit 3
+/// means no bash-completion machinery, exit 4 no rule for the command.
+const BASH_COMPLETION_DRIVER: &str = r#"core=""
+for f in "$JSE_BASH_COMPLETION" \
+  /usr/share/bash-completion/bash_completion \
+  /etc/bash_completion \
+  /usr/local/etc/bash_completion \
+  /opt/homebrew/share/bash-completion/bash_completion \
+  /opt/homebrew/etc/bash_completion; do
+  [ -n "$f" ] && [ -f "$f" ] && . "$f" 2>/dev/null && { core=1; break; }
+done
+[ -n "$core" ] || exit 3
+cmd=$1 cword=$2
+shift 2
+COMP_WORDS=("$@")
+COMP_CWORD=$cword
+COMP_TYPE=9
+COMP_KEY=9
+export COMP_LINE COMP_POINT COMP_KEY COMP_TYPE
+_completion_loader "$cmd" 2>/dev/null
+spec=$(complete -p "$cmd" 2>/dev/null)
+[ -n "$spec" ] || exit 4
+set -f
+# complete -p re-quotes multi-word values ("complete -W 'a b' x"); word
+# splitting needs the shell parser, not bare splitting
+eval "set -- $spec"
+shift
+[ $# -gt 0 ] && set -- "${@:1:$#-1}"
+args=("$@")
+mode=""
+fn=""
+i=0
+while [ $i -lt ${#args[@]} ]; do
+  case ${args[$i]} in
+  -F | -C) mode=${args[$i]}; fn=${args[$((i + 1))]:-}; break ;;
+  -o | -A | -W | -G | -X | -P | -S) i=$((i + 2)) ;;
+  *) i=$((i + 1)) ;;
+  esac
+done
+COMPREPLY=()
+case $mode in
+-F)
+  # bash's documented contract: $1 command name, $2 word being completed,
+  # $3 previous word (jse never completes the command word, so COMP_CWORD
+  # is at least 1 here)
+  "$fn" "$cmd" "${COMP_WORDS[$COMP_CWORD]:-}" "${COMP_WORDS[$((COMP_CWORD - 1))]:-}"
+  ;;
+-C)
+  while IFS= read -r w; do
+    [ -n "$w" ] && COMPREPLY+=("$w")
+  done <<< "$(eval "$fn" "$cmd" "${COMP_WORDS[$COMP_CWORD]:-}" \
+    "${COMP_WORDS[$((COMP_CWORD - 1))]:-}" 2>/dev/null)"
+  ;;
+*)
+  [ ${#args[@]} -gt 0 ] &&
+    COMPREPLY=($(compgen "${args[@]}" -- "${COMP_WORDS[$COMP_CWORD]:-}" 2>/dev/null))
+  ;;
+esac
+set +f
+printf '%s\n' "${COMPREPLY[@]}"
+"#;
 
 fn builtin_completion(prefix: &str, token_start: usize) -> Completion {
     let lead = prefix.len() - prefix.trim_start().len();
@@ -559,6 +750,133 @@ mod tests {
         // the fully typed command itself is offered too
         let c = completion_candidates_in("!frobnicate", "!frobnicate".len(), "", &dirs);
         assert_eq!(c.candidates, vec!["frobnicate"]);
+    }
+
+    #[test]
+    fn shell_words_follow_the_caret() {
+        assert_eq!(
+            comp_words("git che", 7),
+            (vec!["git".to_string(), "che".to_string()], 1)
+        );
+        // caret in a trailing whitespace run: empty word past the last one
+        assert_eq!(comp_words("git ", 4), (vec!["git".to_string()], 1));
+        assert_eq!(comp_words("git", 0), (vec!["git".to_string()], 0));
+        // collapsed whitespace runs leave the empty word past the end
+        assert_eq!(
+            comp_words("git  x", 4),
+            (vec!["git".to_string(), "x".to_string()], 2)
+        );
+        assert_eq!(comp_words("", 0), (Vec::new(), 0));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn bash_completion_driver_runs_registered_rules() {
+        // a unix machine without bash (minimal containers) skips like the
+        // pty tests do without a pty
+        if std::process::Command::new("bash")
+            .arg("-c")
+            .arg("exit 0")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let core = dir.path().join("core.sh");
+        std::fs::write(
+            &core,
+            r#"_completion_loader() { [ -f "$JSE_FAKE_DIR/$1" ] && . "$JSE_FAKE_DIR/$1"; }"#,
+        )
+        .unwrap();
+        let comps = dir.path().join("comps");
+        std::fs::create_dir(&comps).unwrap();
+        std::fs::write(
+            comps.join("mysvc"),
+            r#"
+_mysvc() {
+  local cur=${COMP_WORDS[COMP_CWORD]}
+  COMPREPLY=($(compgen -W "start stop status" -- "$cur"))
+}
+complete -F _mysvc mysvc
+"#,
+        )
+        .unwrap();
+        // a legacy function reading the documented positional arguments
+        // instead of COMP_WORDS
+        std::fs::write(
+            comps.join("legacysvc"),
+            concat!(
+                "\n_legacysvc() { COMPREPLY=($(compgen -W \"alpha beta\" -- \"${2-}\")); }\n",
+                "complete -F _legacysvc legacysvc\n"
+            ),
+        )
+        .unwrap();
+        // a bare -W word list without a function exercises the compgen
+        // fallback with a quoted multi-word value
+        std::fs::write(
+            comps.join("wsvc"),
+            "complete -W \"start stop status\" wsvc\n",
+        )
+        .unwrap();
+        let envs = [
+            ("JSE_BASH_COMPLETION", core.to_str().unwrap()),
+            ("JSE_FAKE_DIR", comps.to_str().unwrap()),
+        ];
+        // a registered -F rule answers with its words
+        let line = "mysvc st";
+        assert_eq!(
+            bash_completion_env(line, line.len(), &envs),
+            ["start", "stop", "status"]
+        );
+        // the empty word lists everything
+        let line = "mysvc ";
+        assert_eq!(
+            bash_completion_env(line, line.len(), &envs),
+            ["start", "stop", "status"]
+        );
+        // the function gets the word being completed as $2
+        let line = "legacysvc al";
+        assert_eq!(bash_completion_env(line, line.len(), &envs), ["alpha"]);
+        // a quoted -W word list survives complete -p round-trip
+        let line = "wsvc st";
+        assert_eq!(
+            bash_completion_env(line, line.len(), &envs),
+            ["start", "stop", "status"]
+        );
+        // a command without a completion rule stays silent
+        let line = "nosvc st";
+        assert!(bash_completion_env(line, line.len(), &envs).is_empty());
+    }
+
+    #[test]
+    fn tab_candidates_keeps_local_candidates_without_a_bash_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("alpha.txt"), "").unwrap();
+        let base = dir.path().display().to_string();
+
+        // no rule for the command: the filesystem scan stays
+        let line = format!("!zzjse-nosuchcmd {base}/al");
+        let c = tab_candidates(&line, line.len(), "");
+        assert_eq!(c.candidates, vec![format!("{base}/alpha.txt")]);
+
+        // `%` never reaches bash
+        let c = tab_candidates("!cat %", 6, "rel/config.json");
+        assert_eq!(
+            c.candidates,
+            vec![shell_quote(&absolute_path("rel/config.json"))]
+        );
+
+        // the command word completes from PATH, not from a completion rule
+        let c = tab_candidates("!cat", 4, "");
+        assert_eq!(
+            c.candidates,
+            completion_candidates("!cat", 4, "").candidates
+        );
+
+        // outside a shell region: builtin words only, bash not consulted
+        let c = tab_candidates("w", 1, "");
+        assert!(c.candidates.contains(&"wa".to_string()));
     }
 
     #[test]

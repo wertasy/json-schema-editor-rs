@@ -74,7 +74,8 @@ src/ui/
   lineio.rs          one-line-per-read stdin reader
   schema_picker.rs   SchemaStore picker (TUI + accessible)
   command.rs         vi-style `:` grammar: builtins (w/wa/wq/waq, q/q!), shell
-                     escapes, cursor-aware completion, `%` expansion
+                     escapes, cursor-aware completion (bash-completion for
+                     `!` arguments), `%` expansion
   cmd_history.rs     persistent `:` command history file (load/store;
                      path arrives via Options)
   shell.rs           shell execution: `r !` stdout insert, `a !` line append,

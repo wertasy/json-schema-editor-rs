@@ -83,7 +83,7 @@ The schema given via `-s` is written back into the config according to the file 
 | `m` / `v` | Mark a single item / range select; combine with `y`, `x`, `d` for batch operations |
 | `y` / `Y` / `p` / `P` | Copy key-value pair / copy value / smart paste into the menu / paste into the container at the cursor |
 | `u` / `ctrl+r` | Undo / redo |
-| `:` | vi-style command mode: `w`/`wa`/`wq`/`waq` save (add `!` to skip validation), `q`/`q!` quit; `!<cmd>` only runs a shell command, `r !<cmd>` writes the output into the value at the cursor, `a !<cmd>` appends each line to a string array, `w !<cmd>` feeds the document to the command's stdin; `%` stands for the current file; tab completes built-in commands, `$PATH` commands, or paths based only on the text before the cursor and preserves the text after it; `!!` re-runs the previous shell command |
+| `:` | vi-style command mode: `w`/`wa`/`wq`/`waq` save (add `!` to skip validation), `q`/`q!` quit; `!<cmd>` only runs a shell command, `r !<cmd>` writes the output into the value at the cursor, `a !<cmd>` appends each line to a string array, `w !<cmd>` feeds the document to the command's stdin; `%` stands for the current file; tab completes built-in commands, `$PATH` commands, bash completion, or paths based only on the text before the cursor and preserves the text after it; `!!` re-runs the previous shell command |
 | `E` / `ctrl+e` | Edit the value of the cursor line in an external editor (raw JSON/YAML/TOML; edits the whole document when not on a value line) / materialize YAML aliases and merged values |
 | `ctrl+s` / `w` | Save the current file and stay in the editor |
 | `W` | Save a copy to a specified path |

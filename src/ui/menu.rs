@@ -327,7 +327,7 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
     },
     HelpEntry {
         keys: ":",
-        desc: "command line: w saves, wa saves all dirty files, wq saves and quits, waq saves all and quits (append ! to force), q quits, q! discards and quits; r !<cmd> inserts stdout into the focused value, a !<cmd> appends stdout lines to a string array, w !<cmd> pipes the document to stdin, !<cmd> only runs; tab completes builtins or (after !) PATH commands and paths, % expands to the session file path; candidates appear automatically and filter as you type; ↑/↓ are history until a candidate is selected; history persists across sessions (cache dir); !!+enter repeats the last shell command; multi-line output stays an inline multi-line notice when it fits the blank rows above the help bar, else opens a scrollable page (j/k, PgUp/PgDn, q/esc)",
+        desc: "command line: w saves, wa saves all dirty files, wq saves and quits, waq saves all and quits (append ! to force), q quits, q! discards and quits; r !<cmd> inserts stdout into the focused value, a !<cmd> appends stdout lines to a string array, w !<cmd> pipes the document to stdin, !<cmd> only runs; tab completes builtins or (after !) PATH commands, bash completion and paths, % expands to the session file path; candidates appear automatically and filter as you type; ↑/↓ are history until a candidate is selected; history persists across sessions (cache dir); !!+enter repeats the last shell command; multi-line output stays an inline multi-line notice when it fits the blank rows above the help bar, else opens a scrollable page (j/k, PgUp/PgDn, q/esc)",
     },
 ];
 

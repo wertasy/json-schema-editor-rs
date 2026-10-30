@@ -54,10 +54,32 @@ pub const SUG_STRIP_PREFIX_MIN: usize = 8;
 
 /// cmd_sug_refresh rebuilds the auto-completion list for the word before
 /// the cursor without choosing a candidate; tab/arrows select from it.
+/// Typing calls this constantly, so it stays on the cheap local scan
+/// (PATH executables, filesystem paths); the explicit tab press goes
+/// through cmd_tab_refresh, which additionally asks bash's programmable
+/// completion.
 fn cmd_sug_refresh(s: &mut CommandState, file_path: &str) {
     let line = s.ti.value().to_string();
     let cursor = s.ti.cursor_byte();
-    let done = command::completion_candidates(&line, cursor, file_path);
+    cmd_sug_apply(
+        s,
+        command::completion_candidates(&line, cursor, file_path),
+        cursor,
+    );
+}
+
+/// cmd_tab_refresh is the fresh scan of an explicit tab press: it adds
+/// bash's programmable completion on top of the local scan (shell argument
+/// words only). Typing never calls this — completion scripts may run the
+/// command's binary, which is too slow for the auto-filtering window.
+fn cmd_tab_refresh(s: &mut CommandState, file_path: &str) {
+    let line = s.ti.value().to_string();
+    let cursor = s.ti.cursor_byte();
+    cmd_sug_apply(s, command::tab_candidates(&line, cursor, file_path), cursor);
+}
+
+/// cmd_sug_apply stores one scan result as the active completion list.
+fn cmd_sug_apply(s: &mut CommandState, done: command::Completion, cursor: usize) {
     s.sug_prefix = done.prefix;
     s.sug = done.candidates;
     s.sug_idx = None;
@@ -71,9 +93,9 @@ fn cmd_sug_refresh(s: &mut CommandState, file_path: &str) {
 }
 
 /// cmd_complete applies the next/previous completion. A fresh cycle scans the
-/// word before the cursor (builtin command, PATH command or filesystem path)
-/// and inserts the candidate there, leaving the text after the cursor alone;
-/// repeated tab presses walk the same candidate list.
+/// word before the cursor (builtin command, PATH command, bash completion or
+/// filesystem path) and inserts the candidate there, leaving the text after
+/// the cursor alone; repeated tab presses walk the same candidate list.
 fn cmd_complete(s: &mut CommandState, forward: bool, file_path: &str) {
     let value = s.ti.value().to_string();
     let inserted = &value[s.sug_start.min(value.len())..s.sug_end.min(value.len())];
@@ -84,7 +106,7 @@ fn cmd_complete(s: &mut CommandState, forward: bool, file_path: &str) {
         || inserted.ends_with(['/', '\\'])
         || inserted == "!"
     {
-        cmd_sug_refresh(s, file_path);
+        cmd_tab_refresh(s, file_path);
         if s.sug.is_empty() {
             return;
         }

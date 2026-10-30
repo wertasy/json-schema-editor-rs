@@ -1326,6 +1326,80 @@ fn pty_shell_tab_arrows_keep_the_candidate_list() {
     pty.wait_exit(130);
 }
 
+#[cfg(unix)]
+#[test]
+fn pty_shell_argument_tab_uses_bash_completion() {
+    // a unix machine without bash cannot run the completion driver
+    if std::process::Command::new("bash")
+        .arg("-c")
+        .arg("exit 0")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    let dir = mktemp();
+    let schema = dir.path().join("shell.schema.json");
+    let cfg = dir.path().join("shell.json");
+    write_file(&schema, r#"{"type":"object"}"#);
+    write_file(&cfg, r#"{"name":"old"}"#);
+
+    // a fake bash-completion core plus a completion rule for `mysvc`;
+    // JSE_BASH_COMPLETION points the binary's completion driver at them
+    let comps = dir.path().join("comps");
+    std::fs::create_dir(&comps).unwrap();
+    write_file(
+        &comps.join("mysvc"),
+        concat!(
+            "\n_mysvc() {\n",
+            "  local cur=${COMP_WORDS[COMP_CWORD]}\n",
+            "  COMPREPLY=($(compgen -W \"start stop status\" -- \"$cur\"))\n",
+            "}\n",
+            "complete -F _mysvc mysvc\n"
+        ),
+    );
+    let core = dir.path().join("core.sh");
+    write_file(
+        &core,
+        "_completion_loader() { [ -f \"$JSE_FAKE_DIR/$1\" ] && . \"$JSE_FAKE_DIR/$1\"; }\n",
+    );
+    let core_arg = core.to_string_lossy().into_owned();
+    let comps_arg = comps.to_string_lossy().into_owned();
+
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(
+        &["-s", schema_arg.as_str(), cfg_arg.as_str()],
+        &[
+            ("JSE_BASH_COMPLETION", core_arg.as_str()),
+            ("JSE_FAKE_DIR", comps_arg.as_str()),
+        ],
+        &cache,
+    ) else {
+        return;
+    };
+    pty.wait_frame("root menu", 0, &["↑/↓ move"]);
+    pty.send(b":");
+    let (_, off) = pty.wait_frame("command prompt", 0, &[": command"]);
+    pty.send(b"!mysvc st");
+    // typing only filters local candidates; the bash rule is not consulted
+    // per keystroke
+    let (_, off) = pty.wait_frame("typed shell argument", off, &[":!mysvc st"]);
+    pty.send(b"\t");
+    // the explicit tab press asks bash: the rule's words appear in the
+    // candidate window and the first one fills the line
+    let (_, off) = pty.wait_frame(
+        "bash completion candidates",
+        off,
+        &["status", ":!mysvc start"],
+    );
+    pty.send(b"\t");
+    pty.wait_frame("cycle to next candidate", off, &["stop", ":!mysvc stop"]);
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+}
+
 #[test]
 fn pty_shell_command_inserts_output() {
     let dir = mktemp();

@@ -94,6 +94,7 @@ jse --accessible -s examples/server.schema.json new.json
 |---|---|
 | `JSE_CACHE_DIR` | Overrides the cache directory for remote schemas / the SchemaStore catalog; the `:` command history file (`cmd-history`) also lives here. Default `$XDG_CACHE_HOME/jse` (usually `~/.cache/jse`). When the directory is not writable, caching is silently skipped. |
 | `JSE_CATALOG_URL` | Overrides the SchemaStore catalog URL, for testing or intranet mirrors. |
+| `JSE_BASH_COMPLETION` | Overrides the bash-completion core script loaded for shell argument completion on the `:` line; when unset, the standard locations are tried. |
 | `EDITOR` / `VISUAL` | External editor; `vi` when neither is set. |
 | `HTTPS_PROXY` / `https_proxy`, `HTTP_PROXY` / `http_proxy`, `ALL_PROXY` / `all_proxy` | Proxy for remote requests; the first non-empty value in this order wins. |
 | `NO_PROXY` / `no_proxy` | Host list that bypasses the proxy; supports `*`, domain suffixes, and leading dots. |
