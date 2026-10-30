@@ -3,9 +3,10 @@ use super::*;
 // --- search filtering --------------------------------------------------------
 
 /// filterSearch narrows the index to rows matching q. A query starting with
-/// "$" is a document-path query; a query starting with "." matches the
-/// keyword against path segments from any node; any other query is ordinary
-/// text (title, key and scalar value).
+/// "$" is a document-path query; a query starting with "." — or any query
+/// carrying an `[N]` index bracket — matches the keyword against path
+/// segments from any node; any other query is ordinary text (title, key
+/// and scalar value).
 pub fn filter_search(
     ctx: &MenuCtx<'_>,
     all: &[Row],
@@ -93,18 +94,41 @@ pub fn is_path_query(q: &str) -> bool {
 }
 
 /// isDotQuery reports whether q is an any-node path query: "." plus at
-/// least one more character.
+/// least one more character, or any query carrying an `[N]` array-index
+/// bracket (`[0]`, `mounts[0].src`) — those match like dot queries too.
 pub fn is_dot_query(q: &str) -> bool {
-    q.len() > 1 && q.starts_with('.')
+    if q.len() > 1 && q.starts_with('.') {
+        return true;
+    }
+    has_index_bracket(q)
 }
 
-/// dotQueryRows ranks rows whose path matches a leading-dot query from any
+/// hasIndexBracket reports whether q carries an `[N]` array-index bracket,
+/// closed or still being typed.
+pub fn has_index_bracket(q: &str) -> bool {
+    let mut rest = q;
+    while let Some(i) = rest.find('[') {
+        let after = &rest[i + 1..];
+        if all_digits(after) {
+            return true; // no closing bracket yet: an index being typed
+        }
+        match after.find(']') {
+            Some(k0) if all_digits(&after[..k0]) => return true,
+            Some(k0) => rest = &after[k0 + 1..],
+            None => return false,
+        }
+    }
+    false
+}
+
+/// dotQueryRows ranks rows whose path matches a dot-style query from any
 /// node (dotQueryRank); ties keep document order. Rows it lists are marked
 /// in picked so the text fallback skips them.
 pub fn dot_query_rows(all: &[Row], picked: &mut [bool], q: &str, fold: bool) -> Vec<Row> {
+    let keyword = q.strip_prefix('.').unwrap_or(q);
     let mut hits: Vec<(Row, usize)> = Vec::new();
     for (i, r) in all.iter().enumerate() {
-        if let Some(rank) = dot_query_rank(&r.path, &q[1..], fold) {
+        if let Some(rank) = dot_query_rank(&r.path, keyword, fold) {
             picked[i] = true;
             hits.push((r.clone(), rank));
         }
@@ -117,10 +141,7 @@ pub fn dot_query_rows(all: &[Row], picked: &mut [bool], q: &str, fold: bool) -> 
 /// dot; rank 0+ for a run ending in the leaf segment, 16+ for one ending
 /// higher up; None when nothing matches.
 pub fn dot_query_rank(path: &[PathSeg], keyword: &str, fold: bool) -> Option<usize> {
-    let mut parts: Vec<String> = keyword.split('.').map(String::from).collect();
-    if fold {
-        parts = parts.into_iter().map(|p| p.to_lowercase()).collect();
-    }
+    let parts = dot_query_steps(keyword, fold);
     let segs: Vec<String> = path
         .iter()
         .map(|seg| match seg {
@@ -158,6 +179,60 @@ pub fn dot_query_rank(path: &[PathSeg], keyword: &str, fold: bool) -> Option<usi
         }
     }
     best
+}
+
+/// dotQuerySteps expands a dot-query keyword into one match keyword per
+/// path segment: text runs match key segments and `[N]` bracket runs match
+/// index segments, so `.mounts[0]` spells the same steps as `.mounts.0`;
+/// fold applies to every step.
+fn dot_query_steps(keyword: &str, fold: bool) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for part in keyword.split('.') {
+        match part_steps(part) {
+            Some(mut steps) => out.append(&mut steps),
+            None => out.push(part.to_string()),
+        }
+    }
+    if fold {
+        out.into_iter().map(|p| p.to_lowercase()).collect()
+    } else {
+        out
+    }
+}
+
+/// partSteps splits one dot-free part into segment keywords at index
+/// brackets: `mounts[0]` → "mounts", "0"; `[1` (still typing) → "1";
+/// `a[0][1]` → "a", "0", "1". None keeps the part as one literal keyword —
+/// no brackets at all, or a bracket that is not all digits (`a[x]`).
+fn part_steps(part: &str) -> Option<Vec<String>> {
+    let b = part.as_bytes();
+    let mut out: Vec<String> = Vec::new();
+    let (mut i, mut text) = (0usize, 0usize);
+    while i < b.len() {
+        if b[i] != b'[' {
+            i += 1;
+            continue;
+        }
+        let after = &part[i + 1..];
+        let (idx, next) = match after.find(']') {
+            Some(k0) if all_digits(&after[..k0]) => (&after[..k0], i + k0 + 2),
+            None if all_digits(after) => (after, part.len()), // no ']' yet
+            _ => return None,
+        };
+        if i > text {
+            out.push(part[text..i].to_string());
+        }
+        out.push(idx.to_string());
+        i = next;
+        text = i;
+    }
+    if out.is_empty() {
+        return None;
+    }
+    if text < part.len() {
+        out.push(part[text..].to_string());
+    }
+    Some(out)
 }
 
 /// segMatch scores keyword against one path segment: 1 = segment prefix,

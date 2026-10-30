@@ -2344,3 +2344,60 @@ fn test_search_open_additional_keys_in_schema() {
         "keys of an open additionalProperties object are schema-defined"
     );
 }
+
+#[test]
+fn dot_query_supports_bracket_index_parts() {
+    let mut fx = Fx::new();
+    let rst = root_state(&fx.schema);
+    let all = search_index(&mut fx.schema, &fx.doc, &rst);
+    let ctx = fx.ctx();
+    let join = |rows: &[Row]| {
+        let mut v: Vec<String> = paths(rows);
+        v.sort();
+        v.join(",")
+    };
+    let subtree = "$.mounts[0],$.mounts[0].dst,$.mounts[0].src";
+
+    // a bracket part spells the same steps as the dot part it replaces
+    assert_eq!(
+        join(&filter_search(&ctx, &all, ".mounts[0]", true, None)),
+        subtree
+    );
+    assert_eq!(
+        join(&filter_search(&ctx, &all, ".mounts.0", true, None)),
+        subtree
+    );
+    // an index still being typed matches too
+    assert_eq!(
+        join(&filter_search(&ctx, &all, ".mounts[0", true, None)),
+        subtree
+    );
+
+    // queries with an index bracket but no leading dot are dot queries too
+    assert_eq!(join(&filter_search(&ctx, &all, "[0]", true, None)), subtree);
+    assert_eq!(
+        join(&filter_search(&ctx, &all, "mounts[0]", true, None)),
+        subtree
+    );
+    assert_eq!(
+        join(&filter_search(&ctx, &all, "mounts[0].src", true, None)),
+        "$.mounts[0].src"
+    );
+
+    // regex mode keeps the tiered literal matcher on the path
+    let re = Regex::new(&path_pattern(".mounts[0]")).unwrap();
+    assert_eq!(
+        join(&filter_search(&ctx, &all, ".mounts[0]", true, Some(&re))),
+        subtree
+    );
+
+    // non-index brackets stay ordinary text queries
+    assert!(!is_dot_query("a[x]"));
+    assert!(!is_dot_query("[x]"));
+    assert!(!is_dot_query("["));
+    assert!(is_dot_query("[0]"));
+    assert!(is_dot_query("mounts[0].src"));
+    assert!(is_dot_query("mounts[1"));
+    assert!(is_dot_query(".0"));
+    assert!(!is_dot_query("plain"));
+}
