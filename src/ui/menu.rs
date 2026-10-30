@@ -155,7 +155,7 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
     },
     HelpEntry {
         keys: "ctrl+j / ctrl+k",
-        desc: "adaptive next / previous: changed keys from the last replace/undo/redo, then keys with validation issues, then search hits; falls back to the non-null walk",
+        desc: "adaptive next / previous: changed keys from the last replace/undo/redo, then keys with validation issues, then search hits, then keys changed since load/save",
     },
     HelpEntry {
         keys: "y / Y",

@@ -71,8 +71,9 @@ impl App {
 
     /// adaptiveJump drives ctrl+j/k: cycle the pending change ring left by
     /// the last replace/undo/redo, else the validation-issue keys, else the
-    /// parked search results; with none of those it falls back to the plain
-    /// n/N non-null walk.
+    /// parked search results, else the keys changed against the load/last
+    /// save baseline (the rows carrying ●); with no changes at all it
+    /// reports and stays put.
     pub(super) fn adaptive_jump(&mut self, rows: &[Row], dir: i64) {
         let ring = match self.fs().change_jump.clone() {
             Some(ring) if !ring.is_empty() => ring,
@@ -107,13 +108,29 @@ impl App {
                     if !hits.is_empty() {
                         hits
                     } else {
-                        self.move_to_value(rows, dir);
-                        return;
+                        match self.changed_ring() {
+                            Some(ring) => ring,
+                            None => {
+                                self.notice = "no changes since load/save".to_string();
+                                return;
+                            }
+                        }
                     }
                 }
             }
         };
         self.jump_ring(&ring, dir, rows);
+    }
+
+    /// changedRing builds the default ctrl+j/k candidates: the paths whose
+    /// content differs from the load/last-save baseline, via the same diff
+    /// that arms the undo ring. None when nothing changed (or there is no
+    /// baseline).
+    fn changed_ring(&self) -> Option<Vec<Vec<PathSeg>>> {
+        let f = self.fs();
+        let base = f.baseline.as_ref()?;
+        let ring = crate::ui::history::diff_paths(base, &f.doc);
+        (!ring.is_empty()).then_some(ring)
     }
 
     /// jumpRing cycles dir (wrapping at both ends) around ring, seeding from

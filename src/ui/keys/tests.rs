@@ -3026,15 +3026,11 @@ fn menu_next_prev_non_null() {
     });
     let mut im = app_with(schema, doc, test_opts());
     press(&mut im, &["enter"]);
-    press(&mut im, &["ctrl+j"]);
-    assert_eq!(
-        cursor_cursor(&mut im),
-        1,
-        "ctrl+j must skip a null array item"
-    );
-    press(&mut im, &["ctrl+j"]);
+    press(&mut im, &["n"]);
+    assert_eq!(cursor_cursor(&mut im), 1, "n must skip a null array item");
+    press(&mut im, &["n"]);
     assert_eq!(cursor_cursor(&mut im), 2);
-    press(&mut im, &["ctrl+k"]);
+    press(&mut im, &["n"]);
     assert_eq!(cursor_cursor(&mut im), 1);
 }
 
@@ -3221,7 +3217,7 @@ fn ctrl_j_priority_ring_then_issues_then_search() {
 }
 
 #[test]
-fn edit_clears_the_change_ring_and_ctrl_j_falls_back() {
+fn edit_clears_the_change_ring_and_ctrl_j_walks_changed_keys() {
     let doc = dbuild(|db| db.obj(vec![("a", db.s("1")), ("b", db.s("2"))]));
     let mut m = app_with(crate::smodel::untyped(&doc), doc, test_opts());
     set_cursor_path(&mut m, &sp(&["b"]));
@@ -3242,13 +3238,41 @@ fn edit_clears_the_change_ring_and_ctrl_j_falls_back() {
     press(&mut m, &["enter"]);
     assert!(m.fs().change_jump.is_none(), "edit must clear the ring");
 
-    // fallback matches n/N
-    set_cursor_path(&mut m, &sp(&["a"]));
-    press(&mut m, &["n"]);
-    let n_pos = cursor_cursor(&mut m);
-    set_cursor_path(&mut m, &sp(&["a"]));
+    // the default walk is the baseline diff: both edited keys differ from
+    // the baseline, and ctrl+j/k cycle them in document order
+    set_cursor_path(&mut m, &sp(&["b"]));
+    press(&mut m, &["enter"]);
+    if let Some(Overlay::Edit(e)) = &mut m.overlay {
+        e.ti.set_value("B2");
+    }
+    press(&mut m, &["enter"]);
     press(&mut m, &["ctrl+j"]);
-    assert_eq!(cursor_cursor(&mut m), n_pos, "fallback matches n/N");
+    assert_eq!(
+        row_at(&mut m).path,
+        sp(&["a"]),
+        "first changed key in document order"
+    );
+    press(&mut m, &["ctrl+j"]);
+    assert_eq!(
+        row_at(&mut m).path,
+        sp(&["b"]),
+        "wraps to the next changed key"
+    );
+    press(&mut m, &["ctrl+k"]);
+    assert_eq!(row_at(&mut m).path, sp(&["a"]), "ctrl+k walks back");
+}
+
+#[test]
+fn ctrl_j_without_changes_reports_and_stays() {
+    let doc = dbuild(|db| db.obj(vec![("a", db.s("1")), ("b", db.s("2"))]));
+    let mut m = app_with(crate::smodel::untyped(&doc), doc, test_opts());
+    set_cursor_path(&mut m, &sp(&["b"]));
+    press(&mut m, &["ctrl+j"]);
+    assert_eq!(m.notice, "no changes since load/save");
+    assert_eq!(row_at(&mut m).path, sp(&["b"]), "cursor untouched");
+    press(&mut m, &["ctrl+k"]);
+    assert_eq!(m.notice, "no changes since load/save");
+    assert_eq!(row_at(&mut m).path, sp(&["b"]));
 }
 
 #[test]
