@@ -1584,8 +1584,8 @@ fn pty_raw_editor_json() {
     write_file(
         &editor,
         "#!/bin/sh\n\
-         grep -q '\"z\"' \"$1\" || exit 3\n\
-         printf '%s\\n' '\"from-editor\"' > \"$1\"\n",
+         grep -qx 'z' \"$1\" || exit 3\n\
+         printf '%s\\n' 'from-editor' > \"$1\"\n",
     );
     set_executable(&editor);
 
@@ -1602,7 +1602,7 @@ fn pty_raw_editor_json() {
     };
 
     pty.wait_frame("root menu", 0, &["Name", "↑/↓ move"]);
-    pty.send(b"E"); // external raw edit of the focused Name value
+    pty.send(b"E"); // the Name string opens as its own text, no quotes
     let (_, off) = pty.wait_frame("editor applied", 0, &["Value edited"]);
     pty.send(b"\x13"); // ctrl+s save
     pty.wait_frame("saved", off, &["Write to "]);

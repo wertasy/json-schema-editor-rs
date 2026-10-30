@@ -114,16 +114,18 @@ The built-in raw editor, the `$EDITOR` external editor, and editing the value of
 
 - JSON/JSONC files: JSON text.
 - YAML files: YAML text.
-- TOML files: the whole document in TOML; a single value as a TOML value expression (scalar, `[...]`, `{ ... }`).
+- TOML files: the whole document uses TOML; a single value uses a TOML value expression (scalar, `[...]`, `{ ... }`).
 
-Editing the whole document, editing a field that cannot be presented as a form, and editing a schema-undefined key with no value all behave the same. On submission the syntax is checked against the corresponding format; semantic validity is left to save-time validation.
+Exception: when the `$EDITOR` external editor and the built-in raw editor edit a **string value**, they use the string's own text (no quotes, no escapes) and write it back verbatim as the string on apply.
+
+Editing the whole document, editing a field that cannot be represented as a form, and editing a schema-undefined key with no value all behave the same. Syntax is checked in the corresponding format on submit; semantic validity is left to save-time validation.
 
 ## Degradation to raw editing
 
 In the following cases the field is rendered as an "Edit as JSON/YAML/TOML" text area:
 
 - `$ref` is unreachable;
-- structures that cannot be presented as a form, such as arrays of arrays;
+- structures that cannot be represented as a form, such as arrays of arrays;
 - unknown types;
 - schema depth exceeds 32 levels;
 - a recursive `$ref` cannot be expanded within a finite depth.

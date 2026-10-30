@@ -2657,28 +2657,44 @@ fn edit_raw_current_node() {
     let edit = m.pending_edit.as_ref().expect("value editor armed");
     assert!(!edit.whole_doc, "a row value is not the whole document");
     assert_eq!(edit.target, sp(&["name"]));
-    m.finish_external_value(r#""edited""#);
+    // a string value is text: the temp file holds it without quotes and the
+    // edited text applies verbatim
+    assert!(edit.verbatim_str, "string values arm a verbatim edit");
+    assert_eq!(
+        std::fs::read_to_string(&edit.path).unwrap(),
+        "webapp",
+        "the string opens unquoted"
+    );
+    m.finish_external_value("edited");
     assert_eq!(str_at(&m.fs().doc, &["name"]), "edited");
     assert!(m.dirty());
     press(&mut m, &["u"]);
     assert_eq!(str_at(&m.fs().doc, &["name"]), "webapp");
 
-    // invalid JSON keeps the document and reports the parse error
+    // verbatim applies the text as-is: even JSON-invalid text is string
+    // content (type changes go through the type picker instead)
     press(&mut m, &["E"]);
     m.finish_external_value("{oops");
-    assert_eq!(str_at(&m.fs().doc, &["name"]), "webapp");
-    assert!(m.notice.contains("invalid JSON"), "notice = {}", m.notice);
+    assert_eq!(str_at(&m.fs().doc, &["name"]), "{oops");
+    press(&mut m, &["u"]);
 
     // an editor failure keeps the document too
     press(&mut m, &["E"]);
     m.external_edit_failed("boom");
     assert!(m.notice.contains("boom"), "notice = {}", m.notice);
 
-    // a container row edits that object/value, not the root
+    // a container row edits that object/value in the file's format: the
+    // parse still rejects invalid JSON and keeps the document
     press(&mut m, &["down", "down"]); // Server
     press(&mut m, &["E"]);
     let edit = m.pending_edit.as_ref().expect("value editor armed");
     assert!(!edit.whole_doc);
+    assert!(!edit.verbatim_str, "containers keep format parsing");
+    m.finish_external_value("{oops");
+    assert_eq!(num_at(&m.fs().doc, &["server", "port"]), "8080");
+    assert!(m.notice.contains("invalid JSON"), "notice = {}", m.notice);
+    press(&mut m, &["E"]);
+    let edit = m.pending_edit.as_ref().expect("value editor armed");
     assert_eq!(edit.target, sp(&["server"]));
     m.finish_external_value(r#"{"port":9090}"#);
     assert_eq!(num_at(&m.fs().doc, &["server", "port"]), "9090");
@@ -2699,6 +2715,58 @@ fn edit_raw_current_node() {
         m.pending_edit.as_ref().map_or(false, |e| e.whole_doc),
         "the empty-object placeholder falls back to the whole document"
     );
+}
+
+#[test]
+fn external_edit_string_is_verbatim_text() {
+    // A string value opens in $EDITOR as its own text — no quotes, no
+    // format escaping, no YAML block scalar — and the edited text applies
+    // verbatim: the value stays a string in every format.
+    let doc = dbuild(|db| db.obj(vec![("name", db.s("line1\nline2"))]));
+    let mut m = mk_app(doc, test_opts());
+    press(&mut m, &["e"]);
+    let edit = m.pending_edit.as_ref().expect("value editor armed");
+    assert!(edit.verbatim_str);
+    assert_eq!(
+        std::fs::read_to_string(&edit.path).unwrap(),
+        "line1\nline2",
+        "JSON strings open without quotes or \\n escapes"
+    );
+    // the editor's trailing newline is not string content; spaces are
+    m.finish_external_value("one two  \n");
+    assert_eq!(str_at(&m.fs().doc, &["name"]), "one two  ");
+    press(&mut m, &["u"]);
+    assert_eq!(str_at(&m.fs().doc, &["name"]), "line1\nline2");
+
+    // multiline text round-trips without \n escapes
+    press(&mut m, &["e"]);
+    m.finish_external_value("a\nb");
+    assert_eq!(str_at(&m.fs().doc, &["name"]), "a\nb");
+
+    // YAML/TOML scalars that would parse as other types stay strings
+    let doc = dbuild(|db| db.obj(vec![("name", db.s("007"))]));
+    for ext in ["a.yaml", "a.toml"] {
+        let mut m = app_with_codec(
+            test_schema(),
+            doc.clone(),
+            test_opts(),
+            crate::doc::codec_for(ext),
+        );
+        press(&mut m, &["e"]);
+        let edit = m.pending_edit.as_ref().expect("value editor armed");
+        assert!(edit.verbatim_str);
+        assert_eq!(
+            std::fs::read_to_string(&edit.path).unwrap(),
+            "007",
+            "{ext} opens the quoted scalar unquoted"
+        );
+        m.finish_external_value("008");
+        assert_eq!(
+            str_at(&m.fs().doc, &["name"]),
+            "008",
+            "{ext} applies verbatim"
+        );
+    }
 }
 
 #[test]

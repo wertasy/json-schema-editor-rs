@@ -109,7 +109,7 @@ When no clipboard tool is present, jse automatically falls back to the session's
 
 - GUI editors need wait mode: `export EDITOR="code --wait"`.
 - If the editor exits abnormally / the result is syntactically invalid, jse keeps the original document and notifies you.
-- Both built-in raw editing and single-value external editing parse in the file's own format (JSON, YAML, or TOML).
+- Both built-in raw editing and single-value external editing parse in the file's own format (JSON, YAML, or TOML); string values are the exception — they open unquoted and apply verbatim as string text (see [Editing](editing.md#raw-editing-and-the-external-editor)).
 
 ### `< Expand >` / anchor operations not found
 

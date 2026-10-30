@@ -243,11 +243,11 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
     },
     HelpEntry {
         keys: "e",
-        desc: "edit the row's value in $EDITOR (multiline strings always open here)",
+        desc: "edit the row's value in $EDITOR (strings open as their own text; multiline strings always open here)",
     },
     HelpEntry {
         keys: "E",
-        desc: "edit the focused row's value in $EDITOR (raw JSON/YAML/TOML; whole document when the cursor is not on a value row)",
+        desc: "edit the focused row's value in $EDITOR (raw JSON/YAML/TOML, strings as text; whole document when the cursor is not on a value row)",
     },
     HelpEntry {
         keys: "&",
@@ -732,6 +732,9 @@ pub struct ExternalEdit {
     pub path: String,
     /// whole-document editor (the root raw row) vs one value
     pub whole_doc: bool,
+    /// the target was a string value: the temp file holds its unquoted text
+    /// and the edited text applies verbatim (the raw textarea's rule)
+    pub verbatim_str: bool,
 }
 
 /// commentState is the dedicated page for a description that does not fit

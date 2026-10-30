@@ -1325,27 +1325,36 @@ impl App {
         match codec.write(self.doc(), &self.fs().meta) {
             Err(e) => self.notice = format!("editor: {e}"),
             Ok(data) => {
-                self.launch_external_edit(data, None, true, -1);
+                self.launch_external_edit(data, None, true, -1, false);
             }
         }
     }
 
     /// editValueExternal edits one value in $EDITOR (Go editValueExternal).
+    /// A string value is text, not a document: it opens without quotes or
+    /// format escaping and the edited text applies verbatim (the built-in
+    /// raw textarea's rule); every other value opens in the file's format.
     pub(super) fn edit_value_external(&mut self, path: Vec<PathSeg>, insert_idx: i64) {
         let mut buf = String::new();
+        let mut verbatim = false;
         if let Some(cur) = self.doc().get(&path) {
             if !is_null_val(self.doc(), cur) {
-                let codec = self.fs().codec;
-                match codec.write_value(self.doc(), cur) {
-                    Err(e) => {
-                        self.notice = format!("editor: {e}");
-                        return;
+                if let Value::Str(text) = self.doc().value(cur) {
+                    buf = text.clone();
+                    verbatim = true;
+                } else {
+                    let codec = self.fs().codec;
+                    match codec.write_value(self.doc(), cur) {
+                        Err(e) => {
+                            self.notice = format!("editor: {e}");
+                            return;
+                        }
+                        Ok(s) => buf = s,
                     }
-                    Ok(s) => buf = s,
                 }
             }
         }
-        self.launch_external_edit(buf, Some(path), false, insert_idx);
+        self.launch_external_edit(buf, Some(path), false, insert_idx, verbatim);
     }
 
     /// run_pending_editor runs the armed $EDITOR and applies its output (Go
@@ -1416,6 +1425,7 @@ impl App {
         target: Option<Vec<PathSeg>>,
         whole_doc: bool,
         insert_idx: i64,
+        verbatim_str: bool,
     ) {
         let ext = self.fs().codec.raw_ext();
         // uniquify: pid + a counter would race across processes; use nanos
@@ -1437,6 +1447,7 @@ impl App {
             insert_idx,
             path: path.to_string_lossy().to_string(),
             whole_doc,
+            verbatim_str,
         };
         self.pending_edit = Some(edit);
     }
@@ -1503,7 +1514,15 @@ impl App {
             return;
         }
         // one value
-        let s = String::from_utf8_lossy(data).trim().to_string();
+        let text = String::from_utf8_lossy(data);
+        // A verbatim string edit carries the string's own text: editors
+        // append a trailing newline, so trim only line ends and keep
+        // meaningful spaces (the paste fallback's rule).
+        let s = if edit.verbatim_str {
+            text.trim_matches(['\r', '\n']).to_string()
+        } else {
+            text.trim().to_string()
+        };
         let pre = self.doc().clone();
         if s.is_empty() {
             if edit.insert_idx < 0 {
@@ -1518,9 +1537,17 @@ impl App {
             self.notice = "Value removed".to_string();
             return;
         }
-        let codec = self.fs().codec;
-        let label = codec.label();
-        match codec.parse_value(&s) {
+        let parsed = if edit.verbatim_str {
+            let mut nd = Doc::new();
+            let n = nd.new_str(s);
+            nd.root = n;
+            Ok(nd)
+        } else {
+            let codec = self.fs().codec;
+            codec.parse_value(&s)
+        };
+        let label = self.fs().codec.label();
+        match parsed {
             Err(e) => {
                 self.notice = format!("editor: invalid {}: {}", label, e);
             }

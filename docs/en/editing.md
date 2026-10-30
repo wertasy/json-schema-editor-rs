@@ -101,11 +101,12 @@ Keys present in the document but missing from the schema display as yellow rows,
 
 ## Raw editing and the external editor
 
-- **raw JSON/YAML/TOML external editing**: `E` edits **the value on the cursor line** in `$EDITOR`; when the cursor is not on a value line (or the root is a scalar/empty), it edits the whole document. Content follows the file's own format (JSON/YAML/TOML). On exit it is parsed and applied as one undo step; invalid syntax only warns, and the original document is kept.
+- **raw JSON/YAML/TOML external editing**: `E` edits **the value on the cursor line** in `$EDITOR`; when the cursor is not on a value line (or the root is a scalar/empty), it edits the whole document. Content follows the file's own format (JSON/YAML/TOML), except string values (see below). On exit it is parsed and applied as one undo step; invalid syntax only warns, and the original document is kept.
 - Raw editing of the whole document (built-in text area or `$EDITOR`) re-parses format metadata when applied: comments and schema directives in the new text take effect along with the document, and old comments do not linger.
 - **Built-in raw text area**: used for fields that cannot be represented as a form, and for the `JSON` variant in the any-type picker; `ctrl+s` applies, `esc` cancels; syntax errors stay in the text area with a hint.
 - **Single-value external editing**: `e` opens `$EDITOR` on the cursor line to edit that value; with no value it hints `no value to edit`. Object/array container rows work too.
-- **Multi-line strings**: a string containing newlines does not edit in place on `enter` — it goes straight to `$EDITOR` (the temp file contains only that value; JSON/TOML use escapes, YAML uses block scalars).
+- **String values open unquoted**: when `e` / `E` edits a string value, the temp file holds **the string's own text** — no quotes, no format escaping; on apply the edited text is written back verbatim as the string value (the same rule as `y` copy and the built-in raw text area). Spaces in the text are kept; leading and trailing line breaks are stripped; emptying the buffer deletes the value.
+- **Multi-line strings**: a string containing newlines does not edit in place on `enter` — it goes straight to `$EDITOR` (the temp file contains the string's raw multi-line text, identical in all three formats).
 - GUI editors need wait mode, e.g. set `EDITOR="code --wait"`.
 
 ## Copy, cut and paste
