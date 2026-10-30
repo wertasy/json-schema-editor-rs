@@ -3,11 +3,13 @@
 //! The command line is a normal one-line [`TextInput`](crate::ui::widgets::TextInput),
 //! so completion works at the cursor, not on the whole buffer. `!` switches
 //! to shell completion (executables from `PATH`, then filesystem paths);
-//! without it the builtin command names complete. An explicit tab press on
-//! a shell argument first asks bash's programmable completion and keeps the
-//! local scan when bash-completion has no rule for the command. In a shell
-//! command `%` stands for the session file and tab expands it to the
-//! absolute path.
+//! without it the builtin command names complete. A shell argument word
+//! consults bash's programmable completion once — automatically when the
+//! word begins (usually right after a space) and again on an explicit tab
+//! press — and keeps the local scan when bash-completion has no rule for
+//! the command; further keystrokes inside the word filter the fetched
+//! words. In a shell command `%` stands for the session file and tab
+//! expands it to the absolute path.
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -237,33 +239,152 @@ fn shell_token(prefix: &str) -> Option<(usize, usize, &str, bool)> {
     Some((region, start, token, command_word))
 }
 
-/// tab_candidates is the completion behind an explicit tab press: it adds
-/// bash's programmable completion on top of the cheap local scan. For a
-/// shell argument word, bash-completion results (subcommands, branch names,
-/// service actions, ...) replace the filesystem candidates when the command
-/// has a completion rule; the command word itself, `%`, builtin words and
-/// everything outside a shell region never consult bash. Typing keeps
-/// calling [`completion_candidates`] — completion scripts may spawn the
-/// command's binary, which is too slow for the auto-filtering window.
-pub fn tab_candidates(line: &str, cursor: usize, file_path: &str) -> Completion {
-    let base = completion_candidates(line, cursor, file_path);
+/// BashCache remembers the argument word the auto window last fetched
+/// programmable completion for: one bash run per argument word, then local
+/// prefix filtering while the caret stays inside it. The explicit tab
+/// press always re-asks the scripts for the word's full context.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BashCache {
+    /// byte offset of the fetched word's start (0 = nothing fetched; a
+    /// shell argument word always starts at or after the `!`)
+    word_start: usize,
+    /// the line up to that offset, so an edited command invalidates the
+    /// cache (history recall, deletion, a moved `!` region)
+    prefix: String,
+    /// the word text at fetch time
+    token: String,
+    /// COMPREPLY words from that fetch
+    candidates: Vec<String>,
+}
+
+impl BashCache {
+    /// auto_candidates feeds the auto-filtering window: a fresh shell
+    /// argument word runs bash once, further keystrokes inside the word
+    /// filter the fetched words. A word without a rule keeps rescanning
+    /// the filesystem locally without re-running bash.
+    pub fn auto_candidates(&mut self, line: &str, cursor: usize, file_path: &str) -> Completion {
+        self.auto_candidates_env(line, cursor, file_path, &[])
+    }
+
+    /// auto_candidates_env is [`auto_candidates`] with extra environment
+    /// entries for the driver; tests point JSE_BASH_COMPLETION at a fake
+    /// core script.
+    fn auto_candidates_env(
+        &mut self,
+        line: &str,
+        cursor: usize,
+        file_path: &str,
+        envs: &[(&str, &str)],
+    ) -> Completion {
+        let base = completion_candidates(line, cursor, file_path);
+        let Some((region, start, token, command_word)) = shell_context(line, cursor) else {
+            *self = Self::default();
+            return base;
+        };
+        if command_word || token == "%" {
+            *self = Self::default();
+            return base;
+        }
+        let line_prefix = &line[..start];
+        if self.word_start == start && self.prefix == line_prefix {
+            if self.candidates.is_empty() {
+                // bash had no opinion for this word: keep the local scan
+                return base;
+            }
+            return Completion {
+                start,
+                prefix: token.to_string(),
+                candidates: filter_prefix(&self.candidates, token),
+            };
+        }
+        let candidates = bash_completion_env(&line[region..], cursor - region, envs);
+        self.store(start, line_prefix, token, candidates.clone());
+        if candidates.is_empty() {
+            return base;
+        }
+        Completion {
+            start,
+            prefix: token.to_string(),
+            candidates,
+        }
+    }
+
+    /// tab_candidates is the completion behind an explicit tab press: it
+    /// re-asks bash for the word's full context (an identical fetch is
+    /// reused) and replaces the filesystem candidates when the command has
+    /// a completion rule; the command word itself, `%`, builtin words and
+    /// everything outside a shell region never consult bash.
+    pub fn tab_candidates(&mut self, line: &str, cursor: usize, file_path: &str) -> Completion {
+        self.tab_candidates_env(line, cursor, file_path, &[])
+    }
+
+    /// tab_candidates_env is [`tab_candidates`] with extra environment
+    /// entries for the driver; tests point JSE_BASH_COMPLETION at a fake
+    /// core script.
+    fn tab_candidates_env(
+        &mut self,
+        line: &str,
+        cursor: usize,
+        file_path: &str,
+        envs: &[(&str, &str)],
+    ) -> Completion {
+        let base = completion_candidates(line, cursor, file_path);
+        let Some((region, start, token, command_word)) = shell_context(line, cursor) else {
+            return base;
+        };
+        if command_word || token == "%" {
+            return base;
+        }
+        if self.word_start == start
+            && self.prefix == line[..start]
+            && self.token == token
+            && !self.candidates.is_empty()
+        {
+            return Completion {
+                start,
+                prefix: token.to_string(),
+                candidates: self.candidates.clone(),
+            };
+        }
+        let candidates = bash_completion_env(&line[region..], cursor - region, envs);
+        self.store(start, &line[..start], token, candidates.clone());
+        if candidates.is_empty() {
+            return base;
+        }
+        Completion {
+            start,
+            prefix: token.to_string(),
+            candidates,
+        }
+    }
+
+    /// store remembers one fetch for the word at `start`.
+    fn store(&mut self, start: usize, prefix: &str, token: &str, candidates: Vec<String>) {
+        *self = Self {
+            word_start: start,
+            prefix: prefix.to_string(),
+            token: token.to_string(),
+            candidates,
+        };
+    }
+}
+
+/// shell_context is [`shell_token`] on the text before the cursor, with
+/// the caret clamped to a char boundary.
+fn shell_context(line: &str, cursor: usize) -> Option<(usize, usize, &str, bool)> {
     let cursor = line.floor_char_boundary(cursor);
-    let prefix = &line[..cursor];
-    let Some((region, start, token, command_word)) = shell_token(prefix) else {
-        return base;
-    };
-    if command_word || token == "%" {
-        return base;
-    }
-    let candidates = bash_completion(&line[region..], cursor - region);
-    if candidates.is_empty() {
-        return base;
-    }
-    Completion {
-        start,
-        prefix: token.to_string(),
-        candidates,
-    }
+    shell_token(&line[..cursor])
+}
+
+/// filter_prefix keeps the cached words starting with the typed prefix,
+/// case-insensitive like the window's other candidate filters.
+fn filter_prefix(candidates: &[String], prefix: &str) -> Vec<String> {
+    let lower = prefix.to_lowercase();
+    candidates
+        .iter()
+        .filter(|c| c.to_lowercase().starts_with(&lower))
+        .cloned()
+        .collect()
 }
 
 /// bash_completion runs bash's programmable completion for `line`, the
@@ -857,26 +978,105 @@ complete -F _mysvc mysvc
 
         // no rule for the command: the filesystem scan stays
         let line = format!("!zzjse-nosuchcmd {base}/al");
-        let c = tab_candidates(&line, line.len(), "");
+        let c = BashCache::default().tab_candidates(&line, line.len(), "");
         assert_eq!(c.candidates, vec![format!("{base}/alpha.txt")]);
 
         // `%` never reaches bash
-        let c = tab_candidates("!cat %", 6, "rel/config.json");
+        let c = BashCache::default().tab_candidates("!cat %", 6, "rel/config.json");
         assert_eq!(
             c.candidates,
             vec![shell_quote(&absolute_path("rel/config.json"))]
         );
 
         // the command word completes from PATH, not from a completion rule
-        let c = tab_candidates("!cat", 4, "");
+        let c = BashCache::default().tab_candidates("!cat", 4, "");
         assert_eq!(
             c.candidates,
             completion_candidates("!cat", 4, "").candidates
         );
 
         // outside a shell region: builtin words only, bash not consulted
-        let c = tab_candidates("w", 1, "");
+        let c = BashCache::default().tab_candidates("w", 1, "");
         assert!(c.candidates.contains(&"wa".to_string()));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn auto_candidates_run_once_per_argument_word() {
+        // a unix machine without bash (minimal containers) skips like the
+        // pty tests do without a pty
+        if std::process::Command::new("bash")
+            .arg("-c")
+            .arg("exit 0")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("runs.log");
+        let core = dir.path().join("core.sh");
+        std::fs::write(
+            &core,
+            concat!(
+                "echo run >> \"$JSE_FAKE_LOG\"\n",
+                r#"_completion_loader() { [ -f "$JSE_FAKE_DIR/$1" ] && . "$JSE_FAKE_DIR/$1"; }"#,
+            ),
+        )
+        .unwrap();
+        let comps = dir.path().join("comps");
+        std::fs::create_dir(&comps).unwrap();
+        std::fs::write(
+            comps.join("mysvc"),
+            concat!(
+                "\n_mysvc() {\n",
+                "  local cur=${COMP_WORDS[COMP_CWORD]}\n",
+                "  COMPREPLY=($(compgen -W \"start stop status\" -- \"$cur\"))\n",
+                "}\n",
+                "complete -F _mysvc mysvc\n"
+            ),
+        )
+        .unwrap();
+        let envs = [
+            ("JSE_BASH_COMPLETION", core.to_str().unwrap()),
+            ("JSE_FAKE_DIR", comps.to_str().unwrap()),
+            ("JSE_FAKE_LOG", log.to_str().unwrap()),
+        ];
+        let runs = || {
+            std::fs::read_to_string(&log)
+                .map(|c| c.lines().count())
+                .unwrap_or(0)
+        };
+        let mut cache = BashCache::default();
+        // the space opens the argument word: one fetch, the full list
+        let c = cache.auto_candidates_env("!mysvc ", 7, "", &envs);
+        assert_eq!(c.candidates, ["start", "stop", "status"]);
+        // typing inside the word only filters the fetched words
+        let c = cache.auto_candidates_env("!mysvc star", 11, "", &envs);
+        assert_eq!(c.candidates, ["start"]);
+        assert_eq!(runs(), 1, "no respawn while typing inside the word");
+        // an explicit tab re-asks for the word's full context
+        let c = cache.tab_candidates_env("!mysvc star", 11, "", &envs);
+        assert_eq!(c.candidates, ["start"]);
+        assert_eq!(runs(), 2);
+        // the next space starts a new word: one fetch for it
+        let c = cache.auto_candidates_env("!mysvc stop ", 12, "", &envs);
+        assert_eq!(c.candidates, ["start", "stop", "status"]);
+        assert_eq!(runs(), 3);
+        // a command without a rule fetches once, then falls back locally
+        let line = format!("!nosvc {}/al", dir.path().display());
+        std::fs::write(dir.path().join("alpha.txt"), "").unwrap();
+        let c = cache.auto_candidates_env(&line, line.len(), "", &envs);
+        assert_eq!(
+            c.candidates,
+            vec![format!("{}/alpha.txt", dir.path().display())]
+        );
+        let c = cache.auto_candidates_env(&line, line.len(), "", &envs);
+        assert_eq!(
+            c.candidates,
+            vec![format!("{}/alpha.txt", dir.path().display())]
+        );
+        assert_eq!(runs(), 4, "no rule: no respawn while typing the word");
     }
 
     #[test]

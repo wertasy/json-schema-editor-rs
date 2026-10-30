@@ -491,6 +491,9 @@ pub struct CommandState {
     /// left edge is anchored there (typing inside the word never moves it,
     /// a separator that starts a new word re-anchors)
     pub sug_col: usize,
+    /// bash programmable completion cache: one fetch per shell argument
+    /// word, filtered locally while the caret stays inside it
+    pub bash_cache: crate::ui::command::BashCache,
 }
 
 /// Inline '/'-filter state shared by every list overlay.

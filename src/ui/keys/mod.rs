@@ -54,28 +54,24 @@ pub const SUG_STRIP_PREFIX_MIN: usize = 8;
 
 /// cmd_sug_refresh rebuilds the auto-completion list for the word before
 /// the cursor without choosing a candidate; tab/arrows select from it.
-/// Typing calls this constantly, so it stays on the cheap local scan
-/// (PATH executables, filesystem paths); the explicit tab press goes
-/// through cmd_tab_refresh, which additionally asks bash's programmable
-/// completion.
+/// The scan is cheap except at a word start: a fresh shell argument word
+/// runs bash's programmable completion once (BashCache), later keystrokes
+/// filter the fetched words locally.
 fn cmd_sug_refresh(s: &mut CommandState, file_path: &str) {
     let line = s.ti.value().to_string();
     let cursor = s.ti.cursor_byte();
-    cmd_sug_apply(
-        s,
-        command::completion_candidates(&line, cursor, file_path),
-        cursor,
-    );
+    let done = s.bash_cache.auto_candidates(&line, cursor, file_path);
+    cmd_sug_apply(s, done, cursor);
 }
 
-/// cmd_tab_refresh is the fresh scan of an explicit tab press: it adds
-/// bash's programmable completion on top of the local scan (shell argument
-/// words only). Typing never calls this — completion scripts may run the
-/// command's binary, which is too slow for the auto-filtering window.
+/// cmd_tab_refresh is the fresh scan of an explicit tab press: it always
+/// re-asks bash's programmable completion for the word's full context
+/// (shell argument words only) and stores the fetch for later filtering.
 fn cmd_tab_refresh(s: &mut CommandState, file_path: &str) {
     let line = s.ti.value().to_string();
     let cursor = s.ti.cursor_byte();
-    cmd_sug_apply(s, command::tab_candidates(&line, cursor, file_path), cursor);
+    let done = s.bash_cache.tab_candidates(&line, cursor, file_path);
+    cmd_sug_apply(s, done, cursor);
 }
 
 /// cmd_sug_apply stores one scan result as the active completion list.

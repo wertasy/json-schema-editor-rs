@@ -197,7 +197,7 @@ shell 转义（命令模式中以 `!` 开头，语法参照 vi）：
 | `↑`/`↓` 或 `j`/`k`、`ctrl+f`/`PgDn`、`ctrl+b`/`PgUp`（多行输出页） | 输出超过一屏时逐行/整页滚动；未超过一屏时按键不移动。 |
 | `q` / `esc`（多行输出页） | 关闭输出页。 |
 
-shell 参数的 bash 补全只在显式按 `tab` 时运行：jse 启动 `bash -c` 子进程加载 bash-completion 并执行该命令注册的补全规则（`complete -F`/`-C`），补全期间同步等待脚本运行结束；键入时的自动候选窗口不触发（重补全脚本可能调用命令自身的二进制，不适合每次按键都运行）。核心脚本按 `JSE_BASH_COMPLETION`（见[命令行](cli.md#环境变量)）→ `/usr/share/bash-completion/bash_completion` → `/etc/bash_completion` → `/usr/local/etc/bash_completion` → `/opt/homebrew` 下的 `share`/`etc/bash_completion` 顺序查找；一个都找不到，或该命令没有补全规则时，保持文件系统路径补全。
+shell 参数的 bash 补全在光标进入一个新的参数词时自动运行一次（通常是键入空格后，无需按 `tab`），同一词内继续键入只对已取回的结果做本地前缀过滤，不重复运行脚本；显式按 `tab` 则对该词重新询问一次。jse 启动 `bash -c` 子进程加载 bash-completion 并执行该命令注册的补全规则（`complete -F`/`-C`），补全期间同步等待脚本运行结束（重补全脚本可能调用命令自身的二进制，因此每个参数词只运行一次）。核心脚本按 `JSE_BASH_COMPLETION`（见[命令行](cli.md#环境变量)）→ `/usr/share/bash-completion/bash_completion` → `/etc/bash_completion` → `/usr/local/etc/bash_completion` → `/opt/homebrew` 下的 `share`/`etc/bash_completion` 顺序查找；一个都找不到，或该命令没有补全规则时，保持文件系统路径补全。
 
 命令历史**跨会话保留**：每条执行的命令（`!!` 不会重复记入）立即写入缓存目录下的 `cmd-history` 文件（默认 `$XDG_CACHE_HOME/jse`，`JSE_CACHE_DIR` 可改变位置，见[命令行](cli.md#环境变量)），按行存放、旧的先丢，最多 100 条；新会话打开命令输入后 `↑`/`↓` 即可翻到上一会话的命令。文件缺失或不可读时历史从空开始，写入失败只影响持久化、不影响本会话使用。
 

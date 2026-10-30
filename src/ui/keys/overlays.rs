@@ -647,6 +647,7 @@ impl App {
             sug_start: 0,
             sug_end: 0,
             sug_col: 0,
+            bash_cache: command::BashCache::default(),
         };
         let path = self.opts().path.clone();
         cmd_sug_refresh(&mut s, &path);

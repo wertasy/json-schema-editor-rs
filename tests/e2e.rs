@@ -1382,20 +1382,17 @@ fn pty_shell_argument_tab_uses_bash_completion() {
     pty.wait_frame("root menu", 0, &["↑/↓ move"]);
     pty.send(b":");
     let (_, off) = pty.wait_frame("command prompt", 0, &[": command"]);
-    pty.send(b"!mysvc st");
-    // typing only filters local candidates; the bash rule is not consulted
-    // per keystroke
-    let (_, off) = pty.wait_frame("typed shell argument", off, &[":!mysvc st"]);
+    pty.send(b"!mysvc ");
+    // the space opens a fresh argument word: bash runs once and the
+    // candidate window lists the rule's words without a tab press
+    let (_, off) = pty.wait_frame("auto bash candidates", off, &["status", ":!mysvc "]);
+    pty.send(b"st");
+    // typing inside the word filters the fetched words locally
+    let (_, off) = pty.wait_frame("typed shell argument", off, &[":!mysvc st", "start"]);
     pty.send(b"\t");
-    // the explicit tab press asks bash: the rule's words appear in the
-    // candidate window and the first one fills the line
-    let (_, off) = pty.wait_frame(
-        "bash completion candidates",
-        off,
-        &["status", ":!mysvc start"],
-    );
-    pty.send(b"\t");
-    pty.wait_frame("cycle to next candidate", off, &["stop", ":!mysvc stop"]);
+    // the tab press re-asks bash for the word's context and applies the
+    // matching candidate
+    pty.wait_frame("tab applies start", off, &[":!mysvc start"]);
     pty.send(b"\x03");
     pty.wait_exit(130);
 }
