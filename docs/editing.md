@@ -95,7 +95,7 @@
 - 选择器内 `String`/`Number` 就地输入，`Boolean` 直接切换，`Object`/`Array` 进入可直接增删键/条目的子菜单，`Null` 写入 `null`；`JSON` 打开内置 raw 文本区，已有值按当前文件格式预填（显式按 `e` 仍可外编）。
 - `d` 删除。
 - `a`/`A` 新增的键没有值，因此先选类型；键以 `null` 占位并保留插入位置，取消类型选择后可用 `d` 删除。
-- 同时作为编辑器级警告进入问题列表（`unknown key ... not in the schema`），不阻断保存；顶层 `$schema`（编辑器自动写回的指向）不警告。匹配 `patternProperties` 任一模式的键属于 schema 已知键，不会显示该标记或警告（多模式 `patternProperties` 不生成映射表单，仍按运行时形状编辑）。
+- 同时作为编辑器级警告进入问题列表（`unknown key ... not in the schema`），不阻断保存；顶层 `$schema`（编辑器自动写回的指向）不警告。匹配 `patternProperties` 任一模式的键属于 schema 已知键，不会显示该标记或警告（多模式 `patternProperties` 不生成映射表单，仍按运行时形状编辑）。`additionalProperties` 为 `true` 或对象 schema 的对象同样视为开放映射：`properties` 之外的键不显示该标记或警告，仍按运行时形状编辑。oneOf/anyOf 的对象分支同理：值未唯一定位到单个分支时，任一分支开放即可；唯一定位时以命中分支为准。
 - schema 明确定义类型的字段不显示此选择器：`enter` 始终按 schema 类型编辑。
 - 如果 `additionalProperties: false` 已产生校验错误，不重复列出未知键警告。
 

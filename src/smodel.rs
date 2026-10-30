@@ -103,6 +103,10 @@ pub struct FormNode {
     /// Object fallback: patternProperties regexps whose matches are schema
     /// keys even though the form cannot map them to typed fields
     pub key_patterns: Vec<String>,
+
+    /// Object: additionalProperties is `true` or a schema, so document keys
+    /// outside `children`/`key_patterns` are schema-defined.
+    pub open_additional: bool,
 }
 
 /// Arena index into [`Schema::nodes`].
@@ -602,6 +606,7 @@ impl Parser {
             }
         } else if t == "object" || has_props || has_additional {
             let ap = field(&self.doc, n, "additionalProperties");
+            let open_additional = usable_additional(&self.doc, n);
             if !has_props && ap.is_some() && usable_additional(&self.doc, n) {
                 // string-keyed map (sing-box HTTPHeader et al): rows come
                 // from the document, every value edits against the value
@@ -625,6 +630,7 @@ impl Parser {
                 f.children = self.build_children(n, ctx, depth);
             }
             if f.kind == Kind::Object {
+                f.open_additional = open_additional;
                 if let Some(pp) = field(&self.doc, n, "patternProperties") {
                     if let Value::Object(pms) = self.doc.value(pp) {
                         for pm in pms {
@@ -2647,6 +2653,35 @@ mod tests {
             jbf.kind,
             jbf.children.len()
         );
+    }
+
+    // Objects whose additionalProperties is `true` or a schema stay open:
+    // keys outside `properties` are schema-defined, so the issues layer must
+    // not flag them as unknown. `false` or an omitted member keeps the
+    // object closed.
+    #[test]
+    fn test_open_additional_properties_flag() {
+        let schema_ap = must_load(
+            r#"{"type":"object","properties":{"a":{"type":"string"}},"additionalProperties":{"type":"string"}}"#,
+        );
+        assert_eq!(kind_of(&schema_ap, schema_ap.root), Kind::Object);
+        assert!(schema_ap.nodes[schema_ap.root as usize].open_additional);
+
+        let bool_ap = must_load(
+            r#"{"type":"object","properties":{"a":{"type":"string"}},"additionalProperties":true}"#,
+        );
+        assert_eq!(kind_of(&bool_ap, bool_ap.root), Kind::Object);
+        assert!(bool_ap.nodes[bool_ap.root as usize].open_additional);
+
+        let closed = must_load(
+            r#"{"type":"object","properties":{"a":{"type":"string"}},"additionalProperties":false}"#,
+        );
+        assert_eq!(kind_of(&closed, closed.root), Kind::Object);
+        assert!(!closed.nodes[closed.root as usize].open_additional);
+
+        let omitted = must_load(r#"{"type":"object","properties":{"a":{"type":"string"}}}"#);
+        assert_eq!(kind_of(&omitted, omitted.root), Kind::Object);
+        assert!(!omitted.nodes[omitted.root as usize].open_additional);
     }
 
     // A oneOf/anyOf mixing an open string with a closed set of strings

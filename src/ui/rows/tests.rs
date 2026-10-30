@@ -2325,3 +2325,22 @@ fn test_search_multi_pattern_keys_in_schema() {
         "rows below a pattern-defined key inherit its schema standing"
     );
 }
+
+#[test]
+fn test_search_open_additional_keys_in_schema() {
+    let schema = must_schema(
+        r#"{"type":"object","properties":{"a":{"type":"string"}},"additionalProperties":{"type":"string"}}"#,
+    );
+    let doc = dbuild(|db| db.obj(vec![("a", db.s("x")), ("extra", db.s("y"))]));
+    let mut schema = schema;
+    let st = root_state(&schema);
+    let all = search_index(&mut schema, &doc, &st);
+    let row = all
+        .iter()
+        .find(|r| r.path == vec![PathSeg::key("extra")])
+        .expect("extra search row");
+    assert!(
+        row.in_schema,
+        "keys of an open additionalProperties object are schema-defined"
+    );
+}

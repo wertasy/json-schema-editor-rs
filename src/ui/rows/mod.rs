@@ -242,7 +242,8 @@ pub fn menu_rows_for(
                                         idx: -1,
                                         path: append_key(&st.path, &mem.key),
                                         label: mem.key.clone(),
-                                        in_schema: pattern_defined(schema, st.node, &mem.key),
+                                        in_schema: schema.nodes[st.node as usize].open_additional
+                                            || pattern_defined(schema, st.node, &mem.key),
                                         ..Row::default()
                                     });
                                 }
@@ -573,7 +574,8 @@ fn merged_row(
                 idx: -1,
                 path: mk.path.clone(),
                 label: mk.key.clone(),
-                in_schema: pattern_defined(schema, st.node, &mk.key),
+                in_schema: schema.nodes[st.node as usize].open_additional
+                    || pattern_defined(schema, st.node, &mk.key),
                 ..Row::default()
             },
             Some(f) if menu_leaf(schema, f) => Row {

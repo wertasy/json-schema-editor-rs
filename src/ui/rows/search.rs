@@ -60,7 +60,16 @@ pub fn search_index(schema: &mut Schema, doc: &Doc, st: &MenuState) -> Vec<Row> 
                     walk(schema, doc, synth, out, seen, c, &cpath);
                 }
                 let patterns = schema.nodes[fn_ as usize].key_patterns.clone();
-                unknown_rows(schema, doc, path, &known, &patterns, seen, out);
+                unknown_rows(
+                    schema,
+                    doc,
+                    path,
+                    &known,
+                    &patterns,
+                    schema.nodes[fn_ as usize].open_additional,
+                    seen,
+                    out,
+                );
             }
             Kind::OneOf => {
                 // Index the variant fields, but not one row per variant for
@@ -130,7 +139,19 @@ pub fn search_index(schema: &mut Schema, doc: &Doc, st: &MenuState) -> Vec<Row> 
                         walk(schema, doc, synth, out, seen, c, &cpath);
                     }
                 }
-                unknown_rows(schema, doc, path, &known, &patterns, seen, out);
+                let open_additional = variants
+                    .iter()
+                    .any(|&v| schema.nodes[v as usize].open_additional);
+                unknown_rows(
+                    schema,
+                    doc,
+                    path,
+                    &known,
+                    &patterns,
+                    open_additional,
+                    seen,
+                    out,
+                );
                 // Matched variants that are containers have no fields to
                 // union; an array value still has elements. Walk the first
                 // matched array variant (the candidates describe the same
@@ -231,6 +252,7 @@ pub(crate) fn unknown_rows(
     path: &[PathSeg],
     known: &HashSet<String>,
     patterns: &[String],
+    open_additional: bool,
     seen: &mut HashSet<String>,
     out: &mut Vec<Row>,
 ) {
@@ -252,7 +274,7 @@ pub(crate) fn unknown_rows(
         let k = path_string(&p);
         if !seen.contains(&k) {
             seen.insert(k);
-            let in_schema = key_matches_patterns(&mem.key, patterns);
+            let in_schema = open_additional || key_matches_patterns(&mem.key, patterns);
             let mut row = unknown_row(schema, doc, &p);
             row.in_schema = in_schema;
             out.push(row);

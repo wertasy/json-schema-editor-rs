@@ -94,7 +94,9 @@ pub fn unknown_key_issues(schema: &Schema, doc: &Doc) -> Vec<Issue> {
                     }
                 }
                 let patterns = schema.nodes[fn_ as usize].key_patterns.clone();
-                unknown_of(doc, out, val, &known, &patterns, path);
+                if !schema.nodes[fn_ as usize].open_additional {
+                    unknown_of(doc, out, val, &known, &patterns, path);
+                }
             }
             Kind::OneOf => {
                 let variants = schema.nodes[fn_ as usize].variants.clone();
@@ -112,7 +114,9 @@ pub fn unknown_key_issues(schema: &Schema, doc: &Doc) -> Vec<Issue> {
                 };
                 let mut known: HashSet<String> = HashSet::new();
                 let mut patterns: Vec<String> = Vec::new();
+                let mut open_additional = false;
                 for &v in &variants {
+                    open_additional |= schema.nodes[v as usize].open_additional;
                     for p in &schema.nodes[v as usize].key_patterns {
                         if !patterns.contains(p) {
                             patterns.push(p.clone());
@@ -130,7 +134,9 @@ pub fn unknown_key_issues(schema: &Schema, doc: &Doc) -> Vec<Issue> {
                         }
                     }
                 }
-                unknown_of(doc, out, val, &known, &patterns, path);
+                if !open_additional {
+                    unknown_of(doc, out, val, &known, &patterns, path);
+                }
             }
             Kind::Map => {
                 // every document key is defined by the map's additionalProperties

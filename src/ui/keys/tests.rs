@@ -9345,6 +9345,64 @@ fn unknown_key_issues_listed() {
 }
 
 #[test]
+fn open_additional_properties_not_unknown() {
+    let open_schema = schema_from_json(
+        r#"{"type":"object","properties":{"a":{"type":"string"}},"additionalProperties":{"type":"string"}}"#,
+    );
+    let doc = dbuild(|db| db.obj(vec![("a", db.s("x")), ("extra", db.s("y"))]));
+    assert!(
+        crate::ui::rows::unknown_key_issues(&open_schema, &doc).is_empty(),
+        "an open additionalProperties object defines every key"
+    );
+    let mut m = app_with(open_schema, doc, test_opts());
+    let row = m
+        .menu_rows()
+        .into_iter()
+        .find(|r| r.path == sp(&["extra"]))
+        .expect("extra row");
+    assert_eq!(row.kind, RowKind::Unknown, "extra still edits by shape");
+    assert!(row.in_schema, "extra lives in an open mapping");
+    assert!(
+        !m.row_line(&row, false, 40).contains("(not in schema)"),
+        "open-mapping keys are not marked unknown: {}",
+        m.row_line(&row, false, 40)
+    );
+
+    // an unresolved oneOf counts any open branch as opening the mapping
+    let union_schema = schema_from_json(
+        r#"{"type":"object","properties":{"v":{"oneOf":[
+            {"type":"object","properties":{"kind":{"type":"string"}},"additionalProperties":false},
+            {"type":"object","properties":{"kind":{"type":"string"}},"additionalProperties":{"type":"string"}}]}}}"#,
+    );
+    let doc = dbuild(|db| db.obj(vec![("v", db.obj(vec![("extra", db.s("y"))]))]));
+    assert!(
+        crate::ui::rows::unknown_key_issues(&union_schema, &doc).is_empty(),
+        "any open branch opens an unresolved oneOf"
+    );
+
+    // a closed object keeps flagging keys outside `properties`
+    let closed_schema = schema_from_json(
+        r#"{"type":"object","properties":{"a":{"type":"string"}},"additionalProperties":false}"#,
+    );
+    let doc = dbuild(|db| db.obj(vec![("a", db.s("x")), ("extra", db.s("y"))]));
+    let issues = crate::ui::rows::unknown_key_issues(&closed_schema, &doc);
+    assert_eq!(issues.len(), 1, "closed object flags extra: {issues:?}");
+    let mut m = app_with(closed_schema, doc, test_opts());
+    let row = m
+        .menu_rows()
+        .into_iter()
+        .find(|r| r.path == sp(&["extra"]))
+        .expect("extra row");
+    assert_eq!(row.kind, RowKind::Unknown);
+    assert!(!row.in_schema);
+    assert!(
+        m.row_line(&row, false, 40).contains("(not in schema)"),
+        "closed-object extra key stays unknown: {}",
+        m.row_line(&row, false, 40)
+    );
+}
+
+#[test]
 fn unknown_key_issues_schema_pointer_exempt() {
     let schema = schema_build(|b| {
         let name = b.id(scalar("name", "Name", "string"));
