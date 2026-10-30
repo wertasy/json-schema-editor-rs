@@ -11919,34 +11919,75 @@ fn command_tab_completes_the_word_before_the_cursor_and_keeps_the_suffix() {
     // leaves the suffix in place.
     press(&mut app, &["left", "left"]);
     press(&mut app, &["tab"]);
-    assert_eq!(command_value(&app), format!("!cat {base}/alpha.txtZZ"));
+    // The candidates come from bash in the completion script's order:
+    // file completion answers in readdir order (and may spell the words
+    // as full paths), so which file leads is environment-specific. The
+    // contract under test is the mechanics: the leading candidate lands
+    // before the untouched suffix, with the cursor between them.
+    let selection = |app: &App| -> (Vec<String>, usize) {
+        match &app.overlay {
+            Some(Overlay::Command(s)) => (s.sug.clone(), s.sug_idx.unwrap_or(0) as usize),
+            _ => panic!("command prompt is not open"),
+        }
+    };
+    let (cands, i0) = selection(&app);
+    let tails: Vec<String> = cands
+        .iter()
+        .map(|c| {
+            let tail = c.rsplit('/').next().unwrap_or(c);
+            match tail {
+                "alpha.txt" | "alpine" => tail.to_string(),
+                other => panic!("unexpected candidate {other:?}: {cands:?}"),
+            }
+        })
+        .collect();
+    let mut sorted = tails.clone();
+    sorted.sort();
+    assert_eq!(sorted, vec!["alpha.txt", "alpine"], "candidates: {cands:?}");
+    let value = command_value(&app);
+    assert_eq!(
+        value,
+        format!("!cat {base}/{}ZZ", tails[i0]),
+        "tab must insert the leading candidate before the suffix"
+    );
     assert_eq!(
         command_cursor(&app),
-        format!("!cat {base}/alpha.txt").len(),
+        value.len() - "ZZ".len(),
         "the cursor lands after the inserted candidate, before the suffix"
     );
 
-    let view = app.view();
-    assert!(
-        view.contains("\x1b[7mpha.txt"),
-        "selected candidate must use reverse video: {view}"
-    );
-    assert!(
-        view.contains("pine"),
-        "the other candidate must be rendered too: {view}"
-    );
-    let line = view
-        .lines()
-        .find(|l| l.contains("\x1b[7mpha.txt"))
-        .expect("selected command candidate line");
-    let start = line.find("\x1b[7m").expect("candidate background");
-    // The token shares a long prefix with the candidates, so the rows are
-    // stripped to their tails and anchor at the caret the completion
-    // applied (the end of the current candidate).
+    // The candidate rows are stripped of the prefix they share with the
+    // token and anchor at the caret the completion applied (the end of
+    // the current candidate).
+    let stripped = |tail: &str| -> String {
+        let mut s = tail.to_string();
+        for _ in 0..2 {
+            let _ = s.remove(0); // drop the shared "al"
+        }
+        s
+    };
+    let selected_line = |app: &mut App, tail: &str| -> (String, usize) {
+        let view = app.view();
+        let line = view
+            .lines()
+            .find(|l| l.contains(&format!("\x1b[7m{}", stripped(tail))))
+            .expect("selected command candidate line")
+            .to_string();
+        let start = line.find("\x1b[7m").expect("candidate background");
+        (line, start)
+    };
     let caret_col = |app: &App| {
         let value = command_value(app);
         display_width(":") + display_width(&value[..command_cursor(app)])
     };
+    {
+        let view = app.view();
+        assert!(
+            view.contains("pha.txt") && view.contains("pine"),
+            "both candidates must be rendered: {view}"
+        );
+    }
+    let (line, start) = selected_line(&mut app, &tails[i0]);
     assert_eq!(
         display_width(&line[..start]),
         caret_col(&app),
@@ -11954,28 +11995,25 @@ fn command_tab_completes_the_word_before_the_cursor_and_keeps_the_suffix() {
     );
     // While completion is active, the arrow keys move the candidate cursor
     // instead of recalling command history.
+    let i1 = (i0 + 1) % 2;
     press(&mut app, &["down"]);
-    assert_eq!(command_value(&app), format!("!cat {base}/alpineZZ"));
-    let view = app.view();
-    assert!(
-        view.contains("\x1b[7mpine"),
-        "reverse-video selection must follow the arrow key: {view}"
+    assert_eq!(
+        command_value(&app),
+        format!("!cat {base}/{}ZZ", tails[i1]),
+        "the arrow key must select the other candidate"
     );
-    let line = view
-        .lines()
-        .find(|l| l.contains("\x1b[7mpine"))
-        .expect("selected command candidate line");
-    let start = line.find("\x1b[7m").expect("candidate background");
+    let (line, start) = selected_line(&mut app, &tails[i1]);
     assert_eq!(
         display_width(&line[..start]),
         caret_col(&app),
-        "cycling moves the window with the caret: {view}"
+        "cycling moves the window with the caret: {}",
+        app.view()
     );
     press(&mut app, &["up"]);
-    assert_eq!(command_value(&app), format!("!cat {base}/alpha.txtZZ"));
+    assert_eq!(command_value(&app), format!("!cat {base}/{}ZZ", tails[i0]));
     // Tab after arrow movement keeps using the same candidate list.
     press(&mut app, &["tab"]);
-    assert_eq!(command_value(&app), format!("!cat {base}/alpineZZ"));
+    assert_eq!(command_value(&app), format!("!cat {base}/{}ZZ", tails[i1]));
 }
 
 /// viewport_cell_shift mirrors ti_window's scroll rule but returns the
