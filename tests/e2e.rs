@@ -1919,6 +1919,53 @@ fn pty_search_jump_into_array_variant() {
 }
 
 #[test]
+fn pty_undo_of_child_edit_stays_on_the_key() {
+    // schema a = oneOf[null, {b}]: pick {b}, edit b, undo — the undo must
+    // keep the pinned {b} menu open and land the cursor back on b, not exit
+    // to the root menu.
+    let dir = mktemp();
+    let schema = dir.path().join("uqx.schema.json");
+    let cfg = dir.path().join("uqxnullcfg.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{
+          "a":{"oneOf":[{"type":"null"},{"type":"object","properties":{"b":{"type":"string"}}}]}}}"#,
+    );
+    write_file(&cfg, r#"{"a": null}"#);
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(
+        &["-s", &schema_arg, &cfg_arg],
+        &[("JSE_CATALOG_URL", "http://127.0.0.1:1/catalog.json")],
+        &cache,
+    ) else {
+        return;
+    };
+    pty.wait_frame("root menu", 0, &["↑/↓ move"]);
+    pty.send(b"\r"); // variant picker for a
+    (_, _) = pty.wait_frame("variant picker", 0, &["{b}"]);
+    pty.send(b"j\r"); // pick {b}
+    let (_, off) = pty.wait_frame("inside a", 0, &["variant: {b}"]);
+    pty.send(b"\r1\r"); // edit b (absent -> "1")
+    (_, _) = pty.wait_frame("child value set", off, &["●"]);
+    pty.send(b"u");
+    let (snap, off2) = pty.wait_frame("undone", off, &["undone"]);
+    // the accumulated snapshot also contains pre-undo frames ($.a picker
+    // title, "> b" seeded cursor), so assert on the tail written after the
+    // edit: the pinned editor footer rules out ejection to the root menu
+    let tail = &snap[off..off2];
+    assert!(
+        tail.contains("variant: {b}"),
+        "still inside a's pinned editor:\n{tail}"
+    );
+    assert!(tail.contains("$.a"), "breadcrumb is a's menu:\n{tail}");
+    assert!(tail.contains("> b"), "cursor back on key b:\n{tail}");
+    pty.send(b"\x03");
+    let _ = pty.wait_exit(130);
+}
+
+#[test]
 fn pty_variant_switch_string_wraps_into_array() {
     // oneOf string | array[string]: switching the variant must keep the
     // typed string as the array's first element

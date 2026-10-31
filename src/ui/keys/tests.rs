@@ -3164,11 +3164,12 @@ fn undo_of_array_move_rings_both_moved_indices() {
     );
 
     // undo restores the order; both moved indices form the ctrl+j/k ring
+    // (rotated so the landed index sits last)
     press(&mut m, &["u"]);
     assert_eq!(row_at(&mut m).path, arr_idx(0), "lands on the first change");
     assert_eq!(
         m.fs().change_jump,
-        Some(vec![arr_idx(0), arr_idx(1)]),
+        Some(vec![arr_idx(1), arr_idx(0)]),
         "the unchanged tail must not enter the ring"
     );
     press(&mut m, &["ctrl+j"]);
@@ -3363,19 +3364,20 @@ fn undo_of_an_addition_lands_on_the_surviving_container() {
     press(&mut m, &["enter"]);
     assert!(has(&m.fs().doc, &sp(&["server", "extra"])));
 
-    // undo removes the added key: it has no resolvable row, so the ring
-    // points at the surviving container and the cursor lands there
+    // undo removes the added key: the ring points at its own (dangling)
+    // path; the schema-less menu no longer lists a row, so the cursor
+    // lands on the surviving container
     press(&mut m, &["u"]);
     assert!(!has(&m.fs().doc, &sp(&["server", "extra"])));
     assert_eq!(
         m.fs().change_jump,
-        Some(vec![vec![ks("server")]]),
-        "the removal reports its surviving container"
+        Some(vec![sp(&["server", "extra"])]),
+        "the removal reports the removed key's own path"
     );
     assert_eq!(
         row_at(&mut m).path,
         sp(&["server"]),
-        "undo of an addition lands on the container row"
+        "a removed key without a row lands on the container row"
     );
     // a single-entry ring wraps on itself
     press(&mut m, &["ctrl+j"]);
@@ -6581,10 +6583,11 @@ fn alias_expand_undoable() {
         "undo must restore the reference"
     );
     assert!(!m.dirty());
-    // the undo lands on the restored reference (its materialized copy
-    // differs from the shared alias node); the expand affordance lives one
-    // drill below it
+    // the change ring points at the restored reference; the undo keeps the
+    // editor menu open (the user sits inside it), so esc returns to the
+    // reference row and the expand affordance lives one drill below it
     assert_eq!(m.fs().change_jump, Some(vec![vec![ks("copy")]]));
+    press(&mut m, &["esc"]);
     assert_eq!(row_at(&mut m).path, sp(&["copy"]));
     press(&mut m, &["enter"]);
     assert!(find_row(&mut m, |r, _| r.kind == RowKind::Expand).is_some());
@@ -13427,4 +13430,211 @@ fn app_push_name(m: &mut App) {
 /// path_idx builds a single-index path segment path.
 fn path_idx(i: usize) -> Vec<PathSeg> {
     vec![PathSeg::Idx(i)]
+}
+
+// --- undo landing -------------------------------------------------------------
+
+#[test]
+fn undo_of_child_edit_lands_back_on_the_key_inside_its_menu() {
+    // schema root {a: object {b: string}}; b is absent, an edit creates it,
+    // and the undo removes it again. a's menu still lists b (absent members
+    // render), so the cursor must return to b inside a's menu instead of
+    // exiting to the root.
+    let schema = schema_build(|b| {
+        let bs = b.id(scalar("b", "B", "string"));
+        let a = b.id(FormNode {
+            key: "a".into(),
+            title: "A".into(),
+            kind: Kind::Object,
+            children: vec![bs],
+            ..FormNode::default()
+        });
+        b.id(FormNode {
+            key: "$".into(),
+            title: "Root".into(),
+            kind: Kind::Object,
+            children: vec![a],
+            ..FormNode::default()
+        })
+    });
+    let doc = dbuild(|db| db.obj(vec![("a", db.obj(vec![]))]));
+    let mut m = app_with(schema, doc, test_opts());
+
+    set_cursor_path(&mut m, &sp(&["a"]));
+    press(&mut m, &["enter"]); // inside a's menu, b absent
+    set_cursor_path(&mut m, &sp(&["a", "b"]));
+    press(&mut m, &["enter"]); // edit creates b
+    match &mut m.overlay {
+        Some(Overlay::Edit(e)) => e.ti.set_value("1"),
+        _ => panic!("edit overlay missing"),
+    }
+    press(&mut m, &["enter"]);
+    assert_eq!(sget(&m.fs().doc, &sp(&["a", "b"])), "1");
+
+    press(&mut m, &["u"]);
+    assert!(!has(&m.fs().doc, &sp(&["a", "b"])), "undo removed b");
+    assert_eq!(m.fs().stack.len(), 2, "still inside a's menu");
+    let r = row_at(&mut m);
+    assert_eq!(
+        r.path,
+        sp(&["a", "b"]),
+        "undo of the child edit lands back on b inside a's menu"
+    );
+}
+
+#[test]
+fn undo_ring_cycles_past_an_editor_stay_landing() {
+    // one undo step flips a (rule 1 keeps the editor open with the cursor
+    // inside) and changes q: ctrl+j must seed from the focused row inside
+    // a's editor and advance to q instead of re-landing on a forever.
+    let schema = schema_build(|b| {
+        let v1 = b.id(scalar("a", "null", "null"));
+        let bs = b.id(scalar("b", "B", "string"));
+        let v2 = b.id(FormNode {
+            key: "a".into(),
+            title: "obj".into(),
+            kind: Kind::Object,
+            children: vec![bs],
+            ..FormNode::default()
+        });
+        let one = b.id(FormNode {
+            key: "a".into(),
+            title: "A".into(),
+            kind: Kind::OneOf,
+            variants: vec![v1, v2],
+            ..FormNode::default()
+        });
+        let q = b.id(scalar("q", "Q", "string"));
+        b.id(FormNode {
+            key: "$".into(),
+            title: "Root".into(),
+            kind: Kind::Object,
+            children: vec![one, q],
+            ..FormNode::default()
+        })
+    });
+    let doc = dbuild(|db| db.obj(vec![("a", db.push(Value::Null)), ("q", db.s("old"))]));
+    let mut m = app_with(schema, doc, test_opts());
+
+    set_cursor_path(&mut m, &sp(&["a"]));
+    press(&mut m, &["enter"]); // variant picker for a
+    let obj = m
+        .menu_rows()
+        .iter()
+        .position(|r| {
+            r.variant
+                .map(|v| m.fs().schema.nodes[v as usize].kind == Kind::Object)
+                .unwrap_or(false)
+        })
+        .expect("object variant row");
+    m.top_mut().unwrap().cursor = obj;
+    press(&mut m, &["enter"]); // editor opens, doc unchanged
+
+    // one undo step whose diff covers both the a flip and the q change:
+    // snapshot the pre-state, then swap the whole document out-of-band
+    let pre = m.fs().doc.clone();
+    m.fs_mut().history.push_undo(pre);
+    m.fs_mut().doc = dbuild(|db| {
+        db.obj(vec![
+            ("a", db.obj(vec![("b", db.s("1"))])),
+            ("q", db.s("new")),
+        ])
+    });
+
+    press(&mut m, &["u"]);
+    assert_eq!(
+        m.fs().change_jump,
+        Some(vec![sp(&["q"]), sp(&["a"])]),
+        "the step reports both changes (landed entry rotated last)"
+    );
+    assert_eq!(m.fs().stack.len(), 2, "editor stays open");
+    assert_eq!(
+        row_at(&mut m).path,
+        sp(&["a", "b"]),
+        "rule 1 keeps the cursor inside a's editor"
+    );
+
+    press(&mut m, &["ctrl+j"]);
+    assert_eq!(
+        row_at(&mut m).path,
+        sp(&["q"]),
+        "the ring advances past the stay landing to q"
+    );
+    assert_eq!(m.fs().stack.len(), 1, "q lands in the root menu");
+}
+
+#[test]
+fn undo_of_first_child_edit_stays_in_the_variant_editor() {
+    // oneOf [null, {b}]: picking the {b} variant pushes the editor without
+    // touching the document, so the first child edit is one snapshot
+    // (a: null -> {"b":"1"}). Undoing it restores a=null; the editor menu
+    // the user sits in must stay open with the cursor on b (now absent).
+    let schema = schema_build(|b| {
+        let v1 = b.id(scalar("a", "null", "null"));
+        let bs = b.id(scalar("b", "B", "string"));
+        let v2 = b.id(FormNode {
+            key: "a".into(),
+            title: "obj".into(),
+            kind: Kind::Object,
+            children: vec![bs],
+            ..FormNode::default()
+        });
+        let one = b.id(FormNode {
+            key: "a".into(),
+            title: "A".into(),
+            kind: Kind::OneOf,
+            variants: vec![v1, v2],
+            ..FormNode::default()
+        });
+        b.id(FormNode {
+            key: "$".into(),
+            title: "Root".into(),
+            kind: Kind::Object,
+            children: vec![one],
+            ..FormNode::default()
+        })
+    });
+    let doc = dbuild(|db| db.obj(vec![("a", db.push(Value::Null))]));
+    let mut m = app_with(schema, doc, test_opts());
+
+    set_cursor_path(&mut m, &sp(&["a"]));
+    press(&mut m, &["enter"]); // variant picker for a
+    assert_eq!(m.top().unwrap().kind, MenuKind::OneOf);
+    let obj = m
+        .menu_rows()
+        .iter()
+        .position(|r| {
+            r.variant
+                .map(|v| m.fs().schema.nodes[v as usize].kind == Kind::Object)
+                .unwrap_or(false)
+        })
+        .expect("object variant row");
+    m.top_mut().unwrap().cursor = obj;
+    press(&mut m, &["enter"]); // pick {b}: editor opens, doc unchanged
+    assert_eq!(m.fs().stack.len(), 2, "variant editor pushed");
+    assert!(matches!(
+        m.fs().doc.value(m.fs().doc.get(&sp(&["a"])).unwrap()),
+        Value::Null
+    ));
+    set_cursor_path(&mut m, &sp(&["a", "b"]));
+    press(&mut m, &["enter"]); // edit b (absent -> created)
+    match &mut m.overlay {
+        Some(Overlay::Edit(e)) => e.ti.set_value("1"),
+        _ => panic!("edit overlay missing"),
+    }
+    press(&mut m, &["enter"]);
+    assert_eq!(sget(&m.fs().doc, &sp(&["a", "b"])), "1");
+
+    press(&mut m, &["u"]);
+    assert!(matches!(
+        m.fs().doc.value(m.fs().doc.get(&sp(&["a"])).unwrap()),
+        Value::Null
+    ));
+    assert_eq!(m.fs().stack.len(), 2, "variant editor survives the undo");
+    let r = row_at(&mut m);
+    assert_eq!(
+        r.path,
+        sp(&["a", "b"]),
+        "undo lands the cursor back on b inside the editor"
+    );
 }

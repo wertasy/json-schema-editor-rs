@@ -1026,6 +1026,56 @@ impl App {
         self.clamp_cursor(&rows);
     }
 
+    /// landAfterHistory lands the cursor on an undo/redo change location.
+    /// When the containing menu level is already on the stack the view
+    /// stays where it is: a rebuild would swap a pinned variant menu for a
+    /// re-inferred picker and close an editor the undo did not invalidate
+    /// (variant picks push the editor without touching the document, so
+    /// undoing the first child edit flips the value back to null while the
+    /// user is inside the editor). Three cases:
+    /// - the changed key's own menu level is on the stack: keep it (with
+    ///   any cursor row it still has) and drop deeper levels;
+    /// - the parent menu lists the changed row (schema menus render absent
+    ///   members, so a removed key keeps its row): land on that row;
+    /// - otherwise jump like every other jump: the container row in its
+    ///   parent menu.
+    pub fn land_after_history(&mut self, path: &[PathSeg]) {
+        // a root change reports []: the root level itself is the changed
+        // "menu", so rule 1 below cannot apply — jump like every other jump
+        // (root variant editors eject, as they always have)
+        if path.is_empty() {
+            self.jump_to_path(path);
+            return;
+        }
+        if let Some(idx) = self.fs().stack.iter().position(|st| st.path == path) {
+            self.fs_mut().stack.truncate(idx + 1);
+            let rows = self.menu_rows();
+            self.clamp_cursor(&rows);
+            return;
+        }
+        let parent = path[..path.len() - 1].to_vec();
+        if let Some(idx) = self.fs().stack.iter().position(|st| st.path == parent) {
+            self.fs_mut().stack.truncate(idx + 1);
+            let rows = self.menu_rows();
+            if rows.iter().any(|r| r.path == path) {
+                self.clamp_cursor(&rows);
+                if let Some(st) = self.top_mut() {
+                    st.cursor = cursor_by_path(&rows, path);
+                    st.offset = 0;
+                }
+                return;
+            }
+        }
+        if self.doc().get(path).is_some() {
+            self.jump_to_row(path);
+        } else {
+            // a removal: menus that only list existing members have no row
+            // for the removed key, so the container row in its parent menu
+            // is the nearest landing
+            self.jump_to_row(&parent);
+        }
+    }
+
     // --- variant menus ------------------------------------------------------
 
     /// cachedMenu pins the merged union menu for a oneOf node.
@@ -1486,9 +1536,18 @@ impl App {
                     self.repair_stack();
                     if !res.paths.is_empty() {
                         let first = res.paths[0].clone();
-                        self.fs_mut().change_jump = Some(std::mem::take(&mut res.paths));
+                        // rotate the landed entry to the back: ctrl+j then
+                        // walks the rest in order even when the landing left
+                        // the cursor off any entry (rule 1 keeps an editor
+                        // open; removals park on the container row), and
+                        // ctrl+k re-lands it. replace-all/issues/search
+                        // rings arm unchanged and always land exactly.
+                        let mut ring = std::mem::take(&mut res.paths);
+                        ring.remove(0);
+                        ring.push(first.clone());
+                        self.fs_mut().change_jump = Some(ring);
                         self.nav_forward();
-                        self.jump_to_row(&first);
+                        self.land_after_history(&first);
                     }
                 }
                 true

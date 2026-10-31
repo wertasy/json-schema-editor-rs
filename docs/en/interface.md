@@ -105,7 +105,7 @@ The following keys take effect in normal menu lists; behavior differs while an i
 | `y` / `Y` | Copy `"key": value` / copy only the value; in array menus, both copy the element value. |
 | `x` / `X` | Cut the key-value pair / cut the value; in array menus, both cut the element value. |
 | `p` / `P` | Smart paste into the current menu / the container under the cursor; a single value under `P` replaces the row's value. |
-| `u` / `ctrl+r` | Undo / redo; the cursor automatically lands on the first location changed by that step (deletions have no corresponding entry row and land on their container), and the remaining changes can be cycled with `ctrl+j`/`ctrl+k` (see above). |
+| `u` / `ctrl+r` | Undo / redo; the cursor automatically lands on the first location changed by that step: when the undo happens inside the changed key's own submenu, that submenu stays open with the cursor on its row; a key whose value the step emptied or removed lands back on its own row whenever the containing menu still lists it (schema menus render unassigned members), keeping that menu open; when the menu no longer lists the row, the landing falls back to the container row. The remaining changes can be cycled with `ctrl+j`/`ctrl+k` (see above). |
 | `:` | Opens the command input at the bottom: built-in commands such as `w`/`wa`/`wq`/`waq`, and `!<command>` runs a shell escape; see the next section. |
 | `@` / `.` | Start/stop macro recording / replay the last macro. |
 

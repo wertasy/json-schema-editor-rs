@@ -136,7 +136,10 @@ impl App {
     /// jumpRing cycles dir (wrapping at both ends) around ring, seeding from
     /// the focused row's path: sitting on ring[i] continues at i±1, otherwise
     /// dir > 0 enters at the first entry and dir < 0 at the last. Each hop
-    /// rebuilds the stack down to the target row.
+    /// lands like an undo/redo change: removed keys keep their row when the
+    /// menu still lists it, else fall back to the container row. History
+    /// rings are armed rotated (landed entry last), so the first ctrl+j
+    /// walks the rest even when the landing left the cursor off any entry.
     fn jump_ring(&mut self, ring: &[Vec<PathSeg>], dir: i64, rows: &[Row]) {
         let cur = self
             .top()
@@ -149,7 +152,7 @@ impl App {
             None => ring.len() - 1,
         };
         self.nav_forward();
-        self.jump_to_row(&ring[next]);
+        self.land_after_history(&ring[next]);
     }
 
     /// revealHiddenEmpty turns the z filter off when path names an object
