@@ -16,7 +16,7 @@ Download the archive for your platform from [Releases](https://github.com/wertas
 The archive contains `jse` (`jse.exe` on Windows), `README.md`, `docs/`, `AGENTS.md`, `LICENSE`; `checksums.txt` provides SHA-256 checksums. Example:
 
 ```sh
-tar -xzf jse-v0.9.0-linux-amd64.tar.gz
+tar -xzf jse-v0.9.1-linux-amd64.tar.gz
 mkdir -p ~/.local/bin
 mv jse ~/.local/bin/
 jse --version
@@ -71,17 +71,17 @@ arm64 cross-compilation additionally needs `gcc-aarch64-linux-gnu`, with `linker
 `jse --version` prints something like:
 
 ```
-jse v0.9.0 (commit 1a2b3c4, built 2026-10-22T09:00:00Z)
+jse v0.9.1 (commit 1a2b3c4, built 2026-10-22T09:00:00Z)
 ```
 
 - The version number prefers the `JSE_VERSION_OVERRIDE` environment variable. Otherwise it is derived from git:
-  - The highest reachable semver tag is used, e.g. `v0.9.0`; with no reachable tag it is `v0.0.0`.
+  - The highest reachable semver tag is used, e.g. `v0.9.1`; with no reachable tag it is `v0.0.0`.
   - When HEAD is past a tag, that tag is kept: the commit and build time are shown separately, so no extra development version is constructed;
-  - Outside a git checkout: the crate version is used, e.g. `v0.9.0`.
+  - Outside a git checkout: the crate version is used, e.g. `v0.9.1`.
 - When the working tree has uncommitted changes (including untracked files; gitignored ones don't count), `+dirty` is appended to the version, e.g. `jse v0.3.1-0+dirty (...)`; when the version itself ends with `+incompatible`, `.dirty` is used instead.
 - The commit is taken from `JSE_COMMIT`, otherwise from the first 7 characters of the current git HEAD.
 - The build time is taken from `JSE_BUILD_DATE` (UTC, ISO 8601), otherwise from the time of this build.
-- When commit/build information is unavailable, the parenthesized part is omitted, e.g. after a local `cargo install` only `jse v0.9.0` is shown.
+- When commit/build information is unavailable, the parenthesized part is omitted, e.g. after a local `cargo install` only `jse v0.9.1` is shown.
 
 The release workflow injects these three variables before building, so version information is complete in Release packages; after the GitHub Release is created, the workflow also publishes the same version to crates.io.
 
