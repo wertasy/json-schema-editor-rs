@@ -3050,8 +3050,11 @@ fn pty_multi_file_quit_saves_all() {
     pty.send(b"\x1b"); // quit at the root: one confirm for both files
     let (_, off) = pty.wait_frame("multi-file save prompt", off, &["Save changes in 2 files?"]);
     pty.send(b"y");
-    let (all, _) = pty.wait_frame("saved exit", off, &["Saved to"]);
+    pty.wait_frame("saved exit", off, &["Saved to"]);
     pty.wait_exit(0);
+    // count only after the process is gone: the two save lines stream in
+    // separately and a mid-write snapshot can hold just the first one
+    let all = pty.snapshot();
     assert_eq!(
         all.matches("Saved to").count(),
         2,
