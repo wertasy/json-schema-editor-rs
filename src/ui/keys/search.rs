@@ -134,12 +134,15 @@ impl App {
     }
 
     /// jumpRing cycles dir (wrapping at both ends) around ring, seeding from
-    /// the focused row's path: sitting on ring[i] continues at i±1, otherwise
-    /// dir > 0 enters at the first entry and dir < 0 at the last. Each hop
-    /// lands like an undo/redo change: removed keys keep their row when the
-    /// menu still lists it, else fall back to the container row. History
-    /// rings are armed rotated (landed entry last), so the first ctrl+j
-    /// walks the rest even when the landing left the cursor off any entry.
+    /// the focused row's path: sitting on ring[i] continues at i±1. Off the
+    /// ring, entries are picked by row order so next/previous stay spatially
+    /// correct: dir > 0 takes the first ring row below the cursor (wrapping
+    /// to the topmost), dir < 0 the last ring row above it (wrapping to the
+    /// bottommost). Each hop lands like an undo/redo change: removed keys
+    /// keep their row when the menu still lists it, else fall back to the
+    /// container row. History rings are armed rotated (landed entry last),
+    /// so the first ctrl+j walks the rest even when the landing left the
+    /// cursor off any entry.
     fn jump_ring(&mut self, ring: &[Vec<PathSeg>], dir: i64, rows: &[Row]) {
         let cur = self
             .top()
@@ -148,11 +151,49 @@ impl App {
         let n = ring.len() as i64;
         let next = match cur.and_then(|p| ring.iter().position(|r| *r == p)) {
             Some(i) => (i as i64 + dir).rem_euclid(n) as usize,
-            None if dir > 0 => 0,
-            None => ring.len() - 1,
+            None => {
+                // Off the ring: rank entries against the visible rows. An
+                // entry the menu does not list (another nesting level, a
+                // removed key) ranks right after its longest listed
+                // ancestor row; entries with no listed ancestor keep the
+                // old top/bottom entry points.
+                let cursor = self.top().map(|st| st.cursor).unwrap_or(0);
+                let ranked: Vec<Option<(usize, usize)>> =
+                    ring.iter().map(|p| Self::ring_row_pos(rows, p)).collect();
+                let pick = if dir > 0 {
+                    // past the last ring row below the cursor, wrap to the
+                    // ring's first entry
+                    ranked
+                        .iter()
+                        .position(|r| matches!(r, Some(p) if *p > (cursor, 0)))
+                        .or_else(|| ranked.iter().position(|r| r.is_some()))
+                } else {
+                    // before the first ring row above the cursor, wrap to
+                    // the ring's last entry
+                    ranked
+                        .iter()
+                        .rposition(|r| matches!(r, Some(p) if *p < (cursor, 0)))
+                        .or_else(|| ranked.iter().rposition(|r| r.is_some()))
+                };
+                pick.unwrap_or(if dir > 0 { 0 } else { ring.len() - 1 })
+            }
         };
         self.nav_forward();
         self.land_after_history(&ring[next]);
+    }
+
+    /// ringRowPos ranks a ring entry against the current menu's rows: the
+    /// index of the entry's own row when listed, else of its longest listed
+    /// ancestor. The companion depth orders an entry living under a row
+    /// against the row itself (a changed child sorts after its container
+    /// drill row). None when no prefix row is listed either.
+    fn ring_row_pos(rows: &[Row], path: &[PathSeg]) -> Option<(usize, usize)> {
+        for n in (1..=path.len()).rev() {
+            if let Some(i) = rows.iter().position(|r| r.path.as_slice() == &path[..n]) {
+                return Some((i, path.len() - n));
+            }
+        }
+        None
     }
 
     /// revealHiddenEmpty turns the z filter off when path names an object

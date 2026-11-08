@@ -3345,6 +3345,101 @@ fn ctrl_j_without_changes_reports_and_stays() {
 }
 
 #[test]
+fn ctrl_j_parked_between_changes_follows_row_order() {
+    // changed: beta, delta; the cursor parks on the unchanged gamma between
+    // them. next must be delta (below), previous beta (above) — not the
+    // ring's top/bottom entry points
+    let doc = dbuild(|db| {
+        db.obj(vec![
+            ("alpha", db.s("0")),
+            ("beta", db.s("1")),
+            ("gamma", db.s("2")),
+            ("delta", db.s("3")),
+        ])
+    });
+    let mut m = app_with(crate::smodel::untyped(&doc), doc, test_opts());
+    for (key, val) in [("beta", "B2"), ("delta", "D2")] {
+        set_cursor_path(&mut m, &sp(&[key]));
+        press(&mut m, &["enter"]);
+        if let Some(Overlay::Edit(e)) = &mut m.overlay {
+            e.ti.set_value(val);
+        }
+        press(&mut m, &["enter"]);
+    }
+    set_cursor_path(&mut m, &sp(&["gamma"]));
+    press(&mut m, &["ctrl+j"]);
+    assert_eq!(
+        row_at(&mut m).path,
+        sp(&["delta"]),
+        "next change sits below the cursor"
+    );
+    press(&mut m, &["ctrl+k"]);
+    assert_eq!(
+        row_at(&mut m).path,
+        sp(&["beta"]),
+        "previous from delta walks back past gamma"
+    );
+
+    // from the top row nothing changed sits above: wrap to the bottommost
+    set_cursor_path(&mut m, &sp(&["alpha"]));
+    press(&mut m, &["ctrl+k"]);
+    assert_eq!(row_at(&mut m).path, sp(&["delta"]));
+    press(&mut m, &["ctrl+j"]);
+    assert_eq!(
+        row_at(&mut m).path,
+        sp(&["beta"]),
+        "no change below delta wraps to the topmost"
+    );
+}
+
+#[test]
+fn ctrl_j_orders_nested_changes_against_ancestor_rows() {
+    // changed: server.host, db.url. At the root the changed rows are not
+    // listed, but each ranks right after its drill row, so ctrl+j/k still
+    // order them around the cursor
+    let doc = dbuild(|db| {
+        db.obj(vec![
+            ("name", db.s("x")),
+            ("server", db.obj(vec![("host", db.s("h"))])),
+            ("db", db.obj(vec![("url", db.s("u"))])),
+        ])
+    });
+    let mut m = app_with(crate::smodel::untyped(&doc), doc, test_opts());
+    for (key, leaf, val) in [("server", "host", "H2"), ("db", "url", "U2")] {
+        set_cursor_path(&mut m, &sp(&[key]));
+        press(&mut m, &["enter"]);
+        set_cursor_path(&mut m, &sp(&[key, leaf]));
+        press(&mut m, &["enter"]);
+        if let Some(Overlay::Edit(e)) = &mut m.overlay {
+            e.ti.set_value(val);
+        }
+        press(&mut m, &["enter"]);
+        press(&mut m, &["esc"]);
+    }
+    set_cursor_path(&mut m, &sp(&["db"]));
+    press(&mut m, &["ctrl+j"]);
+    assert_eq!(
+        row_at(&mut m).path,
+        sp(&["db", "url"]),
+        "the drill row's changed child is next"
+    );
+    press(&mut m, &["ctrl+k"]);
+    assert_eq!(
+        row_at(&mut m).path,
+        sp(&["server", "host"]),
+        "previous from db.url is the earlier nested change"
+    );
+    press(&mut m, &["esc"]); // back to the root menu
+    set_cursor_path(&mut m, &sp(&["db"]));
+    press(&mut m, &["ctrl+k"]);
+    assert_eq!(
+        row_at(&mut m).path,
+        sp(&["server", "host"]),
+        "last change above the db drill row"
+    );
+}
+
+#[test]
 fn undo_of_an_addition_lands_on_the_surviving_container() {
     let doc = dbuild(|db| {
         db.obj(vec![
@@ -3403,7 +3498,7 @@ fn undo_without_diffs_does_not_arm_the_ring() {
 }
 
 #[test]
-fn ctrl_k_enters_the_ring_at_the_last_entry_from_outside() {
+fn ctrl_k_orders_ring_entries_around_a_drill_row() {
     let doc = dbuild(|db| {
         db.obj(vec![
             ("name", db.s("alpha")),
@@ -3417,19 +3512,20 @@ fn ctrl_k_enters_the_ring_at_the_last_entry_from_outside() {
             "r", "a", "l", "p", "h", "a", "tab", "b", "e", "t", "a", "ctrl+r",
         ],
     );
-    // ring = [name, server.host], cursor on name
+    // ring = [name, server.host], cursor on name; both changed rows are not
+    // listed at the root, but server.host ranks right after its drill row
     set_cursor_path(&mut m, &sp(&["server"])); // a row outside the ring
     press(&mut m, &["ctrl+k"]);
     assert_eq!(
         row_at(&mut m).path,
-        sp(&["server", "host"]),
-        "ctrl+k from outside the ring enters at the last entry"
+        sp(&["name"]),
+        "ctrl+k from the drill row takes the change above it"
     );
     press(&mut m, &["ctrl+j"]);
     assert_eq!(
         row_at(&mut m).path,
-        sp(&["name"]),
-        "then wraps to the first"
+        sp(&["server", "host"]),
+        "ctrl+j walks back to the change below the drill row"
     );
 }
 
