@@ -1988,6 +1988,48 @@ fn numeric_quick_keys_step_seed_and_preserve_precision() {
 }
 
 #[test]
+fn numeric_quick_keys_seed_from_the_schema_default() {
+    let schema = schema_from_json(
+        r#"{"type":"object","properties":{
+          "port":{"type":"integer","default":8080},
+          "ratio":{"type":"number","default":0.5},
+          "neg":{"type":"number","default":-3},
+          "host":{"type":"string","default":"h"}
+        }}"#,
+    );
+    let doc = dbuild(|db| db.obj(vec![]));
+    let mut m = app_with(schema, doc, test_opts());
+    m.width = 80;
+    m.height = 24;
+
+    set_cursor_path(&mut m, &sp(&["port"]));
+    press(&mut m, &["-"]);
+    assert_eq!(num_at(&m.fs().doc, &["port"]), "8079");
+    press(&mut m, &["d"]);
+    set_cursor_path(&mut m, &sp(&["port"]));
+    press(&mut m, &["="]);
+    assert_eq!(num_at(&m.fs().doc, &["port"]), "8081");
+
+    // fractional and negative defaults keep their spelling
+    set_cursor_path(&mut m, &sp(&["ratio"]));
+    press(&mut m, &["="]);
+    assert_eq!(num_at(&m.fs().doc, &["ratio"]), "1.5");
+    set_cursor_path(&mut m, &sp(&["neg"]));
+    press(&mut m, &["-"]);
+    assert_eq!(num_at(&m.fs().doc, &["neg"]), "-4");
+    press(&mut m, &["+"]);
+    assert_eq!(num_at(&m.fs().doc, &["neg"]), "-3");
+
+    // a non-numeric default does not make its key numeric
+    set_cursor_path(&mut m, &sp(&["host"]));
+    press(&mut m, &["-", "=", "+"]);
+    assert!(
+        m.fs().doc.get(&sp(&["host"])).is_none(),
+        "host stays absent"
+    );
+}
+
+#[test]
 fn numeric_quick_keys_work_on_array_items() {
     let schema = schema_from_json(
         r#"{"type":"object","properties":{

@@ -4,9 +4,10 @@ impl App {
     // --- field editing -----------------------------------------------------
 
     /// adjustNumber implements - / = / + on a numeric field: bump the current
-    /// number by delta, or write delta ("-1"/"1") when a schema-typed field
-    /// has no value. Numbers the schema does not define (unknown keys,
-    /// schema-less documents, raw fields) work by their runtime value.
+    /// number by delta, or seed a schema-typed field that has no value from
+    /// its schema default (default+delta; ±1 without a numeric default).
+    /// Numbers the schema does not define (unknown keys, schema-less
+    /// documents, raw fields) work by their runtime value.
     pub(super) fn adjust_number(&mut self, r: &Row, delta: i64) {
         // Field: a scalar row. Drill: an array item/schema-less value whose
         // schema node is a container or oneOf but whose runtime value is a
@@ -26,11 +27,22 @@ impl App {
             },
             // Only a schema-typed numeric field can seed a missing value: for
             // a runtime-typed key there is nothing that says it is a number.
-            None | Some(Value::Null) if typed_numeric => delta.to_string(),
+            None | Some(Value::Null) if typed_numeric => self.default_seed(r.fn_, delta),
             _ => return,
         };
         let n = self.fs_mut().doc.new_num(literal);
         let _ = self.fs_mut().doc.set(&path, n);
+    }
+
+    /// default_seed is the starting literal for a missing value: the schema
+    /// default bumped by delta when that default is a number, else ±delta.
+    fn default_seed(&self, f: Option<FormNodeId>, delta: i64) -> String {
+        f.and_then(|f| self.fs().schema.nodes[f as usize].default_)
+            .and_then(|d| match self.fs().schema.doc.value(d) {
+                Value::Num(lit) => bump_number_literal(lit, delta),
+                _ => None,
+            })
+            .unwrap_or_else(|| delta.to_string())
     }
 
     /// editValueExternalRow opens $EDITOR on the value under the cursor.

@@ -780,7 +780,8 @@ fn pty_numeric_quick_keys_step_and_seed() {
         &schema,
         r#"{"type":"object","properties":{
           "count":{"type":"integer"},
-          "missing":{"type":"number"}
+          "missing":{"type":"number"},
+          "port":{"type":"integer","default":8080}
         }}"#,
     );
     write_file(&cfg, "{\"count\":5}\n");
@@ -800,6 +801,9 @@ fn pty_numeric_quick_keys_step_and_seed() {
     // the missing schema field is seeded with -1
     pty.send(b"j");
     pty.send(b"-");
+    // port has no value but a numeric default: + seeds 8080+1
+    pty.send(b"j");
+    pty.send(b"+");
     pty.send(b"w");
     pty.wait_frame("numeric changes saved", 0, &["Write to "]);
     pty.send(b"\x03");
@@ -808,6 +812,7 @@ fn pty_numeric_quick_keys_step_and_seed() {
     let text = read_text(&cfg);
     assert!(text.contains("\"count\": 6"), "{text}");
     assert!(text.contains("\"missing\": -1"), "{text}");
+    assert!(text.contains("\"port\": 8081"), "{text}");
 }
 
 #[test]

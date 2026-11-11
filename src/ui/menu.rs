@@ -187,7 +187,7 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
     },
     HelpEntry {
         keys: "- / = / +",
-        desc: "number: subtract / add 1 (missing schema-typed values seed -1/1; schema-less/array-item numbers use their runtime value)",
+        desc: "number: subtract / add 1 (missing schema-typed values seed from their numeric schema default, else -1/1; schema-less/array-item numbers use their runtime value)",
     },
     HelpEntry {
         keys: "[N] gg / G",
