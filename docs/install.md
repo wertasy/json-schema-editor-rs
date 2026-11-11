@@ -13,7 +13,7 @@
 | Windows amd64 | `x86_64-pc-windows-msvc` |
 | Windows arm64 | `aarch64-pc-windows-msvc` |
 
-压缩包内含 `jse`（Windows 为 `jse.exe`）、`README.md`、`docs/`、`AGENTS.md`、`LICENSE`；`checksums.txt` 提供 SHA-256 校验和。示例：
+压缩包内只含可执行文件 `jse`（Windows 为 `jse.exe`）；`checksums.txt` 提供 SHA-256 校验和，README 与文档见仓库。示例：
 
 ```sh
 tar -xzf jse-v0.9.2-linux-amd64.tar.gz

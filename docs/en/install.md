@@ -13,7 +13,7 @@ Download the archive for your platform from [Releases](https://github.com/wertas
 | Windows amd64 | `x86_64-pc-windows-msvc` |
 | Windows arm64 | `aarch64-pc-windows-msvc` |
 
-The archive contains `jse` (`jse.exe` on Windows), `README.md`, `docs/`, `AGENTS.md`, `LICENSE`; `checksums.txt` provides SHA-256 checksums. Example:
+The archive contains only the executable `jse` (`jse.exe` on Windows); `checksums.txt` provides SHA-256 checksums, and the README and docs live in the repository. Example:
 
 ```sh
 tar -xzf jse-v0.9.2-linux-amd64.tar.gz
