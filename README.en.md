@@ -71,6 +71,8 @@ The schema given via `-s` is written back into the config according to the file 
 | Key | Action |
 |---|---|
 | `↑`/`↓` or `j`/`k` | Move the cursor (wraps at both ends) |
+| Mouse left / right button | Click a row = move the cursor and press `enter`; right click = `esc` back |
+| Wheel (while editing a number) | Increment / decrement the number in the input |
 | `ctrl+f`/`PgDn`, `ctrl+b`/`PgUp` | Page down/up (list, overlays, and comment/help pages) |
 | `enter` / `→` / `l` | Edit a field or enter a submenu |
 | `←` / `h` / `esc` / `q` | Go back one level; on the root screen `esc`/`q` exits and asks to save |

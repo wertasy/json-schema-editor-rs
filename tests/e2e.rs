@@ -3176,6 +3176,158 @@ fn pty_internal_raw_textarea_is_windowed() {
     pty.wait_exit(130);
 }
 
+/// Mouse support: left click moves the cursor to the clicked row and opens
+/// its edit (move + enter), right click backs out like esc, and the wheel
+/// bumps a number while its in-place edit is open.
+#[test]
+fn pty_mouse_click_back_and_number_wheel() {
+    let dir = mktemp();
+    let cfg = dir.path().join("mouse.json");
+    write_file(&cfg, r#"{"alpha": 1, "beta": 2, "gamma": 3}"#);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(
+        &[cfg_arg.as_str()],
+        &[("JSE_CATALOG_URL", "http://127.0.0.1:1/catalog.json")],
+        &cache,
+    ) else {
+        return;
+    };
+    let (_, off) = pty.wait_frame("schema-less root", 0, &["alpha", "gamma", "↑/↓ move"]);
+    pty.pause(std::time::Duration::from_millis(300));
+
+    // Left click the third visible row (screen line 4, 1-based y=5): the
+    // cursor moves there and Enter opens the inline edit for gamma.
+    pty.send(b"\x1b[<0;10;5M\x1b[<0;10;5m");
+    pty.pause(std::time::Duration::from_millis(200));
+    pty.send(b"\x1b[<2;10;5M\x1b[<2;10;5m"); // right click closes the edit
+    pty.pause(std::time::Duration::from_millis(200));
+    pty.send(b"\x1b[<0;10;5M\x1b[<0;10;5m"); // reopen it on the same row
+    pty.pause(std::time::Duration::from_millis(200));
+    pty.send(b"\x1b[<64;10;5M"); // wheel up: 3 -> 4
+    pty.pause(std::time::Duration::from_millis(200));
+    pty.send(b"\r"); // commit
+    pty.wait_frame("committed 4", off, &["4"]);
+    pty.send(b"\x13"); // ctrl+s
+    pty.pause(std::time::Duration::from_millis(300));
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+    assert_eq!(read_json(&cfg)["gamma"], json!(4));
+    assert_eq!(read_json(&cfg)["beta"], json!(2));
+}
+
+/// Mouse on overlays: clicking a dropdown candidate applies that enum
+/// option; clicking a validation-error row jumps to its field.
+#[test]
+fn pty_mouse_enum_dropdown_and_err_list_click() {
+    let dir = mktemp();
+    let schema = dir.path().join("mouse2.schema.json");
+    let cfg = dir.path().join("mouse2.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{"color":{"enum":["red","green","blue"]}}}"#,
+    );
+    write_file(&cfg, r#"{"color": "red"}"#);
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+        return;
+    };
+    let (_, off) = pty.wait_frame("root", 0, &["color", "red", "↑/↓ move"]);
+    pty.pause(Duration::from_millis(200));
+
+    // Enter opens the inline edit with the enum dropdown right below the
+    // edited row (screen lines 3..5). Click the middle option (line 4,
+    // 1-based y=5): "green" is applied.
+    pty.send(b"\r");
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\x1b[<0;10;5M\x1b[<0;10;5m");
+    pty.wait_frame("green applied", off, &["green"]);
+    pty.send(b"\x13"); // ctrl+s
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+    assert_eq!(read_json(&cfg)["color"], json!("green"));
+}
+
+/// The enum-array (multi-select) menu: clicking an option row toggles it
+/// into/out of the array (click = move + enter = toggle).
+#[test]
+fn pty_mouse_enum_array_option_click_toggles() {
+    let dir = mktemp();
+    let schema = dir.path().join("mouse4.schema.json");
+    let cfg = dir.path().join("mouse4.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{"tags":{"type":"array","items":{"enum":["alpha","beta","gamma"]}}}}"#,
+    );
+    write_file(&cfg, r#"{"tags": ["alpha"]}"#);
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+        return;
+    };
+    let (_, off) = pty.wait_frame("root", 0, &["tags", "↑/↓ move"]);
+    pty.pause(Duration::from_millis(200));
+
+    pty.send(b"\r"); // drill into the tags menu
+    let (_, off) = pty.wait_frame("options", off, &["alpha", "beta", "gamma"]);
+    pty.pause(Duration::from_millis(200));
+    // options sit at screen lines 2..4; click "beta" (1-based y=4)
+    pty.send(b"\x1b[<0;10;4M\x1b[<0;10;4m");
+    pty.wait_frame("beta toggled on", off, &["[x] beta"]);
+    pty.send(b"\x13"); // ctrl+s
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+    assert_eq!(read_json(&cfg)["tags"], json!(["alpha", "beta"]));
+}
+
+/// Clicking a validation-error row jumps to the offending field's menu.
+#[test]
+fn pty_mouse_err_list_row_click_jumps() {
+    let dir = mktemp();
+    let schema = dir.path().join("mouse3.schema.json");
+    let cfg = dir.path().join("mouse3.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{"srv":{"type":"object","properties":{"port":{"type":"integer"}},"required":["port"]}}}"#,
+    );
+    write_file(&cfg, r#"{"srv": {"port": "x"}}"#);
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+        return;
+    };
+    let (_, off) = pty.wait_frame("root", 0, &["srv", "↑/↓ move"]);
+    pty.pause(Duration::from_millis(200));
+
+    // ctrl+s fails with one error listed at screen line 1; click it
+    // (1-based y=2): the editor enters srv with the cursor on port.
+    pty.send(b"\x13");
+    pty.wait_frame("error list", off, &["Cannot save", "port"]);
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\x1b[<0;10;2M\x1b[<0;10;2m");
+    std::thread::sleep(Duration::from_millis(300));
+    let snap = pty.snapshot();
+    let before = snap
+        .rfind("Cannot save")
+        .map(|i| i + "Cannot save".len())
+        .unwrap_or(0);
+    let fresh = &snap[before..];
+    assert!(
+        fresh.contains("> port"),
+        "cursor must sit on port after the click:\n{fresh}"
+    );
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+    // nothing was saved
+    assert_eq!(read_json(&cfg)["srv"]["port"], json!("x"));
+}
+
 #[test]
 fn pty_external_disk_change_prompts_and_reloads() {
     let dir = mktemp();

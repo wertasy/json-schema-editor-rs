@@ -433,7 +433,7 @@ fn is_null_val(doc: &Doc, v: NodeId) -> bool {
 /// bump_number_literal adds delta to a numeric literal. Integer spellings
 /// stay exact (i128, no f64 round trip); fractional/exponent forms fall back
 /// to the shortest JSON float form.
-fn bump_number_literal(lit: &str, delta: i64) -> Option<String> {
+pub(crate) fn bump_number_literal(lit: &str, delta: i64) -> Option<String> {
     if !lit.contains(['.', 'e', 'E']) {
         // Integer spellings stay exact; an integer outside i128 is left
         // untouched rather than rounded through f64.

@@ -1,4 +1,5 @@
 use super::*;
+use crate::ui::menu::MouseTarget;
 
 /// ListFrame is the fixed chrome of the main list screen: the menu viewport
 /// height and every line pinned above the help bar. `list_view` and the
@@ -25,7 +26,15 @@ struct EditSugs {
     left: usize,
     /// Some(first covered row) when the window is above the edited row.
     above_start: Option<usize>,
+    /// absolute index of the first candidate in `lines` (mouse click targets)
+    first: usize,
     lines: Vec<String>,
+}
+
+/// mark_target records one rendered list line as a mouse click target.
+fn mark_target(b: &str, hits: &mut Vec<(usize, usize, MouseTarget)>, t: MouseTarget) {
+    let start = b.matches('\n').count();
+    hits.push((start, 1, t));
 }
 
 impl App {
@@ -33,9 +42,12 @@ impl App {
 
     /// View renders the active surface (Go View).
     pub fn view(&mut self) -> String {
+        // The click-target map belongs to one frame; a surface that records
+        // nothing leaves it empty and mouse clicks do nothing.
+        self.mouse_targets.clear();
         // The search overlay renders inline and needs &mut self (its
-        // breadcrumb may synthesize menu rows), so it is taken out before the
-        // read-only dispatch below.
+        // breadcrumb may synthesize menu rows), so it is taken out before
+        // the dispatch below.
         if matches!(&self.overlay, Some(Overlay::Search(_))) {
             if let Some(Overlay::Search(s)) = self.overlay.take() {
                 let out = self.list_view_search(&s);
@@ -43,18 +55,29 @@ impl App {
                 return out;
             }
         }
-        match &self.overlay {
-            Some(Overlay::Confirm(c)) => return self.confirm_view(c),
-            Some(Overlay::Issues(s)) => return self.issues_view(s),
-            Some(Overlay::Errs(s)) => return self.errs_view(s),
-            Some(Overlay::RefPick(s)) => return self.ref_pick_view(s),
-            Some(Overlay::Text(s)) => return self.text_view(s),
-            Some(Overlay::CommentEdit(s)) => return self.comment_edit_view(s),
-            Some(Overlay::Comment(s)) => return self.comment_view(s),
-            Some(Overlay::ShellOut(s)) => return self.shell_out_view(s),
-            Some(Overlay::Help(s)) => return self.help_view(s.scroll),
-            Some(Overlay::FilePick(s)) => return self.file_pick_view(s),
-            _ => {}
+        // Read-only overlays render against &self; the list overlays collect
+        // their click targets into the frame-local map.
+        let mut hits = Vec::new();
+        enum Rendered {
+            Done(String),
+            List,
+        }
+        let rendered = match &self.overlay {
+            Some(Overlay::Confirm(c)) => Rendered::Done(self.confirm_view(c)),
+            Some(Overlay::Issues(s)) => Rendered::Done(self.issues_view(s, &mut hits)),
+            Some(Overlay::Errs(s)) => Rendered::Done(self.errs_view(s, &mut hits)),
+            Some(Overlay::RefPick(s)) => Rendered::Done(self.ref_pick_view(s, &mut hits)),
+            Some(Overlay::Text(s)) => Rendered::Done(self.text_view(s)),
+            Some(Overlay::CommentEdit(s)) => Rendered::Done(self.comment_edit_view(s)),
+            Some(Overlay::Comment(s)) => Rendered::Done(self.comment_view(s)),
+            Some(Overlay::ShellOut(s)) => Rendered::Done(self.shell_out_view(s)),
+            Some(Overlay::Help(s)) => Rendered::Done(self.help_view(s.scroll)),
+            Some(Overlay::FilePick(s)) => Rendered::Done(self.file_pick_view(s, &mut hits)),
+            _ => Rendered::List,
+        };
+        self.mouse_targets.extend(hits);
+        if let Rendered::Done(out) = rendered {
+            return out;
         }
         self.list_view()
     }
@@ -726,9 +749,14 @@ impl App {
                 b.push('\n');
             }
         }
-        if let Some(Overlay::Search(s)) = &self.overlay {
-            return self.render_search_body(b, self.list_header_rows(&st), s);
+        let taken_overlay = self.overlay.take();
+        if let Some(Overlay::Search(s)) = taken_overlay {
+            let header = self.list_header_rows(&st);
+            let out = self.render_search_body(b, header, &s);
+            self.overlay = Some(Overlay::Search(s));
+            return out;
         }
+        self.overlay = taken_overlay;
         // Inline picker searches sit above their list, like every other
         // search prompt.
         if matches!(st.kind, MenuKind::OneOf | MenuKind::EnumArray) && st.filter.active {
@@ -847,7 +875,7 @@ impl App {
     }
 
     pub(super) fn render_search_body(
-        &self,
+        &mut self,
         mut b: String,
         header: usize,
         s: &SearchState,
@@ -922,7 +950,7 @@ impl App {
     }
 
     /// writeSearchRows renders the visible slice of search results.
-    pub(super) fn write_search_rows(&self, b: &mut String, s: &SearchState, height: usize) {
+    pub(super) fn write_search_rows(&mut self, b: &mut String, s: &SearchState, height: usize) {
         let height = height.max(1);
         let mut cursor = s.cursor;
         if cursor >= s.results.len() {
@@ -938,6 +966,8 @@ impl App {
             if i == cursor {
                 line = style::sel(&line);
             }
+            self.mouse_targets
+                .push((b.matches('\n').count(), 1, MouseTarget::OverlayRow(i)));
             self.write_cut(b, &line);
         }
     }
@@ -1016,16 +1046,18 @@ impl App {
         if lines.is_empty() {
             return None;
         }
+        let (first, ..) = Self::suggestion_slice(&e.sugs, e.sug_idx, capacity);
         Some(EditSugs {
             cursor_idx: cursor,
             left,
             above_start: use_above.then(|| cursor - lines.len()),
+            first,
             lines,
         })
     }
 
     pub(super) fn write_rows(
-        &self,
+        &mut self,
         b: &mut String,
         st: &MenuState,
         rows: &[Row],
@@ -1059,12 +1091,22 @@ impl App {
                 let k = i - start;
                 let prefix =
                     Self::overlay_prefix(&self.row_line(&rows[i], false, title_width), p.left);
+                self.mouse_targets.push((
+                    b.matches('\n').count(),
+                    1,
+                    MouseTarget::EditSug(p.first + k),
+                ));
                 self.write_cut(b, &format!("{prefix}{}", p.lines[k]));
                 i += 1;
                 continue;
             }
             let row = &rows[i];
             let line = self.row_line(row, i == cursor, title_width);
+            // mouse support: record the screen lines this row occupies
+            // (wrapped rows span more than one line)
+            let start = b.matches('\n').count();
+            let n = line.matches('\n').count() + 1;
+            self.mouse_targets.push((start, n, MouseTarget::MenuRow(i)));
             self.write_cut(b, &line);
             let is_cursor = i == cursor;
             let extra_lines = line.matches('\n').count();
@@ -1075,9 +1117,13 @@ impl App {
             let slots_below =
                 height.saturating_sub(cursor.saturating_sub(offset) + 1 + extra_lines);
             // The & / * input and its candidates overlay the rows below the
-            // cursor instead of inserting new lines.
-            if let Some(Overlay::Anc(s)) = &self.overlay {
-                let lines = self.anchor_input_lines(s);
+            // cursor instead of inserting new lines. The state is taken out
+            // so the candidate lines can be recorded as click targets.
+            if matches!(&self.overlay, Some(Overlay::Anc(_))) {
+                let Some(Overlay::Anc(s)) = self.overlay.take() else {
+                    unreachable!("checked above");
+                };
+                let lines = self.anchor_input_lines(&s);
                 let input_lines = lines.matches('\n').count() + 1;
                 self.write_cut(b, &lines);
                 i += input_lines.min(end.saturating_sub(i));
@@ -1107,6 +1153,7 @@ impl App {
                 } else {
                     Vec::new()
                 };
+                let (sug_start, ..) = Self::suggestion_slice(&s.sugs, s.sug, max);
                 let base = i;
                 for (k, rect) in sugs.iter().enumerate() {
                     let prefix = if base + k < end {
@@ -1117,9 +1164,15 @@ impl App {
                     } else {
                         " ".repeat(left)
                     };
+                    self.mouse_targets.push((
+                        b.matches('\n').count(),
+                        1,
+                        MouseTarget::AncSug(sug_start + k),
+                    ));
                     self.write_cut(b, &format!("{prefix}{rect}"));
                 }
                 i += sugs.len().min(end.saturating_sub(i));
+                self.overlay = Some(Overlay::Anc(s));
             }
             // Inline scalar edit: the candidate overlay covers the rows
             // below the edited row (and any free row slots), so the menu
@@ -1139,6 +1192,11 @@ impl App {
                     } else {
                         " ".repeat(p.left)
                     };
+                    self.mouse_targets.push((
+                        b.matches('\n').count(),
+                        1,
+                        MouseTarget::EditSug(p.first + k),
+                    ));
                     self.write_cut(b, &format!("{prefix}{rect}"));
                 }
                 i += p.lines.len().min(end.saturating_sub(i));
@@ -2002,7 +2060,11 @@ impl App {
         )
     }
 
-    pub(super) fn issues_view(&self, s: &IssuesState) -> String {
+    pub(super) fn issues_view(
+        &self,
+        s: &IssuesState,
+        hits: &mut Vec<(usize, usize, MouseTarget)>,
+    ) -> String {
         let mut b = String::new();
         b.push_str(&clip_display(
             &style::bold(&format!(
@@ -2039,6 +2101,7 @@ impl App {
             if off + i == cursor {
                 line = style::sel(&format!("> {}", it.msg));
             }
+            mark_target(&b, hits, MouseTarget::OverlayRow(off + i));
             b.push_str(&clip_display(&line, self.width.saturating_sub(1)));
             b.push('\n');
         }
@@ -2058,7 +2121,11 @@ impl App {
         self.finish_with_hint(b, self.rec_hint(hint))
     }
 
-    pub(super) fn ref_pick_view(&self, s: &RefPickState) -> String {
+    pub(super) fn ref_pick_view(
+        &self,
+        s: &RefPickState,
+        hits: &mut Vec<(usize, usize, MouseTarget)>,
+    ) -> String {
         let mut b = String::new();
         b.push_str(&clip_display(
             &style::bold(&format!("References to &{} ({})", s.name, s.paths.len())),
@@ -2086,6 +2153,7 @@ impl App {
             } else {
                 format!("  {label}")
             };
+            mark_target(&b, hits, MouseTarget::OverlayRow(off + i));
             b.push_str(&clip_display(&line, self.width.saturating_sub(1)));
             b.push('\n');
         }
@@ -2101,7 +2169,11 @@ impl App {
         self.finish_with_hint(b, self.rec_hint(hint))
     }
 
-    pub(super) fn errs_view(&self, s: &ErrsState) -> String {
+    pub(super) fn errs_view(
+        &self,
+        s: &ErrsState,
+        hits: &mut Vec<(usize, usize, MouseTarget)>,
+    ) -> String {
         let mut b = String::new();
         b.push_str(&clip_display(
             &style::bold(&format!("{} Cannot save: validation errors", ERR)),
@@ -2128,6 +2200,7 @@ impl App {
             } else {
                 format!("  {}", s.lines[idx])
             };
+            mark_target(&b, hits, MouseTarget::OverlayRow(off + i));
             b.push_str(&clip_display(&line, self.width.saturating_sub(1)));
             b.push('\n');
         }
@@ -2235,7 +2308,11 @@ impl App {
         self.finish_with_hint(b, style::help("ctrl+s apply · esc cancel"))
     }
 
-    pub(super) fn file_pick_view(&self, pick: &FilePickState) -> String {
+    pub(super) fn file_pick_view(
+        &self,
+        pick: &FilePickState,
+        hits: &mut Vec<(usize, usize, MouseTarget)>,
+    ) -> String {
         let mut b = String::new();
         b.push_str(&clip_display(
             &style::bold(&format!("Files ({})", self.files.len())),
@@ -2281,6 +2358,7 @@ impl App {
             } else {
                 line
             };
+            mark_target(&b, hits, MouseTarget::OverlayRow(off + i));
             b.push_str(&line);
             b.push('\n');
         }

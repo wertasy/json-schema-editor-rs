@@ -8,7 +8,9 @@
 //! `files[cur]`. View rendering keeps Go's string-builder approach: a tiny
 //! `style` layer emits the same ANSI SGR sequences lipgloss produced.
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
 use crossterm::execute;
 use regex::Regex;
 
@@ -862,6 +864,23 @@ pub struct App {
     /// paste when no system clipboard tool exists or reading it fails (a
     /// jse extension, no Go counterpart)
     pub builtin_clipboard: Option<String>,
+    /// screen line → click target for the last rendered frame (mouse
+    /// support): (first line, line count, target), rebuilt per repaint
+    pub mouse_targets: Vec<(usize, usize, MouseTarget)>,
+}
+
+/// What a click on a rendered screen line hits.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MouseTarget {
+    /// row index in the main menu list
+    MenuRow(usize),
+    /// candidate index of the inline scalar edit's dropdown
+    EditSug(usize),
+    /// candidate index of the anchor/reference input's dropdown
+    AncSug(usize),
+    /// cursor index of the open overlay's list (issues, errors, refs,
+    /// files, search results)
+    OverlayRow(usize),
 }
 
 impl App {
@@ -897,6 +916,7 @@ impl App {
             pending_edit: None,
             cmd_history,
             builtin_clipboard: None,
+            mouse_targets: Vec::new(),
         }
     }
 
@@ -1380,6 +1400,164 @@ impl App {
     }
 
     // --- the key pipeline ---------------------------------------------------
+
+    // --- mouse support ------------------------------------------------------
+
+    /// scroll_to clamps a scroll offset moved by one wheel tick (+1 = up).
+    fn scroll_to(cur: usize, delta: i64, max: usize) -> usize {
+        (cur as i64 - delta).clamp(0, max as i64) as usize
+    }
+
+    /// mouse_target_at maps a screen line (0-based, terminal coordinates) to
+    /// what was rendered there in the last frame, if anything.
+    pub fn mouse_target_at(&self, line: usize) -> Option<MouseTarget> {
+        self.mouse_targets
+            .iter()
+            .find(|(start, n, _)| line >= *start && line < start + n)
+            .map(|(.., t)| *t)
+    }
+
+    /// mouse_click is the left button: on a menu row it moves the cursor
+    /// there and presses Enter; on a dropdown candidate or an overlay list
+    /// row it selects that entry (cursor + Enter). Clicks on lines with no
+    /// target (header, help bar, blank space, scroll pages) do nothing.
+    pub fn mouse_click(&mut self, line: usize) -> bool {
+        let Some(target) = self.mouse_target_at(line) else {
+            return false;
+        };
+        match target {
+            MouseTarget::MenuRow(idx) => {
+                // The inline surfaces that render over the list (scalar
+                // edit, add-key, anchor input, merge input) share the row
+                // map; input overlays parked in the bottom block (write-to,
+                // `:` command) must not have a stray click commit them.
+                if !matches!(
+                    self.overlay,
+                    None | Some(Overlay::Edit(_))
+                        | Some(Overlay::Add(_))
+                        | Some(Overlay::Anc(_))
+                        | Some(Overlay::Mrg(_))
+                ) {
+                    return false;
+                }
+                if let Some(st) = self.top_mut() {
+                    st.cursor = idx;
+                }
+                self.update(Msg::Enter);
+                true
+            }
+            MouseTarget::EditSug(k) => {
+                let Some(Overlay::Edit(mut e)) = self.overlay.take() else {
+                    return false;
+                };
+                let Some(v) = e.sugs.get(k).cloned() else {
+                    self.overlay = Some(Overlay::Edit(e));
+                    return false;
+                };
+                e.ti.set_value(v);
+                e.ti.cursor_end();
+                e.sug_idx = k as i64;
+                self.overlay = Some(Overlay::Edit(e));
+                self.update(Msg::Enter);
+                true
+            }
+            MouseTarget::AncSug(k) => {
+                let Some(Overlay::Anc(mut s)) = self.overlay.take() else {
+                    return false;
+                };
+                let Some(v) = s.sugs.get(k).cloned() else {
+                    self.overlay = Some(Overlay::Anc(s));
+                    return false;
+                };
+                s.sug = k as i64;
+                s.ti.set_value(v.clone());
+                s.ti.cursor_end();
+                s.sug_line = v;
+                self.overlay = Some(Overlay::Anc(s));
+                self.update(Msg::Enter);
+                true
+            }
+            MouseTarget::OverlayRow(k) => {
+                eprintln!(
+                    "DBG OverlayRow k={k} overlay={:?}",
+                    std::mem::discriminant(&self.overlay)
+                );
+                let picked = match self.overlay.take() {
+                    Some(Overlay::Issues(mut s)) => {
+                        s.cursor = k;
+                        self.overlay = Some(Overlay::Issues(s));
+                        true
+                    }
+                    Some(Overlay::Errs(mut s)) => {
+                        s.cursor = k;
+                        self.overlay = Some(Overlay::Errs(s));
+                        true
+                    }
+                    Some(Overlay::RefPick(mut s)) => {
+                        s.cursor = k;
+                        self.overlay = Some(Overlay::RefPick(s));
+                        true
+                    }
+                    Some(Overlay::FilePick(mut s)) => {
+                        s.cursor = k;
+                        self.overlay = Some(Overlay::FilePick(s));
+                        true
+                    }
+                    Some(Overlay::Search(mut s)) => {
+                        s.cursor = k;
+                        self.overlay = Some(Overlay::Search(s));
+                        true
+                    }
+                    other => {
+                        self.overlay = other;
+                        false
+                    }
+                };
+                if picked {
+                    self.update(Msg::Enter);
+                }
+                picked
+            }
+        }
+    }
+
+    /// mouse_back is the right button: the same as esc (go back / close the
+    /// active surface).
+    pub fn mouse_back(&mut self) {
+        self.update(Msg::Esc);
+    }
+
+    /// overlay_wheel scrolls the full-screen scrollable pages (help,
+    /// comment, shell output) by delta (+1 = wheel up). Other surfaces
+    /// ignore the wheel; returns whether the screen changed.
+    pub fn overlay_wheel(&mut self, delta: i64) -> bool {
+        let page_lines = |len: usize, height: usize| len.saturating_sub(height.max(1));
+        let moved = match self.overlay.take() {
+            Some(Overlay::Help(mut s)) => {
+                let max = page_lines(HELP_ENTRIES.len(), self.height.saturating_sub(3));
+                s.scroll = Self::scroll_to(s.scroll, delta, max);
+                self.overlay = Some(Overlay::Help(s));
+                true
+            }
+            Some(Overlay::Comment(mut s)) => {
+                let max = page_lines(s.lines.len(), self.height.saturating_sub(2));
+                s.scroll = Self::scroll_to(s.scroll, delta, max);
+                self.overlay = Some(Overlay::Comment(s));
+                true
+            }
+            Some(Overlay::ShellOut(mut s)) => {
+                let max = page_lines(s.lines.len(), self.height.saturating_sub(2));
+                s.scroll = Self::scroll_to(s.scroll, delta, max);
+                self.overlay = Some(Overlay::ShellOut(s));
+                true
+            }
+            other => {
+                self.overlay = other;
+                false
+            }
+        };
+        moved
+    }
 
     /// Update handles one key message: ctrl+c aborts, q aliases esc outside
     /// inputs, macros intercept, then dispatchKey.
@@ -2331,6 +2509,7 @@ pub fn run_menu(files: Vec<FileSession>) -> Outcome {
         stdout,
         crossterm::terminal::EnterAlternateScreen,
         crossterm::event::EnableBracketedPaste,
+        crossterm::event::EnableMouseCapture,
         crossterm::cursor::Hide
     );
     // render on events only: the old loop repainted every poll timeout, so
@@ -2390,6 +2569,43 @@ pub fn run_menu(files: Vec<FileSession>) -> Outcome {
                     redraw = true;
                     i += 1;
                 }
+                Event::Mouse(m) => {
+                    // Some sequences (press/release pairs) encode one wheel
+                    // tick twice; consecutive identical scroll events in one
+                    // burst are one tick, like collapsed key repeats.
+                    let scroll = match m.kind {
+                        MouseEventKind::ScrollUp => Some(1),
+                        MouseEventKind::ScrollDown => Some(-1),
+                        _ => None,
+                    };
+                    if scroll.is_some()
+                        && i > 0
+                        && matches!(&events[i - 1], Event::Mouse(m2) if m2.kind == m.kind)
+                    {
+                        i += 1;
+                        continue;
+                    }
+                    match m.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            redraw = app.mouse_click(m.row as usize);
+                        }
+                        MouseEventKind::Down(MouseButton::Right) => {
+                            app.mouse_back();
+                            redraw = true;
+                        }
+                        MouseEventKind::ScrollUp => {
+                            redraw = app.overlay_wheel(1) || app.edit_wheel(1);
+                        }
+                        MouseEventKind::ScrollDown => {
+                            redraw = app.overlay_wheel(-1) || app.edit_wheel(-1);
+                        }
+                        _ => {}
+                    }
+                    if redraw {
+                        app.run_pending_editor();
+                    }
+                    i += 1;
+                }
                 _ => i += 1,
             }
             if app.aborted || app.exiting {
@@ -2407,6 +2623,7 @@ pub fn run_menu(files: Vec<FileSession>) -> Outcome {
         stdout,
         crossterm::cursor::Show,
         crossterm::event::DisableBracketedPaste,
+        crossterm::event::DisableMouseCapture,
         crossterm::terminal::LeaveAlternateScreen
     );
     let _ = crossterm::terminal::disable_raw_mode();

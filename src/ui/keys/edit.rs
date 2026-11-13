@@ -45,6 +45,39 @@ impl App {
             .unwrap_or_else(|| delta.to_string())
     }
 
+    /// edit_wheel applies the mouse wheel to the focused inline edit: the
+    /// number in the input is bumped by delta (+1 wheel up / -1 wheel down);
+    /// an empty numeric field seeds from the schema default. Any other
+    /// content ignores the wheel. Returns whether the screen changed.
+    pub(crate) fn edit_wheel(&mut self, delta: i64) -> bool {
+        let Some(Overlay::Edit(mut e)) = self.overlay.take() else {
+            return false;
+        };
+        let typed_numeric = e
+            .fn_
+            .map(|f| &self.fs().schema.nodes[f as usize])
+            .or(e.synth.as_ref())
+            .is_some_and(|n| {
+                n.kind == Kind::Scalar && matches!(n.json_type.as_str(), "integer" | "number")
+            });
+        let cur = e.ti.value().trim().to_string();
+        let next = match bump_number_literal(&cur, delta) {
+            Some(lit) => lit,
+            None if cur.is_empty() && typed_numeric => self.default_seed(e.fn_, delta),
+            None => {
+                self.overlay = Some(Overlay::Edit(e));
+                return false;
+            }
+        };
+        e.ti.set_value(next);
+        e.ti.cursor_end();
+        e.err.clear();
+        e.sug_idx = -1;
+        self.overlay = Some(Overlay::Edit(e));
+        self.refresh_edit_suggestions();
+        true
+    }
+
     /// editValueExternalRow opens $EDITOR on the value under the cursor.
     pub(super) fn edit_value_external_row(&mut self, r: &Row) {
         if matches!(r.kind, RowKind::Field | RowKind::Unknown | RowKind::Drill) {

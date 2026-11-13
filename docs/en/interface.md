@@ -57,6 +57,18 @@ Bottom help bar (fixed to the last line; common keys / hints specific to the cur
 
 The following keys take effect in normal menu lists; behavior differs while an input box is open (see the next section).
 
+### Mouse
+
+Mouse capture is enabled at startup (and released on exit):
+
+| Action | Effect |
+|---|---|
+| Left click on a list row | Move the cursor to the clicked row and press `enter` (clicking a field row opens its in-place edit; an enum-array option row toggles it). Clicks outside the list rows (title, help bar, blank lines) do nothing; clicks are ignored while the write-to or `:` command input is open |
+| Left click on a dropdown candidate | Candidates of the inline edit (enum options, completions) and of the `&`/`*` reference input: clicking selects and applies that candidate |
+| Left click on an overlay list row | Issues list, save-error list, reference picker, file switcher, and search results: clicking selects the row and presses `enter` (jump / switch / pick) |
+| Right click | Same as `esc`: go back one level or close the current overlay/input |
+| Wheel up/down | While a number is being edited inline, increment / decrement the number in the input (an empty input seeds from the schema default first); the keyboard-help, comment, and command-output pages scroll line by line; other surfaces ignore the wheel |
+
 ### Movement and jumping
 
 | Key | Action |
