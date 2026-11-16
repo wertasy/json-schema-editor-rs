@@ -505,15 +505,10 @@ impl App {
 
     // --- arrays ------------------------------------------------------------
 
-    /// addItem appends a new array item (< Add item > row).
-    pub(super) fn add_item(&mut self) {
-        let path = self.top().map(|st| st.path.clone()).unwrap_or_default();
-        let idx = self.doc().array_len(&path);
-        self.insert_item_at(idx, false);
-    }
-
     /// insertItem inserts a fresh item before (after=false) or after the
-    /// item under the cursor (Go insertItem).
+    /// item under the cursor (Go insertItem). The `< Add item >` row of an
+    /// empty array activates through here too, so click and `a`/`A` behave
+    /// identically (splice a placeholder, then open its editor/drill).
     pub(super) fn insert_item(&mut self, r: &Row, after: bool) {
         let mut idx = 0usize;
         let path = self.top().map(|st| st.path.clone()).unwrap_or_default();
@@ -539,6 +534,17 @@ impl App {
         };
         let ipath = append_idx(&st.path, idx);
         let items_kind = self.fs().schema.nodes[items as usize].kind;
+        if splice {
+            // the host list may still be a not-yet-created slot: a null seed
+            // (add-key without a type yet) converts to an empty array first,
+            // the same write Doc::set would do for the direct-slot path
+            if let Some(n) = self.doc().get(&st.path) {
+                if matches!(self.doc().value(n), Value::Null) {
+                    let arr = self.fs_mut().doc.new_array();
+                    let _ = self.fs_mut().doc.set(&st.path, arr);
+                }
+            }
+        }
         let ins_null = |m: &mut App, splice: bool| {
             if splice {
                 let n = m.fs_mut().doc.new_null();

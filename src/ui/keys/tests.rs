@@ -10272,6 +10272,8 @@ fn menu_move_item() {
 
 #[test]
 fn menu_scalar_array_add() {
+    // `< Add item >` (enter) and `a` share one contract: splice the null
+    // placeholder, open the new-item editor; esc keeps the spliced slot.
     let mut m = items_app(empty_doc());
     press(
         &mut m,
@@ -10282,9 +10284,14 @@ fn menu_scalar_array_add() {
         _ => panic!("scalar add should open the new-item editor"),
     }
     press(&mut m, &["esc"]);
+    assert_eq!(arr_len(&m.fs().doc, &sp(&["logging", "tags"])), 1);
+    let slot = m
+        .fs()
+        .doc
+        .get(&[ks("logging"), ks("tags"), PathSeg::Idx(0)]);
     assert!(
-        !has(&m.fs().doc, &sp(&["logging", "tags"])),
-        "cancelled add must not create the array"
+        matches!(slot, Some(v) if matches!(m.fs().doc.value(v), Value::Null)),
+        "esc keeps the spliced placeholder"
     );
 
     press(&mut m, &["enter"]);

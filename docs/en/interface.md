@@ -63,7 +63,8 @@ Mouse capture is enabled at startup (and released on exit):
 
 | Action | Effect |
 |---|---|
-| Left click on a list row | Move the cursor to the clicked row and press `enter` (clicking a field row opens its in-place edit; an enum-array option row toggles it). Clicks outside the list rows (title, help bar, blank lines) do nothing; clicks are ignored while the write-to or `:` command input is open |
+| Left click on a list row | Move the cursor to the clicked row and press `enter` (clicking a field row opens its in-place edit; an enum-array option row toggles it). Clicks outside the list rows (title, help bar, blank lines) do nothing; clicks are ignored while the write-to or `:` command input is open. An empty array's `< Add item >` row behaves exactly like `a` |
+| Mouse hover | With no overlay and no live selection, the cursor follows the mouse across the rows (no `enter` is fired); while an edit or overlay is open the cursor stays put |
 | Left click on a dropdown candidate | Candidates of the inline edit (enum options, completions) and of the `&`/`*` reference input: clicking selects and applies that candidate |
 | Left click on an overlay list row | Issues list, save-error list, reference picker, file switcher, and search results: clicking selects the row and presses `enter` (jump / switch / pick) |
 | Right click | Same as `esc`: go back one level or close the current overlay/input |

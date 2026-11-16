@@ -1527,6 +1527,27 @@ impl App {
         self.update(Msg::Esc);
     }
 
+    /// mouse_hover moves the plain-list cursor to the hovered row (mouse
+    /// moved over the menu). Active only with no overlay open and no live
+    /// selection: editing/overlays own the pointer, and a hover must not
+    /// extend a visual select. Returns whether the screen changed.
+    pub fn mouse_hover(&mut self, line: usize) -> bool {
+        if self.overlay.is_some() {
+            return false;
+        }
+        let Some(MouseTarget::MenuRow(idx)) = self.mouse_target_at(line) else {
+            return false;
+        };
+        let Some(st) = self.top_mut() else {
+            return false;
+        };
+        if st.cursor == idx || st.visual {
+            return false;
+        }
+        st.cursor = idx;
+        true
+    }
+
     /// overlay_wheel scrolls the full-screen scrollable pages (help,
     /// comment, shell output) by delta (+1 = wheel up). Other surfaces
     /// ignore the wheel; returns whether the screen changed.
@@ -2599,6 +2620,7 @@ pub fn run_menu(files: Vec<FileSession>) -> Outcome {
                         MouseEventKind::ScrollDown => {
                             redraw = app.overlay_wheel(-1) || app.edit_wheel(-1);
                         }
+                        MouseEventKind::Moved => redraw = app.mouse_hover(m.row as usize),
                         _ => {}
                     }
                     if redraw {

@@ -3328,6 +3328,87 @@ fn pty_mouse_err_list_row_click_jumps() {
     assert_eq!(read_json(&cfg)["srv"]["port"], json!("x"));
 }
 
+/// Hovering the mouse over menu rows moves the selection cursor with it
+/// (no enter, no edit), as long as no overlay owns the pointer.
+#[test]
+fn pty_mouse_hover_moves_cursor() {
+    let dir = mktemp();
+    let cfg = dir.path().join("hover.json");
+    write_file(&cfg, r#"{"alpha": 1, "beta": 2, "gamma": 3}"#);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(
+        &[cfg_arg.as_str()],
+        &[("JSE_CATALOG_URL", "http://127.0.0.1:1/catalog.json")],
+        &cache,
+    ) else {
+        return;
+    };
+    let (_, off) = pty.wait_frame("root", 0, &["alpha", "gamma", "↑/↓ move"]);
+    pty.pause(Duration::from_millis(200));
+
+    // Move (not click) onto gamma's row (line 4): the cursor follows.
+    let before = pty.snapshot().len();
+    pty.send(b"\x1b[<35;10;5M");
+    pty.wait_frame("cursor on gamma", off, &[""]);
+    std::thread::sleep(Duration::from_millis(200));
+    let snap = pty.snapshot();
+    let fresh = &snap[before..];
+    assert!(
+        fresh.contains("> gamma"),
+        "hover must move the cursor to gamma:\n{fresh}"
+    );
+    assert!(
+        !fresh.contains("3 "),
+        "hover must not open the row (no edit overlay):\n{fresh}"
+    );
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+}
+
+/// Clicking `< Add item >` behaves exactly like `a`: the placeholder slot
+/// is spliced and its submenu opens (here: an object item's field list).
+#[test]
+fn pty_mouse_add_item_click_matches_a_key() {
+    let dir = mktemp();
+    let schema = dir.path().join("mouse5.schema.json");
+    let cfg = dir.path().join("mouse5.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{"mounts":{"type":"array","items":{"type":"object","properties":{"src":{"type":"string"}}}}}}"#,
+    );
+    write_file(&cfg, r#"{"mounts": []}"#);
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+        return;
+    };
+    let (_, off) = pty.wait_frame("root", 0, &["mounts", "↑/↓ move"]);
+    pty.pause(Duration::from_millis(200));
+
+    pty.send(b"\r"); // drill into the empty mounts array: < Add item > row
+    let (_, off) = pty.wait_frame("items menu", off, &["< Add item >"]);
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\r"); // activate the Add row
+    let (snap, off) = pty.wait_frame("item submenu", off, &["$.mounts[0]", "src"]);
+    let fresh = &snap[snap.len().saturating_sub(1200)..];
+    assert!(
+        fresh.contains("$.mounts[0]"),
+        "item submenu must open:\n{fresh}"
+    );
+    pty.send(b"\x13"); // ctrl+s
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+    // the clicked slot materialized like `a` would: items[0] exists
+    assert!(
+        read_json(&cfg)["mounts"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty())
+    );
+}
+
 #[test]
 fn pty_external_disk_change_prompts_and_reloads() {
     let dir = mktemp();

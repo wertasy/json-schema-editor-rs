@@ -1600,7 +1600,7 @@ impl App {
                 let f = r.fn_.expect("drill row without schema node");
                 self.push_child_menu(f, r.path.clone());
             }
-            RowKind::Add => self.add_item(),
+            RowKind::Add => self.insert_item(&r, true),
             RowKind::Variant => self.enter_variant(&r),
             RowKind::Toggle => self.toggle_enum_member(&r),
             RowKind::Unknown => self.activate_unknown(r.path.clone()),
