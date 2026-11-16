@@ -946,19 +946,28 @@ fn array_multi_delete_marks_every_affected_slot() {
         ],
         "both removed slots are marked"
     );
+    // consecutive deletions merge into one mark at the deletion point: the
+    // row now holding "4" (first deleted slot), nothing below it
     let view = plain(&m.view());
-    let badged = view
+    let merged = view
         .lines()
-        .filter(|l| l.contains('-') && l.contains('['))
-        .count();
-    assert!(badged >= 2, "both affected slots carry -:\n{view}");
+        .find(|l| l.contains("4 -"))
+        .expect("merged deletion mark");
+    assert!(merged.contains("nums[1]"), "{merged:?}");
+    assert!(
+        !view.lines().any(|l| l.contains("5 -") || l.contains("3 -")),
+        "the marks must not spread past the merged deletion point:\n{view}"
+    );
     press(&mut m, &["esc"]); // back to the root menu
     let view = plain(&m.view());
     let parent = view
         .lines()
         .find(|l| l.contains("nums") && l.contains('-'))
         .expect("parent row");
-    assert!(parent.contains('['), "parent row carries -:\n{parent:?}");
+    assert!(
+        parent.contains("- ×2"),
+        "parent row carries the count:\n{parent:?}"
+    );
 }
 
 /// Deleting more elements than the array keeps rows for: the removed slots

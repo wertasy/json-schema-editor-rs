@@ -75,46 +75,77 @@ impl App {
         // parent row aggregates all change kinds inside its subtree.
         self.diff_agg.clear();
         self.diff_removed.clear();
-        self.diff_added.clear();
         let marks = match self.fs().baseline.as_ref() {
             Some(base) => crate::ui::history::diff_kinds(base, &self.fs().doc),
             None => Vec::new(),
         };
         // Removed array elements have no row of their own (the doc-length
-        // generated menu drops them): their count aggregates onto the
+        // generated menu drops them): each removal paints the row that now
+        // occupies its position. Earlier deletions shift later positions up,
+        // so the marks adjust by the deletions before them and consecutive
+        // removals merge onto one row. The removal count aggregates onto the
         // container path and its ancestors, so the parent row can show
         // `- ×N` when several children were deleted and the removed rows
         // themselves are gone. Other kinds propagate to the path and its
         // ancestors only (container rows aggregate their subtree).
         let mut entries: Vec<(Vec<PathSeg>, u8)> = Vec::new();
+        let mut added_paths: Vec<Vec<PathSeg>> = Vec::new();
+        let mut removed_runs: std::collections::HashMap<Vec<PathSeg>, Vec<usize>> =
+            Default::default();
+        let mut removed_counts: std::collections::HashMap<Vec<PathSeg>, usize> = Default::default();
         {
+            let doc = &self.fs().doc;
             for (path, kind) in &marks {
                 let bit = match kind {
-                    DiffKind::Added => DIFF_ADDED,
+                    DiffKind::Added => {
+                        added_paths.push(path.clone());
+                        DIFF_ADDED
+                    }
                     DiffKind::Removed => DIFF_REMOVED,
                     DiffKind::Modified => DIFF_MODIFIED,
                 };
-                if *kind == DiffKind::Removed {
-                    for k in 0..path.len() {
-                        *self.diff_removed.entry(path[..k].to_vec()).or_insert(0) += 1;
+                match (kind, path.last()) {
+                    (DiffKind::Removed, Some(PathSeg::Idx(_))) => {
+                        let prefix = path[..path.len() - 1].to_vec();
+                        let i = match path.last() {
+                            Some(PathSeg::Idx(i)) => *i,
+                            _ => 0,
+                        };
+                        removed_runs.entry(prefix.clone()).or_default().push(i);
+                        for k in 0..=prefix.len() {
+                            *removed_counts.entry(prefix[..k].to_vec()).or_insert(0) += 1;
+                        }
+                    }
+                    _ => {
+                        for k in 0..=path.len() {
+                            entries.push((path[..k].to_vec(), bit));
+                        }
                     }
                 }
-                for k in 0..=path.len() {
-                    entries.push((path[..k].to_vec(), bit));
+            }
+            for (prefix, mut idxs) in removed_runs {
+                idxs.sort_unstable();
+                let len = doc.array_len(&prefix);
+                let mut shift = 0usize;
+                for i in idxs {
+                    let pos = i.saturating_sub(shift);
+                    shift += 1;
+                    if pos < len {
+                        let mut p = prefix.clone();
+                        p.push(PathSeg::Idx(pos));
+                        entries.push((p, DIFF_REMOVED));
+                    }
+                }
+                for k in 0..=prefix.len() {
+                    entries.push((prefix[..k].to_vec(), DIFF_REMOVED));
                 }
             }
         }
+        self.diff_added = added_paths;
+        self.diff_removed = removed_counts;
         for (path, bit) in entries {
             *self.diff_agg.entry(path).or_insert(0) |= bit;
         }
-        let added = marks
-            .iter()
-            .filter_map(|(path, kind)| match kind {
-                DiffKind::Added => Some(path.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        self.diff_added = added;
         // The search overlay renders inline and needs &mut self (its
         // breadcrumb may synthesize menu rows), so it is taken out before
         // the dispatch below.
