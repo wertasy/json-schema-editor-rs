@@ -92,17 +92,10 @@ pub mod style {
     pub fn diff(s: &str) -> String {
         render("1;38;5;204", s)
     }
-    /// The selected completion candidate row renders in reverse video across
-    /// the whole padded row rectangle.
-    pub fn sug_sel(s: &str) -> String {
-        render("7", s)
-    }
-    pub fn sug_dim(s: &str) -> String {
-        render("2;48;5;236", s)
-    }
     /// sug_run styles one run of a completion row: `base` carries the row's
-    /// own look (dim, or reverse for the highlighted row) and `hit` adds
-    /// the bold red matched-text highlight on top of it.
+    /// own look (`"7"` = reverse video for the selected row, `"2;48;5;236"`
+    /// = faint on dark for the rest) and `hit` adds the bold red matched
+    /// highlight on top of it.
     pub fn sug_run(base: &str, hit: bool, s: &str) -> String {
         if hit {
             render(&format!("{base};1;31"), s)
