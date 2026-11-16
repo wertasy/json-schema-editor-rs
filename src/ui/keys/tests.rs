@@ -774,6 +774,191 @@ fn array_insert_diff_marks_only_the_new_slot() {
         !view.contains("first +"),
         "the shifted follower must not be marked:\n{view}"
     );
+
+    // the array's parent row (root menu) aggregates the addition too
+    press(&mut m, &["esc"]); // esc back to the root menu
+    let view = plain(&m.view());
+    let arr_row = view
+        .lines()
+        .find(|l| l.contains("arr") && l.contains('+'))
+        .expect("arr parent row with + badge");
+    assert!(arr_row.contains("arr"), "{arr_row:?}");
+}
+
+/// Changes inside an array element aggregate onto the element row and the
+/// array parent row: adding a field inside a pre-existing element turns the
+/// parent's badge green +, modifying a field adds the orange ~.
+#[test]
+fn array_element_changes_aggregate_to_parent() {
+    let schema = schema_from_json(
+        r#"{"type":"object","properties":{"servers":{"type":"array","items":{"type":"object","properties":{"port":{"type":"integer"}}}}}}"#,
+    );
+    let mut m = app_with(
+        schema,
+        dbuild(|db| {
+            db.obj(vec![(
+                "servers",
+                db.arr(vec![db.obj(vec![("port", db.n("1"))])]),
+            )])
+        }),
+        test_opts(),
+    );
+    // baseline: servers = [{port: 1}] — the element pre-exists
+    m.fs_mut().baseline = Some(m.fs().doc.clone());
+    press(&mut m, &["enter"]); // servers items
+    press(&mut m, &["enter"]); // element 0 menu (port row)
+    press(&mut m, &["a"]); // add key
+    if let Some(Overlay::Add(s)) = &mut m.overlay {
+        s.ti.set_value("host");
+    }
+    press(&mut m, &["enter"]); // create host
+    press(&mut m, &["enter"]); // String variant
+    match &mut m.overlay {
+        Some(Overlay::Edit(e)) => e.ti.set_value("web"),
+        _ => panic!("string editor missing"),
+    }
+    press(&mut m, &["enter"]); // commit host = "web"
+    use crate::doc::jsondoc::PathSeg;
+    let base = m.fs().baseline.clone().expect("baseline");
+    assert_eq!(
+        crate::ui::history::diff_paths(&base, &m.fs().doc),
+        vec![vec![ks("servers"), PathSeg::Idx(0), ks("host")]],
+        "the added field is the only marked location"
+    );
+    // walk back to the root (bounded)
+    for _ in 0..8 {
+        if m.top().map(|t| t.path.is_empty()).unwrap_or(true) {
+            break;
+        }
+        press(&mut m, &["esc"]);
+    }
+    let view = plain(&m.view());
+    assert!(
+        view.lines()
+            .any(|l| l.contains("servers") && l.contains('+')),
+        "the array parent row carries the + after the field add:\n{view}"
+    );
+
+    // modify port inside the element: the parent gains the orange ~
+    press(&mut m, &["enter"]); // servers items
+    press(&mut m, &["enter"]); // element 0 menu
+    press(&mut m, &["enter"]); // edit port
+    match &mut m.overlay {
+        Some(Overlay::Edit(e)) => e.ti.set_value("9"),
+        _ => panic!("port editor missing"),
+    }
+    press(&mut m, &["enter"]); // commit port = 9
+    let base = m.fs().baseline.clone().expect("baseline");
+    use crate::ui::history::DiffKind;
+    let kinds = crate::ui::history::diff_kinds(&base, &m.fs().doc);
+    assert!(
+        kinds.contains(&(
+            vec![ks("servers"), PathSeg::Idx(0), ks("port")],
+            DiffKind::Modified
+        )),
+        "the modified field is marked: {kinds:?}"
+    );
+    for _ in 0..8 {
+        if m.top().map(|t| t.path.is_empty()).unwrap_or(true) {
+            break;
+        }
+        press(&mut m, &["esc"]);
+    }
+    let view = plain(&m.view());
+    let parent_row = view
+        .lines()
+        .find(|l| l.contains("servers"))
+        .expect("servers parent row");
+    assert!(
+        parent_row.contains('+') && parent_row.contains('~'),
+        "the parent row must show both kinds:\n{parent_row:?}\n{view}"
+    );
+}
+
+/// Removing an array element marks the parent row with the red -.
+#[test]
+fn array_element_removal_marks_parent() {
+    let schema = schema_from_json(
+        r#"{"type":"object","properties":{"servers":{"type":"array","items":{"type":"object","properties":{"port":{"type":"integer"}},"required":["port"]}}}}"#,
+    );
+    let mut m = app_with(
+        schema,
+        dbuild(|db| {
+            db.obj(vec![(
+                "servers",
+                db.arr(vec![
+                    db.obj(vec![("port", db.n("1"))]),
+                    db.obj(vec![("port", db.n("2"))]),
+                ]),
+            )])
+        }),
+        test_opts(),
+    );
+    m.fs_mut().baseline = Some(m.fs().doc.clone());
+    press(&mut m, &["enter"]); // servers items
+    press(&mut m, &["d"]); // delete element 0 (no confirm)
+    let base = m.fs().baseline.clone().expect("baseline");
+    use crate::doc::jsondoc::PathSeg;
+    assert_eq!(
+        crate::ui::history::diff_paths(&base, &m.fs().doc),
+        vec![vec![ks("servers"), PathSeg::Idx(0)]],
+        "the removed slot is the only marked location"
+    );
+    press(&mut m, &["esc"]); // back to root
+    let view = plain(&m.view());
+    assert!(
+        view.lines()
+            .any(|l| l.contains("servers") && l.contains('-')),
+        "the array parent row carries the -:\n{view}"
+    );
+}
+
+/// Deleting two adjacent array elements badges both surviving positions
+/// (the rows now occupying the deleted slots) and the array parent row.
+#[test]
+fn array_multi_delete_marks_every_affected_slot() {
+    let schema = schema_from_json(
+        r#"{"type":"object","properties":{"nums":{"type":"array","items":{"type":"integer"}}}}"#,
+    );
+    let mut m = app_with(
+        schema,
+        dbuild(|db| {
+            db.obj(vec![(
+                "nums",
+                db.arr(vec![db.n("1"), db.n("2"), db.n("3"), db.n("4"), db.n("5")]),
+            )])
+        }),
+        test_opts(),
+    );
+    m.fs_mut().baseline = Some(m.fs().doc.clone());
+    press(&mut m, &["enter"]); // nums items: 1..5
+    press(&mut m, &["down"]); // cursor on 2
+    press(&mut m, &["d"]); // delete 2 -> [1,3,4,5]
+    press(&mut m, &["d"]); // cursor on 3: delete -> [1,4,5]
+    let base = m.fs().baseline.clone().expect("baseline");
+    use crate::doc::jsondoc::PathSeg;
+    let marks = crate::ui::history::diff_paths(&base, &m.fs().doc);
+    assert_eq!(
+        marks,
+        vec![
+            vec![ks("nums"), PathSeg::Idx(1)],
+            vec![ks("nums"), PathSeg::Idx(2)],
+        ],
+        "both removed slots are marked"
+    );
+    let view = plain(&m.view());
+    let badged = view
+        .lines()
+        .filter(|l| l.contains('-') && l.contains('['))
+        .count();
+    assert!(badged >= 2, "both affected slots carry -:\n{view}");
+    press(&mut m, &["esc"]); // back to the root menu
+    let view = plain(&m.view());
+    let parent = view
+        .lines()
+        .find(|l| l.contains("nums") && l.contains('-'))
+        .expect("parent row");
+    assert!(parent.contains('['), "parent row carries -:\n{parent:?}");
 }
 
 /// Rows modified against the baseline carry ` ~`, rows the schema still

@@ -79,28 +79,53 @@ impl App {
             Some(base) => crate::ui::history::diff_kinds(base, &self.fs().doc),
             None => Vec::new(),
         };
-        for (path, kind) in marks {
-            let bit = match kind {
-                DiffKind::Added => {
-                    self.diff_added.push(path.clone());
-                    DIFF_ADDED
+        // Removed array elements have no row of their own (the doc-length
+        // generated menu drops them): paint their kind onto every current
+        // row from the removed slot to the end of the array — those are the
+        // positions the deletion touched. Other kinds propagate to the path
+        // and its ancestors only (container rows aggregate their subtree;
+        // sibling element rows match by their own exact paths).
+        let mut entries: Vec<(Vec<PathSeg>, u8)> = Vec::new();
+        {
+            let doc = &self.fs().doc;
+            for (path, kind) in &marks {
+                let bit = match kind {
+                    DiffKind::Added => DIFF_ADDED,
+                    DiffKind::Removed => DIFF_REMOVED,
+                    DiffKind::Modified => DIFF_MODIFIED,
+                };
+                match (kind, path.last()) {
+                    (DiffKind::Removed, Some(PathSeg::Idx(i))) => {
+                        let prefix = &path[..path.len() - 1];
+                        let len = doc.array_len(prefix);
+                        for j in *i as usize..len {
+                            let mut p = prefix.to_vec();
+                            p.push(PathSeg::Idx(j));
+                            entries.push((p, bit));
+                        }
+                        for k in 0..prefix.len() {
+                            entries.push((path[..k].to_vec(), bit));
+                        }
+                    }
+                    _ => {
+                        for k in 0..=path.len() {
+                            entries.push((path[..k].to_vec(), bit));
+                        }
+                    }
                 }
-                DiffKind::Removed => DIFF_REMOVED,
-                DiffKind::Modified => DIFF_MODIFIED,
-            };
-            // An added ARRAY ELEMENT propagates only within the element:
-            // the container itself must not grow a + badge, or every
-            // shifted sibling would inherit one. Removals and modifications
-            // propagate fully (parents aggregate their subtree).
-            let last_idx = path.iter().rposition(|s| matches!(s, PathSeg::Idx(_)));
-            let start = match (kind, last_idx) {
-                (DiffKind::Added, Some(pos)) => pos + 1,
-                _ => 0,
-            };
-            for k in start..=path.len() {
-                *self.diff_agg.entry(path[..k].to_vec()).or_insert(0) |= bit;
             }
         }
+        for (path, bit) in entries {
+            *self.diff_agg.entry(path).or_insert(0) |= bit;
+        }
+        let added = marks
+            .iter()
+            .filter_map(|(path, kind)| match kind {
+                DiffKind::Added => Some(path.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        self.diff_added = added;
         // The search overlay renders inline and needs &mut self (its
         // breadcrumb may synthesize menu rows), so it is taken out before
         // the dispatch below.
