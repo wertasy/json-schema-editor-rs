@@ -18,6 +18,7 @@ use crate::doc::jsondoc::path_string;
 use crate::doc::{Doc, NodeId, PathSeg, Value};
 use crate::smodel::{FormNode, FormNodeId};
 use crate::ui::files::{disk_stat_of, new_app};
+use crate::ui::history::DiffKind;
 use crate::ui::nav::{Nav, NavGo};
 use crate::ui::rows::{
     MergeView, MergedKey, RowsEnv, SynthKey, dynamic_variants, match_variant_list, menu_rows_for,
@@ -102,6 +103,18 @@ pub mod style {
         } else {
             render(base, s)
         }
+    }
+    /// Diff badges on rows whose content differs from the load/last-save
+    /// baseline: `+` added (green), `-` removed (red), `~` modified
+    /// (orange).
+    pub fn mark_add(s: &str) -> String {
+        render("38;5;114", s)
+    }
+    pub fn mark_del(s: &str) -> String {
+        render("38;5;203", s)
+    }
+    pub fn mark_mod(s: &str) -> String {
+        render("38;5;214", s)
     }
 }
 
@@ -872,6 +885,9 @@ pub struct App {
     /// screen line → click target for the last rendered frame (mouse
     /// support): (first line, line count, target), rebuilt per repaint
     pub mouse_targets: Vec<(usize, usize, MouseTarget)>,
+    /// diff classification per document path against the load/last-save
+    /// baseline (longest matching prefix wins), rebuilt per repaint
+    pub diff_marks: std::collections::HashMap<Vec<crate::doc::jsondoc::PathSeg>, DiffKind>,
 }
 
 /// What a click on a rendered screen line hits.
@@ -922,6 +938,7 @@ impl App {
             cmd_history,
             builtin_clipboard: None,
             mouse_targets: Vec::new(),
+            diff_marks: std::collections::HashMap::new(),
         }
     }
 
@@ -1214,20 +1231,6 @@ impl App {
 
     // --- change tracking ----------------------------------------------------
 
-    /// changed reports whether the value at path differs from the
-    /// loaded/last-saved baseline; without a baseline nothing is marked.
-    pub fn changed(&self, path: &[PathSeg]) -> bool {
-        let f = self.fs();
-        match &f.baseline {
-            Some(base) => {
-                let cur = f.doc.get(path);
-                let basev = base.get(path);
-                !nodes_equal_opt(&f.doc, cur, base, basev)
-            }
-            None => false,
-        }
-    }
-
     /// dirty reports whether anything in the document differs from the
     /// baseline.
     pub fn dirty(&self) -> bool {
@@ -1407,6 +1410,22 @@ impl App {
     // --- the key pipeline ---------------------------------------------------
 
     // --- mouse support ------------------------------------------------------
+
+    /// diff_badge_of renders the colored diff badge for a row path: the
+    /// longest matching marked path wins, so children of an added / removed
+    /// / modified subtree inherit its kind. The badge sits at the line end
+    /// (`+` green added, `-` red removed, `~` orange modified).
+    pub(crate) fn diff_badge_of(&self, path: &[PathSeg]) -> Option<String> {
+        for k in (1..=path.len()).rev() {
+            match self.diff_marks.get(&path[..k]) {
+                Some(DiffKind::Added) => return Some(style::mark_add(" +")),
+                Some(DiffKind::Removed) => return Some(style::mark_del(" -")),
+                Some(DiffKind::Modified) => return Some(style::mark_mod(" ~")),
+                None => {}
+            }
+        }
+        None
+    }
 
     /// scroll_to clamps a scroll offset moved by one wheel tick (+1 = up).
     fn scroll_to(cur: usize, delta: i64, max: usize) -> usize {

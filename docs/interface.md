@@ -31,7 +31,10 @@ Bottom help bar (fixed to the last line; common keys / hints specific to the cur
 | Element | Meaning |
 |---|---|
 | `*` (red) | A required field per the schema; independent of whether it is filled. |
-| `●` (pink, end of row) | The value changed relative to load time / last save; object/array rows are also marked when their subtree contains changes. `●` on the title line means the whole file has unsaved changes. When a row is truncated on a narrow terminal, the cut point is marked with `…`; the trailing `●` and the `<err>`/`<warn>` icons are always kept (`(not in schema)`, `--->` and other annotations are truncated first). |
+| `●` (pink, end of row) | `●` on the title line means the whole file has unsaved changes. When a row is truncated on a narrow terminal, the cut point is marked with `…`; the trailing diff badge and the `<err>`/`<warn>` icons are always kept (`(not in schema)`, `--->` and other annotations are truncated first). |
+| `+` (green, end of row) | The value (or its whole subtree) was **added** relative to load time / last save. Array alignment is content-based: inserting an element marks only the inserted slot, not the shifted followers; children of an added subtree inherit the badge. |
+| `-` (red, end of row) | The value was **removed** since load time / last save. Schema menus still list the row (absent members render), so it stays visible with this badge; schema-less menus drop the row. |
+| `~` (orange, end of row) | The value was **modified** relative to load time / last save; object/array rows are also marked when their subtree contains changes (an anchor rename marks the container). |
 | `●` (oneOf row) | The currently matched/selected variant. |
 | `<err>` (red) | The field has a validation error; parent object/array rows are also marked. |
 | `<warn>` (yellow) | Warnings only (e.g. unknown keys); shown when there are no errors. When a row has both an error and a warning, only `<err>` is shown. |

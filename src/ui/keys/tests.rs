@@ -720,6 +720,95 @@ fn menu_enum_overlay_search_filters_and_selects() {
     assert_eq!(str_at(&m.fs().doc, &["mode"]), "grpc");
 }
 
+// --- baseline diff marks -----------------------------------------------------
+
+/// A real `a`-flow insert into an array flags only the new slot against the
+/// baseline (not every shifted follower), and the row renders the green `+`
+/// badge.
+#[test]
+fn array_insert_diff_marks_only_the_new_slot() {
+    let mut m = mk_app(test_doc(), test_opts());
+    press(&mut m, &["a"]);
+    if let Some(Overlay::Add(s)) = &mut m.overlay {
+        s.ti.set_value("arr");
+    }
+    press(&mut m, &["enter"]);
+    // String, Number, Boolean, Object, Array -> Array
+    press(&mut m, &["down", "down", "down", "down", "enter"]);
+    assert_eq!(m.top().unwrap().kind, MenuKind::Items);
+    // < Add item > opens the per-item type picker; String first. The first
+    // element materializes the array; the baseline then holds arr=["first"].
+    press(&mut m, &["enter"]);
+    assert_eq!(m.top().unwrap().kind, MenuKind::OneOf);
+    press(&mut m, &["enter"]);
+    match &mut m.overlay {
+        Some(Overlay::Edit(e)) => e.ti.set_value("first"),
+        _ => panic!("string editor missing"),
+    }
+    press(&mut m, &["enter"]);
+    m.fs_mut().baseline = Some(m.fs().doc.clone());
+
+    // a second insert flags only its own slot, not the shifted "first"
+    press(&mut m, &["a"]);
+    assert_eq!(m.top().unwrap().kind, MenuKind::OneOf);
+    press(&mut m, &["enter"]);
+    match &mut m.overlay {
+        Some(Overlay::Edit(e)) => e.ti.set_value("hello"),
+        _ => panic!("string editor missing"),
+    }
+    press(&mut m, &["enter"]);
+
+    let base = m.fs().baseline.clone().expect("baseline set");
+    use crate::doc::jsondoc::PathSeg;
+    assert_eq!(
+        crate::ui::history::diff_paths(&base, &m.fs().doc),
+        vec![vec![ks("arr"), PathSeg::Idx(1)]],
+        "only the inserted slot is marked; the shifted follower stays silent"
+    );
+    let view = plain(&m.view());
+    assert!(
+        view.contains("hello +"),
+        "inserted row carries the + badge:\n{view}"
+    );
+    assert!(
+        !view.contains("first +"),
+        "the shifted follower must not be marked:\n{view}"
+    );
+}
+
+/// Rows modified against the baseline carry ` ~`, rows the schema still
+/// lists after removal carry ` -`, each in its own color.
+#[test]
+fn modified_and_removed_rows_get_distinct_badges() {
+    let schema = schema_build(|b| {
+        let a = b.id(scalar("a", "A", "integer"));
+        let bb = b.id(scalar("b", "B", "string"));
+        let c = b.id(scalar("c", "C", "string"));
+        b.id(FormNode {
+            key: "$".into(),
+            kind: Kind::Object,
+            children: vec![a, bb, c],
+            ..FormNode::default()
+        })
+    });
+    let doc = dbuild(|db| db.obj(vec![("a", db.n("2"))]));
+    let mut m = app_with(schema, doc, test_opts());
+    // baseline: a=1, b present, c present; current doc dropped b and c
+    m.fs_mut().baseline = Some(dbuild(|db| {
+        db.obj(vec![("a", db.n("1")), ("b", db.s("x")), ("c", db.s("y"))])
+    }));
+    let view = m.view();
+    assert!(
+        view.contains("\x1b[38;5;214m ~"),
+        "modified row carries the orange ~ badge: {view:?}"
+    );
+    assert!(
+        view.contains("\x1b[38;5;203m -"),
+        "removed-but-listed rows carry the red - badge: {view:?}"
+    );
+    assert!(!view.contains("\x1b[38;5;114m +"), "nothing is added here");
+}
+
 #[test]
 fn menu_enum_overlay_search_no_match_stays() {
     let doc = test_doc();
@@ -12979,7 +13068,7 @@ fn clip_keep_tail_marks_cuts_and_keeps_room_for_the_tail() {
 }
 
 #[test]
-fn narrow_rows_keep_the_change_dot_and_mark_the_cut() {
+fn narrow_rows_keep_the_diff_badge_and_mark_the_cut() {
     let schema = schema_build(|b| {
         let name = b.id(scalar("name", "Name", "string"));
         b.id(FormNode {
@@ -12993,7 +13082,7 @@ fn narrow_rows_keep_the_change_dot_and_mark_the_cut() {
     let mut app = app_with(schema, doc, test_opts());
     app.width = 30;
     app.height = 24;
-    // Edit and apply: the row becomes dirty, so it carries the ● tail.
+    // Edit and apply: the row becomes dirty, so it carries the ~ tail.
     press(&mut app, &["enter", "Z", "enter"]);
     let view = app.view();
     let ansi = regex::Regex::new("\x1b\\[[0-9;]*m").unwrap();
@@ -13007,7 +13096,10 @@ fn narrow_rows_keep_the_change_dot_and_mark_the_cut() {
         "the row must fit the terminal: {row:?}"
     );
     assert!(row.contains('…'), "the cut must be marked: {row:?}");
-    assert!(row.ends_with('●'), "the change dot must survive: {row:?}");
+    assert!(
+        row.ends_with('~'),
+        "the modified badge must survive: {row:?}"
+    );
 }
 
 #[test]

@@ -67,6 +67,17 @@ impl App {
         // The click-target map belongs to one frame; a surface that records
         // nothing leaves it empty and mouse clicks do nothing.
         self.mouse_targets.clear();
+        // Per-frame diff marks against the load/last-save baseline drive
+        // the colored row badges. The classified diff walk visits every
+        // location once per repaint — the same order as building the rows.
+        self.diff_marks.clear();
+        let marks = match self.fs().baseline.as_ref() {
+            Some(base) => crate::ui::history::diff_kinds(base, &self.fs().doc),
+            None => Vec::new(),
+        };
+        for (path, kind) in marks {
+            self.diff_marks.insert(path, kind);
+        }
         // The search overlay renders inline and needs &mut self (its
         // breadcrumb may synthesize menu rows), so it is taken out before
         // the dispatch below.
@@ -1901,8 +1912,10 @@ impl App {
             {
                 tail = format!(" {}", style::fg3(WARN));
             }
-            if self.changed(&r.path) {
-                tail += &format!(" {}", style::diff("●"));
+            // the LCS-aligned diff badge replaces the plain change dot:
+            // `+` added (green), `-` removed (red), `~` modified (orange)
+            if let Some(badge) = self.diff_badge_of(&r.path) {
+                tail += &badge;
             }
         }
         let line = format!(

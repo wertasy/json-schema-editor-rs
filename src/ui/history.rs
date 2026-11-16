@@ -98,6 +98,24 @@ impl History {
 /// `to` document order; a container's removals are emitted right after its
 /// own `to`-side walk. Paths never repeat.
 pub fn diff_paths(from: &Doc, to: &Doc) -> Vec<Vec<crate::doc::jsondoc::PathSeg>> {
+    diff_kinds(from, to)
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect()
+}
+
+/// DiffKind classifies one diff location: added on the `to` side, removed
+/// on the `from` side, or present on both sides with different content.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiffKind {
+    Added,
+    Removed,
+    Modified,
+}
+
+/// diffKinds is [`diff_paths`] with a classification per location, driving
+/// the colored row badges (added / removed / modified).
+pub fn diff_kinds(from: &Doc, to: &Doc) -> Vec<(Vec<crate::doc::jsondoc::PathSeg>, DiffKind)> {
     let mut out = Vec::new();
     let mut path = Vec::new();
     diff_node(from, from.root, to, to.root, &mut path, &mut out);
@@ -307,7 +325,7 @@ fn diff_node(
     to: &Doc,
     ti: crate::doc::jsondoc::NodeId,
     path: &mut Vec<crate::doc::jsondoc::PathSeg>,
-    out: &mut Vec<Vec<crate::doc::jsondoc::PathSeg>>,
+    out: &mut Vec<(Vec<crate::doc::jsondoc::PathSeg>, DiffKind)>,
 ) {
     use crate::doc::jsondoc::PathSeg as Seg;
     use crate::doc::jsondoc::Value;
@@ -316,13 +334,13 @@ fn diff_node(
         (Value::Object(fm), Value::Object(tm)) => {
             // an anchor rename changes this container itself, not a child
             if from.node(fi).anchor != to.node(ti).anchor {
-                out.push(path.clone());
+                out.push((path.clone(), DiffKind::Modified));
             }
             for m in tm {
                 path.push(Seg::Key(m.key.clone()));
                 match fm.iter().find(|f| f.key == m.key) {
                     Some(f) => diff_node(from, f.val, to, m.val, path, out),
-                    None => out.push(path.clone()), // added on the `to` side
+                    None => out.push((path.clone(), DiffKind::Added)), // added on the `to` side
                 }
                 path.pop();
             }
@@ -332,7 +350,7 @@ fn diff_node(
             for f in fm {
                 if !tm.iter().any(|t| t.key == f.key) {
                     path.push(Seg::Key(f.key.clone()));
-                    out.push(path.clone());
+                    out.push((path.clone(), DiffKind::Removed));
                     path.pop();
                 }
             }
@@ -352,12 +370,12 @@ fn diff_node(
                     }
                     ArrayOp::Remove(fi) => {
                         path.push(Seg::Idx(fi));
-                        out.push(path.clone());
+                        out.push((path.clone(), DiffKind::Removed));
                         path.pop();
                     }
                     ArrayOp::Add(ti) => {
                         path.push(Seg::Idx(ti));
-                        out.push(path.clone());
+                        out.push((path.clone(), DiffKind::Added));
                         path.pop();
                     }
                 }
@@ -372,7 +390,7 @@ fn diff_node(
                 || df.merge != dt.merge
                 || df.raw != dt.raw
             {
-                out.push(path.clone());
+                out.push((path.clone(), DiffKind::Modified));
             }
         }
     }
@@ -488,6 +506,27 @@ mod tests {
                 vec![ks("c"), PathSeg::Idx(1)],
                 vec![ks("c"), PathSeg::Idx(2)],
             ]
+        );
+    }
+
+    #[test]
+    fn diff_kinds_classifies_added_removed_modified() {
+        use crate::doc::jsondoc::PathSeg;
+        let from = doc(r#"{"a":1,"b":"keep","c":[1,2],"z":9}"#);
+        let to = doc(r#"{"a":2,"b":"keep","c":[1,9,3],"d":{"y":2}}"#);
+        let kinds = diff_kinds(&from, &to);
+        assert!(kinds.contains(&(vec![ks("a")], DiffKind::Modified)));
+        assert!(kinds.contains(&(vec![ks("c"), PathSeg::Idx(1)], DiffKind::Modified)));
+        assert!(kinds.contains(&(vec![ks("c"), PathSeg::Idx(2)], DiffKind::Added)));
+        assert!(kinds.contains(&(vec![ks("z")], DiffKind::Removed)));
+        // `d` itself is new: one Added path for the whole subtree
+        assert!(kinds.contains(&(vec![ks("d")], DiffKind::Added)));
+        // matched array slots and untouched keys report nothing
+        assert!(!kinds.iter().any(|(p, _)| p == &[ks("b")][..]));
+        assert!(
+            !kinds
+                .iter()
+                .any(|(p, _)| p == &[ks("c"), PathSeg::Idx(0)][..])
         );
     }
 

@@ -3449,6 +3449,49 @@ fn pty_mouse_enum_wheel_cycles_candidates() {
     assert_eq!(read_json(&cfg)["color"], json!("red"));
 }
 
+/// Inserting into the middle of an array flags only the inserted row: the
+/// shifted followers carry no badge (LCS-aligned diff marks).
+#[test]
+fn pty_array_mid_insert_marks_only_the_new_row() {
+    let dir = mktemp();
+    let cfg = dir.path().join("mid.json");
+    write_file(&cfg, r#"{"nums":[1,2,3]}"#);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(
+        &[cfg_arg.as_str()],
+        &[("JSE_CATALOG_URL", "http://127.0.0.1:1/catalog.json")],
+        &cache,
+    ) else {
+        return;
+    };
+    let (_, off) = pty.wait_frame("root", 0, &["nums", "↑/↓ move"]);
+    pty.pause(Duration::from_millis(200));
+
+    pty.send(b"\r"); // drill into nums
+    pty.wait_frame("items", off, &["1", "2", "3"]);
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"a"); // insert after the first row
+    pty.wait_frame("type picker", off, &["String"]);
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\r9\r"); // String, value 9, commit -> [1,9,2,3]
+    pty.wait_frame("inserted", off, &["9"]);
+    pty.pause(Duration::from_millis(200));
+    let snap = pty.snapshot();
+    let tail = &snap[snap.len().saturating_sub(1600)..];
+    assert!(tail.contains("9 +"), "the inserted row is marked:\n{tail}");
+    assert!(
+        !tail.contains("2 +") && !tail.contains("3 +"),
+        "shifted followers must not be marked:\n{tail}"
+    );
+    pty.send(b"\x13"); // ctrl+s
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+    // the item was added through the String variant
+    assert_eq!(read_json(&cfg)["nums"], json!([1, "9", 2, 3]));
+}
+
 /// Hovering the mouse over menu rows moves the selection cursor with it
 /// (no enter, no edit), as long as no overlay owns the pointer.
 #[test]
