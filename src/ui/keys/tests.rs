@@ -961,6 +961,60 @@ fn array_multi_delete_marks_every_affected_slot() {
     assert!(parent.contains('['), "parent row carries -:\n{parent:?}");
 }
 
+/// Deleting more elements than the array keeps rows for: the removed slots
+/// beyond the end cannot render rows, so the parent row shows the count
+/// (`- ×3`) instead.
+#[test]
+fn multi_tail_deletions_count_on_parent() {
+    let schema = schema_from_json(
+        r#"{"type":"object","properties":{"nums":{"type":"array","items":{"type":"integer"}}}}"#,
+    );
+    let mut m = app_with(
+        schema,
+        dbuild(|db| {
+            db.obj(vec![(
+                "nums",
+                db.arr(vec![db.n("1"), db.n("2"), db.n("3"), db.n("4"), db.n("5")]),
+            )])
+        }),
+        test_opts(),
+    );
+    m.fs_mut().baseline = Some(m.fs().doc.clone());
+    press(&mut m, &["enter"]); // nums items
+    press(&mut m, &["down", "down"]); // cursor on 3
+    press(&mut m, &["d", "d", "d"]); // delete 3, 4, 5 -> [1, 2]
+    let base = m.fs().baseline.clone().expect("baseline");
+    use crate::doc::jsondoc::PathSeg;
+    assert_eq!(
+        crate::ui::history::diff_paths(&base, &m.fs().doc),
+        vec![
+            vec![ks("nums"), PathSeg::Idx(2)],
+            vec![ks("nums"), PathSeg::Idx(3)],
+            vec![ks("nums"), PathSeg::Idx(4)],
+        ],
+        "every removed slot is marked"
+    );
+    // the surviving rows (1, 2) stay unmarked inside the items menu
+    let view = plain(&m.view());
+    for want in ["1", "2"] {
+        let row = view.lines().find(|l| l.contains(want)).expect(want);
+        assert!(
+            !row.contains('-'),
+            "survivor {want} must not carry a removal mark:\n{row:?}"
+        );
+    }
+    press(&mut m, &["esc"]); // back to root
+    let view = plain(&m.view());
+    let parent = view
+        .lines()
+        .find(|l| l.contains("nums"))
+        .expect("parent row");
+    assert!(
+        parent.contains("- ×3"),
+        "the parent row must show the removal count:\n{parent:?}\n{view}"
+    );
+}
+
 /// Rows modified against the baseline carry ` ~`, rows the schema still
 /// lists after removal carry ` -`, each in its own color.
 #[test]

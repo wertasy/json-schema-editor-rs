@@ -74,16 +74,18 @@ impl App {
         // Each mark ORs its kind into the path and every ancestor, so a
         // parent row aggregates all change kinds inside its subtree.
         self.diff_agg.clear();
+        self.diff_removed.clear();
         self.diff_added.clear();
         let marks = match self.fs().baseline.as_ref() {
             Some(base) => crate::ui::history::diff_kinds(base, &self.fs().doc),
             None => Vec::new(),
         };
         // Removed array elements have no row of their own (the doc-length
-        // generated menu drops them): their mark lands on the row that now
-        // occupies the removed slot, when the array still has a row there.
-        // Other kinds propagate to the path and its ancestors only
-        // (container rows aggregate their subtree).
+        // generated menu drops them): their count aggregates onto the
+        // container path and its ancestors, so the parent row can show
+        // `- ×N` when several children were deleted and the removed rows
+        // themselves are gone. Other kinds propagate to the path and its
+        // ancestors only (container rows aggregate their subtree).
         let mut entries: Vec<(Vec<PathSeg>, u8)> = Vec::new();
         {
             for (path, kind) in &marks {
@@ -92,6 +94,11 @@ impl App {
                     DiffKind::Removed => DIFF_REMOVED,
                     DiffKind::Modified => DIFF_MODIFIED,
                 };
+                if *kind == DiffKind::Removed {
+                    for k in 0..path.len() {
+                        *self.diff_removed.entry(path[..k].to_vec()).or_insert(0) += 1;
+                    }
+                }
                 for k in 0..=path.len() {
                     entries.push((path[..k].to_vec(), bit));
                 }

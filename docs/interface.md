@@ -35,7 +35,7 @@ Bottom help bar (fixed to the last line; common keys / hints specific to the cur
 | `+` (green, end of row) | The value (or its whole subtree) was **added** relative to load time / last save. Array alignment is content-based: inserting an element marks only the inserted slot, not the shifted followers. Keys with no assigned value (freshly created objects) carry no `+`. |
 | `-` (red, end of row) | The value was **removed** since load time / last save. Schema menus still list the row (absent members render), so it stays visible with this badge; schema-less menus drop the row. For arrays, the removal marks the row now occupying the removed slot; deletions past the end of the array mark the array parent row only. |
 | `~` (orange, end of row) | The value was **modified** relative to load time / last save (an anchor rename marks the container). |
-| `+ - ~` (parent rows) | Object/array rows aggregate **every** change kind inside their subtree, one colored glyph per kind; unassigned keys do not contribute a `+`. When the line is too narrow for all glyphs, they collapse into the single `●` above. |
+| `+ - ~` (parent rows) | Object/array rows aggregate **every** change kind inside their subtree, one colored glyph per kind; unassigned keys do not contribute a `+`. Multiple removals under one parent show the count (`- ×3`). When the line is too narrow for all glyphs, they collapse into the single `●` above. |
 | `●` (oneOf row) | The currently matched/selected variant. |
 | `<err>` (red) | The field has a validation error; parent object/array rows are also marked. |
 | `<warn>` (yellow) | Warnings only (e.g. unknown keys); shown when there are no errors. When a row has both an error and a warning, only `<err>` is shown. |
