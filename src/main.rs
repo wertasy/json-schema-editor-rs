@@ -8,6 +8,7 @@ mod doc;
 mod fetch;
 mod icons;
 mod paths;
+mod progress;
 mod session;
 mod smodel;
 mod ui;

@@ -18,7 +18,6 @@ use crate::doc::jsondoc::path_string;
 use crate::doc::{Doc, NodeId, PathSeg, Value};
 use crate::smodel::{FormNode, FormNodeId};
 use crate::ui::files::{disk_stat_of, new_app};
-use crate::ui::history::DiffKind;
 use crate::ui::nav::{Nav, NavGo};
 use crate::ui::rows::{
     MergeView, MergedKey, RowsEnv, SynthKey, dynamic_variants, match_variant_list, menu_rows_for,
@@ -118,8 +117,31 @@ pub mod style {
     }
 }
 
+/// human_bytes renders a byte count for the fetch progress bar
+/// (`512 B`, `12.3 kB`, `4.2 MB`).
+pub(crate) fn human_bytes(v: u64) -> String {
+    const UNITS: [&str; 3] = ["B", "kB", "MB"];
+    let mut f = v as f64;
+    let mut unit = 0usize;
+    while f >= 1024.0 && unit + 1 < UNITS.len() {
+        f /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{v} B")
+    } else {
+        format!("{f:.1} {}", UNITS[unit])
+    }
+}
+
 pub const MENU_HELP: &str =
     "↑/↓ move · enter edit/open · esc back · ctrl+s/w save · / search · : command · ? help";
+
+/// DiffKind bit flags for the aggregated per-path diff marks
+/// ([`App::diff_agg`]).
+pub const DIFF_ADDED: u8 = 1;
+pub const DIFF_REMOVED: u8 = 2;
+pub const DIFF_MODIFIED: u8 = 4;
 /// Collapsed description cap per source: the schema help and the document
 /// comment each show at most this many wrapped lines; a cut block gets an
 /// emphasized trailing `…`.
@@ -886,8 +908,20 @@ pub struct App {
     /// support): (first line, line count, target), rebuilt per repaint
     pub mouse_targets: Vec<(usize, usize, MouseTarget)>,
     /// diff classification per document path against the load/last-save
-    /// baseline (longest matching prefix wins), rebuilt per repaint
-    pub diff_marks: std::collections::HashMap<Vec<crate::doc::jsondoc::PathSeg>, DiffKind>,
+    /// baseline, rebuilt per repaint: a bitmask of DiffKind bits aggregated
+    /// over the path and its whole subtree (the empty path aggregates the
+    /// entire document for the root row)
+    pub diff_agg: std::collections::HashMap<Vec<crate::doc::jsondoc::PathSeg>, u8>,
+    /// in-flight SchemaStore catalog load (`S`): the event loop polls the
+    /// handle and renders the help-bar progress until it finishes
+    pub pending_catalog:
+        Option<std::thread::JoinHandle<Result<Vec<crate::catalog::Entry>, String>>>,
+    /// in-flight schema download after a picker selection: the entry plus
+    /// the load job; the tail of [`App::apply_schema`] runs on completion
+    pub pending_schema: Option<(
+        crate::catalog::Entry,
+        std::thread::JoinHandle<Result<crate::ui::LoadedSchema, String>>,
+    )>,
 }
 
 /// What a click on a rendered screen line hits.
@@ -938,7 +972,9 @@ impl App {
             cmd_history,
             builtin_clipboard: None,
             mouse_targets: Vec::new(),
-            diff_marks: std::collections::HashMap::new(),
+            diff_agg: std::collections::HashMap::new(),
+            pending_catalog: None,
+            pending_schema: None,
         }
     }
 
@@ -1409,19 +1445,98 @@ impl App {
 
     // --- the key pipeline ---------------------------------------------------
 
+    /// fetch_bar renders the bottom-bar progress line while a SchemaStore
+    /// catalog / schema load is pending or an HTTP fetch is streaming:
+    /// `[####      ] 12.3 kB / 45.6 kB — updating SchemaStore cache`. The
+    /// total comes from Content-Length; without it the bar sweeps.
+    pub fn fetch_bar(&self) -> Option<String> {
+        let prog = crate::progress::progress();
+        let pending = self.pending_catalog.is_some() || self.pending_schema.is_some();
+        if prog.is_none() && !pending {
+            return None;
+        }
+        let label = if self.pending_catalog.is_some() {
+            "loading SchemaStore catalog".to_string()
+        } else if self.pending_schema.is_some() {
+            "loading schema".to_string()
+        } else {
+            prog.as_ref()
+                .map(|p| p.label.clone())
+                .unwrap_or_else(|| "fetching".to_string())
+        };
+        let (got, total) = prog.as_ref().map_or((0, None), |p| (p.got, p.total));
+        let width = self.width.saturating_sub(2).min(24).max(8);
+        let filled = match total.filter(|t| *t > 0) {
+            Some(t) => ((got.min(t) as f64 / t as f64) * width as f64).round() as usize,
+            None => {
+                // indeterminate: a sweeping window driven by the wall clock
+                let phase = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.subsec_millis() / 120)
+                    .unwrap_or(0) as usize;
+                let w = width / 4;
+                (phase % width).min(width - w) + if (phase / width) % 2 == 0 { 0 } else { w }
+            }
+        };
+        let mut bar = String::with_capacity(width + 32);
+        bar.push('[');
+        for k in 0..width {
+            bar.push_str(&style::accent(if k < filled { "█" } else { "·" }));
+        }
+        bar.push(']');
+        let bytes = match total.filter(|t| *t > 0) {
+            Some(t) => format!("{} / {}", human_bytes(got), human_bytes(t)),
+            None => human_bytes(got),
+        };
+        let line = format!("{bar} {bytes} — {label}");
+        Some(crate::ui::keys::clip_display(
+            &line,
+            self.width.saturating_sub(1),
+        ))
+    }
+
     // --- mouse support ------------------------------------------------------
 
-    /// diff_badge_of renders the colored diff badge for a row path: the
-    /// longest matching marked path wins, so children of an added / removed
-    /// / modified subtree inherit its kind. The badge sits at the line end
-    /// (`+` green added, `-` red removed, `~` orange modified).
-    pub(crate) fn diff_badge_of(&self, path: &[PathSeg]) -> Option<String> {
-        for k in (1..=path.len()).rev() {
-            match self.diff_marks.get(&path[..k]) {
-                Some(DiffKind::Added) => return Some(style::mark_add(" +")),
-                Some(DiffKind::Removed) => return Some(style::mark_del(" -")),
-                Some(DiffKind::Modified) => return Some(style::mark_mod(" ~")),
-                None => {}
+    /// diff_badge_of renders the colored diff badge for a row path: one
+    /// glyph per change kind present in the row's subtree, children of a
+    /// marked subtree inheriting its kind (`+` green added, `-` red
+    /// removed, `~` orange modified). With `drop_added` (unassigned keys)
+    /// the added glyph is suppressed.
+    pub(crate) fn diff_badge_of(&self, path: &[PathSeg], drop_added: bool) -> Option<String> {
+        let mut bits = self.diff_kinds_of(path)?;
+        if drop_added {
+            bits &= !DIFF_ADDED;
+        }
+        if bits == 0 {
+            return None;
+        }
+        let mut out = String::new();
+        if bits & DIFF_ADDED != 0 {
+            out.push_str(&style::mark_add(" +"));
+        }
+        if bits & DIFF_REMOVED != 0 {
+            out.push_str(&style::mark_del(" -"));
+        }
+        if bits & DIFF_MODIFIED != 0 {
+            out.push_str(&style::mark_mod(" ~"));
+        }
+        Some(out)
+    }
+
+    /// diff_kinds_of returns the change-kind bitmask for a row path: the
+    /// path's own aggregated subtree kinds, or — when the path itself is
+    /// unmarked — those of the nearest marked ancestor.
+    fn diff_kinds_of(&self, path: &[PathSeg]) -> Option<u8> {
+        if let Some(bits) = self.diff_agg.get(path) {
+            if *bits != 0 {
+                return Some(*bits);
+            }
+        }
+        for k in (1..path.len()).rev() {
+            if let Some(bits) = self.diff_agg.get(&path[..k]) {
+                if *bits != 0 {
+                    return Some(*bits);
+                }
             }
         }
         None
@@ -2571,10 +2686,12 @@ pub fn run_menu(files: Vec<FileSession>) -> Outcome {
         let mut redraw = false;
         if events.is_empty() {
             // Idle tick (the 250ms poll timeout): watch the active file's
-            // disk state. An external change opens the reload confirm; an
+            // disk state. An external change opens the reload confirm; a
+            // live fetch progress keeps the help-bar bar animating. An
             // unchanged file costs one stat per tick and no repaint.
-            redraw = app.poll_disk_change();
+            redraw = app.poll_disk_change() || crate::progress::progress().is_some();
         }
+        redraw |= app.poll_jobs();
         let mut i = 0;
         while i < events.len() {
             match &events[i] {

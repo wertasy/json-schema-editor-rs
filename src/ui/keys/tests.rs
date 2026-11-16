@@ -809,6 +809,142 @@ fn modified_and_removed_rows_get_distinct_badges() {
     assert!(!view.contains("\x1b[38;5;114m +"), "nothing is added here");
 }
 
+// --- fetch progress bar -----------------------------------------------------
+
+/// The help bar renders a progress bar while a catalog load is pending and
+/// a download streams.
+#[test]
+fn help_bar_shows_fetch_progress() {
+    let mut m = mk_app(test_doc(), test_opts());
+    m.width = 80;
+    let entry = crate::catalog::Entry {
+        name: "Slow".into(),
+        description: String::new(),
+        url: "https://example.invalid/slow.schema.json".into(),
+        file_match: Vec::new(),
+    };
+    m.pending_schema = Some((
+        entry,
+        std::thread::spawn(|| -> Result<crate::ui::LoadedSchema, String> {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            Ok(crate::ui::LoadedSchema {
+                schema: crate::smodel::untyped(&crate::doc::Doc::new()),
+                validate: None,
+                status: String::new(),
+                schema_member: false,
+            })
+        }),
+    ));
+    crate::progress::progress_begin("https://schemas.schemastore.org/catalog.json");
+    crate::progress::progress_total(4096);
+    crate::progress::progress_tick(1234);
+    let bar = m.help_line();
+    assert!(bar.contains('█'), "bar body: {bar}");
+    assert!(bar.contains("loading schema"), "label: {bar}");
+    assert!(bar.contains("1.2 kB"), "downloaded bytes: {bar}");
+    assert!(bar.contains("4.0 kB"), "total bytes: {bar}");
+    crate::progress::progress_end();
+    // once the job completed and the fetch is over, poll takes it and the
+    // hints come back
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        if m.pending_schema
+            .as_ref()
+            .is_none_or(|(_, h)| h.is_finished())
+        {
+            break;
+        }
+    }
+    m.poll_jobs();
+    assert!(!m.help_line().contains('█'));
+}
+
+/// A parent row aggregates every change kind inside its subtree (`+ ~` for
+/// an added sibling and a modified child); on a narrow terminal the badges
+/// collapse to a single plain `●`.
+#[test]
+fn parent_rows_aggregate_child_change_kinds() {
+    let build_schema = || {
+        schema_build(|b| {
+            let mut srv = fnode("srv", "Srv", Kind::Object);
+            let port = b.id(scalar("port", "Port", "integer"));
+            let host = b.id(scalar("host", "Host", "string"));
+            srv.children = vec![port, host];
+            let srv = b.id(srv);
+            b.id(FormNode {
+                key: "$".into(),
+                kind: Kind::Object,
+                children: vec![srv],
+                ..FormNode::default()
+            })
+        })
+    };
+    let mut m = app_with(
+        build_schema(),
+        dbuild(|db| {
+            db.obj(vec![(
+                "srv",
+                db.obj(vec![("port", db.n("9")), ("extra", db.s("x"))]),
+            )])
+        }),
+        test_opts(),
+    );
+    m.fs_mut().baseline = Some(dbuild(|db| {
+        db.obj(vec![(
+            "srv",
+            db.obj(vec![("port", db.n("1")), ("host", db.s("a"))]),
+        )])
+    }));
+    let view = plain(&m.view());
+    let srv_line = view
+        .lines()
+        .find(|l| l.contains("Srv") && l.contains('+'))
+        .unwrap_or_else(|| panic!("srv row with badges:\n{view}"));
+    assert!(
+        srv_line.contains('+') && srv_line.contains('~') && srv_line.contains('-'),
+        "the parent row must aggregate every child change kind:\n{srv_line:?}"
+    );
+    // each glyph keeps its own color in the raw frame
+    let raw = m.view();
+    assert!(
+        raw.contains("\x1b[38;5;114m +"),
+        "added glyph green: {raw:?}"
+    );
+    assert!(
+        raw.contains("\x1b[38;5;203m -"),
+        "removed glyph red: {raw:?}"
+    );
+    assert!(
+        raw.contains("\x1b[38;5;214m ~"),
+        "modified glyph orange: {raw:?}"
+    );
+
+    // narrow terminal: the badge string collapses to one plain dot
+    let mut narrow = app_with(
+        build_schema(),
+        dbuild(|db| {
+            db.obj(vec![(
+                "srv",
+                db.obj(vec![("port", db.n("9")), ("extra", db.s("x"))]),
+            )])
+        }),
+        test_opts(),
+    );
+    narrow.width = 24;
+    narrow.fs_mut().baseline = Some(dbuild(|db| {
+        db.obj(vec![(
+            "srv",
+            db.obj(vec![("port", db.n("1")), ("host", db.s("a"))]),
+        )])
+    }));
+    let view = plain(&narrow.view());
+    let srv_line = view.lines().find(|l| l.contains("srv")).expect("srv row");
+    assert!(
+        srv_line.contains('●') && !srv_line.contains('+'),
+        "insufficient space collapses the badges:\n{srv_line:?}"
+    );
+}
+
 #[test]
 fn menu_enum_overlay_search_no_match_stays() {
     let doc = test_doc();
@@ -13097,8 +13233,8 @@ fn narrow_rows_keep_the_diff_badge_and_mark_the_cut() {
     );
     assert!(row.contains('…'), "the cut must be marked: {row:?}");
     assert!(
-        row.ends_with('~'),
-        "the modified badge must survive: {row:?}"
+        row.ends_with('●'),
+        "the collapsed change dot must survive: {row:?}"
     );
 }
 

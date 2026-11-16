@@ -1,5 +1,6 @@
 use super::*;
-use crate::ui::menu::MouseTarget;
+use crate::ui::history::DiffKind;
+use crate::ui::menu::{DIFF_ADDED, DIFF_MODIFIED, DIFF_REMOVED, MouseTarget};
 
 /// ListFrame is the fixed chrome of the main list screen: the menu viewport
 /// height and every line pinned above the help bar. `list_view` and the
@@ -70,13 +71,31 @@ impl App {
         // Per-frame diff marks against the load/last-save baseline drive
         // the colored row badges. The classified diff walk visits every
         // location once per repaint — the same order as building the rows.
-        self.diff_marks.clear();
+        // Each mark ORs its kind into the path and every ancestor, so a
+        // parent row aggregates all change kinds inside its subtree.
+        self.diff_agg.clear();
         let marks = match self.fs().baseline.as_ref() {
             Some(base) => crate::ui::history::diff_kinds(base, &self.fs().doc),
             None => Vec::new(),
         };
         for (path, kind) in marks {
-            self.diff_marks.insert(path, kind);
+            let bit = match kind {
+                DiffKind::Added => DIFF_ADDED,
+                DiffKind::Removed => DIFF_REMOVED,
+                DiffKind::Modified => DIFF_MODIFIED,
+            };
+            // An added ARRAY ELEMENT propagates only within the element:
+            // the container itself must not grow a + badge, or every
+            // shifted sibling would inherit one. Removals and modifications
+            // propagate fully (parents aggregate their subtree).
+            let last_idx = path.iter().rposition(|s| matches!(s, PathSeg::Idx(_)));
+            let start = match (kind, last_idx) {
+                (DiffKind::Added, Some(pos)) => pos + 1,
+                _ => 0,
+            };
+            for k in start..=path.len() {
+                *self.diff_agg.entry(path[..k].to_vec()).or_insert(0) |= bit;
+            }
         }
         // The search overlay renders inline and needs &mut self (its
         // breadcrumb may synthesize menu rows), so it is taken out before
@@ -261,6 +280,9 @@ impl App {
 
     /// helpLine renders the bottom hint row.
     pub(super) fn help_line(&self) -> String {
+        if let Some(bar) = self.fetch_bar() {
+            return bar;
+        }
         if matches!(&self.overlay, Some(Overlay::Command(_))) {
             return self.rec_hint(
                 ": command · w/wa/wq/waq save · q quit · !<cmd> shell · r/a/w !<cmd> · tab completes · ↑/↓ history when idle · esc",
@@ -1900,8 +1922,8 @@ impl App {
         if self.drill_marker(r) {
             body += &format!(" {}", style::accent("--->"));
         }
-        // The change dot and the severity glyph are status markers: on a
-        // narrow terminal the body is cut (marked with …) so they stay
+        // The diff badge and the severity glyph are status markers: on a
+        // narrow terminal the body is cut (marked with `…`) so they stay
         // visible at the end of the row.
         let mut tail = String::new();
         if matches!(r.kind, RowKind::Field | RowKind::Drill | RowKind::Unknown) {
@@ -1913,9 +1935,37 @@ impl App {
                 tail = format!(" {}", style::fg3(WARN));
             }
             // the LCS-aligned diff badge replaces the plain change dot:
-            // `+` added (green), `-` removed (red), `~` modified (orange)
-            if let Some(badge) = self.diff_badge_of(&r.path) {
-                tail += &badge;
+            // one colored glyph per change kind in the row's subtree
+            // (`+` added green, `-` removed red, `~` modified orange).
+            // An unassigned key (no value or an unset null seed) does not
+            // count as added: creating an object does not badge its empty
+            // members.
+            let unset = self
+                .doc()
+                .get(&r.path)
+                .is_none_or(|n| matches!(self.doc().value(n), crate::doc::Value::Null));
+            let badge = self.diff_badge_of(&r.path, unset);
+            match badge {
+                Some(b)
+                    if {
+                        let w = display_width(&body) + display_width(&tail) + display_width(&b);
+                        #[cfg(test)]
+                        eprintln!(
+                            "DBG row {:?} body={} tail={} badge={} width={}",
+                            r.label,
+                            display_width(&body),
+                            display_width(&tail),
+                            display_width(&b),
+                            self.width
+                        );
+                        w > self.width.saturating_sub(1)
+                    } =>
+                {
+                    // not enough room for the per-kind glyphs: one plain dot
+                    tail += &format!(" {}", style::diff("●"));
+                }
+                Some(b) => tail += &b,
+                None => {}
             }
         }
         let line = format!(

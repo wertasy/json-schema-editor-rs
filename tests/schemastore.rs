@@ -310,3 +310,83 @@ fn pty_schema_picker() {
         "abort must not rewrite the config"
     );
 }
+
+/// A slow schema download after the picker selection shows the help-bar
+/// progress bar while the main loop keeps repainting.
+#[test]
+fn pty_schema_download_shows_progress_bar() {
+    // server: catalog lists a Slow schema (no fileMatch, so nothing
+    // auto-applies); slow.schema.json answers after a 700ms delay
+    let server = Arc::new(Server::http("127.0.0.1:0").expect("start server"));
+    let url = format!("http://{}", server.server_addr());
+    let s = Arc::clone(&server);
+    let base = url.clone();
+    thread::spawn(move || {
+        for request in s.incoming_requests() {
+            let path = request.url().split('?').next().unwrap_or("").to_string();
+            if path == "/catalog.json" {
+                let body = format!(
+                    concat!(
+                        r#"{{"schemas":["#,
+                        r#"{{"name":"Slow","description":"delayed","url":"{base}/slow.schema.json","fileMatch":["zzz-none.json"]}}]}}"#,
+                    ),
+                    base = base
+                )
+                .into_bytes();
+                let _ = request.respond(Response::from_data(body));
+            } else {
+                thread::sleep(Duration::from_millis(700));
+                let _ = request.respond(Response::from_data(MINI_SCHEMA.as_bytes().to_vec()));
+            }
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("mystery.json");
+    write_file(&cfg, r#"{"name":"z"}"#);
+    let cfg_arg = cfg.to_string_lossy().into_owned();
+    let cache = tempfile::tempdir().unwrap();
+    let cache_dir = cache.path().to_string_lossy().into_owned();
+    let catalog = url.clone() + "/catalog.json";
+
+    let mut pty = match PtySession::spawn(
+        dir.path(),
+        &[cfg_arg.as_str()],
+        &[
+            ("JSE_CATALOG_URL", catalog.as_str()),
+            ("JSE_CACHE_DIR", cache_dir.as_str()),
+        ],
+    ) {
+        PtySpawn::Ok(p) => p,
+        PtySpawn::Unavailable(e) => {
+            eprintln!("SKIP: no pty available: {e}");
+            return;
+        }
+    };
+
+    // startup: no fileMatch matches mystery.json, so the catalog picker
+    // opens automatically; esc continues schema-less
+    let (_, mut off) = pty.wait_frame("startup picker", 0, &["Select a schema"]);
+    pty.send(b"\x1b");
+    (_, off) = pty.wait_frame("root", off, &["name", "↑/↓ move"]);
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"S");
+    (_, off) = pty.wait_frame("picker", off, &["Select a schema"]);
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f"); // clear the preset query
+    (_, off) = pty.wait_frame("slow listed", off, &["Slow"]);
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\r"); // pick Slow: the download starts
+    // while the download streams, the help bar shows the progress
+    let (_, off2) = pty.wait_frame("progress bar", off, &["loading schema", "█"]);
+    // then the schema applies
+    pty.wait_frame("schema applied", off2, &["schema from SchemaStore: Slow"]);
+    pty.send(b"\x13"); // ctrl+s
+    pty.wait_frame("saved", off2, &["Write to "]);
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+    assert_eq!(
+        read_json(&cfg)["$schema"],
+        json!(url.clone() + "/slow.schema.json"),
+        "S did not record the chosen schema"
+    );
+}

@@ -83,6 +83,12 @@ pub fn note(loc: &str) -> String {
 static AGENTS: LazyLock<parking_lot::Mutex<HashMap<String, ureq::Agent>>> =
     LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 
+// --- fetch progress ---------------------------------------------------------
+// The progress state lives in crate::progress (updated here, read by the
+// UI); see crate::progress::progress.
+
+use crate::progress::{ProgressGuard, progress_begin, progress_end, progress_tick, progress_total};
+
 /// hostOf returns the host part of an absolute http(s) URL.
 #[doc(hidden)]
 pub(crate) fn host_of(loc: &str) -> &str {
@@ -365,6 +371,8 @@ fn load_http(loc: &str) -> Result<(Vec<u8>, String), String> {
         return Err(format!("{loc}: rate limited; retry in {secs}s"));
     }
 
+    progress_begin(loc);
+    let _progress = ProgressGuard;
     let mut req = agent_for(loc).get(loc);
     if let Some(c) = &cached {
         if !c.etag.is_empty() {
@@ -431,17 +439,31 @@ fn load_http(loc: &str) -> Result<(Vec<u8>, String), String> {
     }
 
     let max = MAX_BYTES.load(Ordering::Relaxed);
-    let data = match resp.body_mut().with_config().limit(max + 1).read_to_vec() {
-        Ok(d) => d,
-        Err(e) => {
-            // a body over the limit is a size error, not a network error
-            let msg = e.to_string();
-            if msg.contains("larger than request limit") {
-                return Err(format!("{loc}: response exceeds size limit"));
+    if let Some(total) = resp.body_mut().content_length() {
+        progress_total(total);
+    }
+    let mut data = Vec::new();
+    {
+        let mut reader = resp.body_mut().with_config().limit(max + 1).reader();
+        let mut buf = [0u8; 16 * 1024];
+        loop {
+            match std::io::Read::read(&mut reader, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    data.extend_from_slice(&buf[..n]);
+                    progress_tick(data.len() as u64);
+                }
+                Err(e) => {
+                    // a body over the limit is a size error, not a network error
+                    let msg = e.to_string();
+                    if msg.contains("larger than request limit") {
+                        return Err(format!("{loc}: response exceeds size limit"));
+                    }
+                    return stale_or_err(loc, &body, cached.is_some(), &msg);
+                }
             }
-            return stale_or_err(loc, &body, cached.is_some(), &msg);
         }
-    };
+    }
     if data.len() as u64 > max {
         return Err(format!("{loc}: response exceeds size limit"));
     }

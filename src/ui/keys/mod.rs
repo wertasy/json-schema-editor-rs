@@ -1245,9 +1245,12 @@ impl App {
     // --- schema switching (S) ----------------------------------------------
 
     /// openSchemaPicker searches the SchemaStore catalog for the active file
-    /// and switches the form model to the chosen schema. The document body is
-    /// untouched apart from the recorded schema location.
-    pub(super) fn open_schema_picker(&mut self) {
+    /// and switches the form model to the chosen schema. The catalog load
+    /// runs on a worker thread so the help bar can render a progress bar
+    /// while the network hangs; [`App::poll_jobs`] opens the picker when it
+    /// finishes. The document body is untouched apart from the recorded
+    /// schema location.
+    pub(super) fn begin_schema_picker(&mut self) {
         if self.opts().accessible {
             return; // no key events in the line protocol
         }
@@ -1255,14 +1258,35 @@ impl App {
             self.notice = "schema switching unavailable".to_string();
             return;
         }
+        if self.pending_catalog.is_some() {
+            return; // already loading
+        }
         let loc = crate::catalog::loc();
-        let entries = match crate::catalog::load(&loc) {
-            Ok(entries) => entries,
-            Err(e) => {
-                self.notice = format!("schema catalog: {e}");
-                return;
+        let spawned = std::thread::Builder::new()
+            .name("jse-catalog-load".to_string())
+            .spawn({
+                let loc = loc.clone();
+                move || crate::catalog::load(&loc)
+            });
+        match spawned {
+            Ok(handle) => self.pending_catalog = Some(handle),
+            Err(_) => {
+                // no thread available: fall back to the blocking load
+                let entries = match crate::catalog::load(&loc) {
+                    Ok(entries) => entries,
+                    Err(e) => {
+                        self.notice = format!("schema catalog: {e}");
+                        return;
+                    }
+                };
+                self.pick_with_entries(entries);
             }
-        };
+        }
+    }
+
+    /// pick_with_entries opens the schema picker for `entries` and applies
+    /// the chosen schema (its download itself runs as a pending job).
+    fn pick_with_entries(&mut self, entries: Vec<crate::catalog::Entry>) {
         let base = crate::paths::file_base(&self.opts().path);
         let chosen = crate::ui::schema_picker::pick(
             &entries,
@@ -1289,28 +1313,79 @@ impl App {
         self.apply_schema(&chosen);
     }
 
-    /// applySchema installs a chosen catalog schema: normalize it, rebuild
-    /// the validator, overwrite the recorded schema location, and reset the
-    /// menu stack. The live document becomes the input to the new form.
+    /// poll_jobs completes finished catalog / schema load jobs: the picker
+    /// opens on the loaded entries, the schema tail applies on the downloaded
+    /// schema. Returns whether the screen changed.
+    pub fn poll_jobs(&mut self) -> bool {
+        let mut changed = false;
+        let catalog_done = matches!(&self.pending_catalog, Some(h) if h.is_finished());
+        if catalog_done {
+            let handle = self.pending_catalog.take().expect("checked finished");
+            match handle.join() {
+                Ok(Ok(entries)) => {
+                    self.pick_with_entries(entries);
+                    changed = true;
+                }
+                Ok(Err(e)) => self.notice = format!("schema catalog: {e}"),
+                Err(_) => self.notice = "schema catalog: load thread failed".to_string(),
+            }
+        }
+        let schema_done = matches!(&self.pending_schema, Some((_, h)) if h.is_finished());
+        if schema_done {
+            let (chosen, handle) = self.pending_schema.take().expect("checked finished");
+            match handle.join() {
+                Ok(Ok(loaded)) => {
+                    self.finish_schema(&chosen, loaded);
+                    changed = true;
+                }
+                Ok(Err(e)) => self.notice = format!("load schema: {e}"),
+                Err(_) => self.notice = "load schema: load thread failed".to_string(),
+            }
+        }
+        changed
+    }
+
+    /// applySchema installs a chosen catalog schema. The schema download
+    /// and compile run on a worker thread so the help bar can render a
+    /// progress bar; [`App::finish_schema`] applies the result when the job
+    /// completes.
     pub(super) fn apply_schema(&mut self, chosen: &crate::catalog::Entry) {
-        let loc = chosen.url.clone();
         let Some(load) = self.opts().load_schema.clone() else {
             self.notice = "schema switching unavailable".to_string();
             return;
         };
+        let loc = chosen.url.clone();
+        let spawned = std::thread::Builder::new()
+            .name("jse-schema-load".to_string())
+            .spawn({
+                let loc = loc.clone();
+                let load = load.clone();
+                move || load(&loc)
+            });
+        match spawned {
+            Ok(handle) => self.pending_schema = Some((chosen.clone(), handle)),
+            Err(_) => {
+                // no thread available: fall back to the blocking load
+                match load(&chosen.url.clone()) {
+                    Ok(loaded) => self.finish_schema(chosen, loaded),
+                    Err(e) => self.notice = format!("load schema: {e}"),
+                }
+            }
+        }
+    }
+
+    /// finishSchema applies a downloaded schema: normalize it, rebuild the
+    /// validator, overwrite the recorded schema location, and reset the
+    /// menu stack. The live document becomes the input to the new form.
+    fn finish_schema(&mut self, chosen: &crate::catalog::Entry, loaded: crate::ui::LoadedSchema) {
+        let loc = chosen.url.clone();
         let crate::ui::LoadedSchema {
             schema: model,
             validate,
             status,
             schema_member,
             ..
-        } = match load(&loc) {
-            Ok(loaded) => loaded,
-            Err(e) => {
-                self.notice = format!("load schema: {e}");
-                return;
-            }
-        };
+        } = loaded;
         self.fs_mut().replace_schema_location(&loc, schema_member);
 
         let f = self.fs_mut();
@@ -1582,7 +1657,7 @@ impl App {
                     self.notice = "only one file is open".to_string();
                 }
             }
-            "S" => self.open_schema_picker(),
+            "S" => self.begin_schema_picker(),
             "ctrl+s" | "w" => self.save(),
             "W" => self.open_write_to(),
             ":" => self.open_command(),

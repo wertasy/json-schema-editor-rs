@@ -263,11 +263,12 @@ fn array_ops(
         }
     }
     // the matched suffix closes the walk
-    while f_tail < fa.len() {
+    let t_suffix = t_tail;
+    let suffix_len = fa.len() - f_tail;
+    for _ in 0..suffix_len {
         steps.push(Step::Equal);
-        f_tail += 1;
-        t_tail += 1;
     }
+    let _ = t_suffix;
 
     // fold remove+add runs into Replace pairs (a replaced slot reports one
     // changed location, not two dangling ones)
