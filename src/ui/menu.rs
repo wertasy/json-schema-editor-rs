@@ -912,6 +912,9 @@ pub struct App {
     /// over the path and its whole subtree (the empty path aggregates the
     /// entire document for the root row)
     pub diff_agg: std::collections::HashMap<Vec<crate::doc::jsondoc::PathSeg>, u8>,
+    /// paths marked as added (whole added subtrees): children carrying a
+    /// value inside these inherit the `+` badge
+    pub diff_added: Vec<Vec<crate::doc::jsondoc::PathSeg>>,
     /// in-flight SchemaStore catalog load (`S`): the event loop polls the
     /// handle and renders the help-bar progress until it finishes
     pub pending_catalog:
@@ -973,6 +976,7 @@ impl App {
             builtin_clipboard: None,
             mouse_targets: Vec::new(),
             diff_agg: std::collections::HashMap::new(),
+            diff_added: Vec::new(),
             pending_catalog: None,
             pending_schema: None,
         }
@@ -1498,15 +1502,12 @@ impl App {
     // --- mouse support ------------------------------------------------------
 
     /// diff_badge_of renders the colored diff badge for a row path: one
-    /// glyph per change kind present in the row's subtree, children of a
-    /// marked subtree inheriting its kind (`+` green added, `-` red
-    /// removed, `~` orange modified). With `drop_added` (unassigned keys)
-    /// the added glyph is suppressed.
-    pub(crate) fn diff_badge_of(&self, path: &[PathSeg], drop_added: bool) -> Option<String> {
-        let mut bits = self.diff_kinds_of(path)?;
-        if drop_added {
-            bits &= !DIFF_ADDED;
-        }
+    /// glyph per change kind present in the row's subtree (`+` green added,
+    /// `-` red removed, `~` orange modified). Children of an **added**
+    /// subtree inherit the `+` once they carry a value; unassigned keys are
+    /// suppressed (`drop_added`).
+    pub(crate) fn diff_badge_of(&self, path: &[PathSeg], has_value: bool) -> Option<String> {
+        let mut bits = self.diff_kinds_of(path, has_value)?;
         if bits == 0 {
             return None;
         }
@@ -1524,22 +1525,22 @@ impl App {
     }
 
     /// diff_kinds_of returns the change-kind bitmask for a row path: the
-    /// path's own aggregated subtree kinds, or — when the path itself is
-    /// unmarked — those of the nearest marked ancestor.
-    fn diff_kinds_of(&self, path: &[PathSeg]) -> Option<u8> {
-        if let Some(bits) = self.diff_agg.get(path) {
-            if *bits != 0 {
-                return Some(*bits);
-            }
+    /// union of the kinds marked on the path itself and anywhere inside its
+    /// subtree. There is no ancestor fallback — a changed sibling must not
+    /// mark this row. Children of an **added** subtree inherit the added bit
+    /// once they carry a value.
+    fn diff_kinds_of(&self, path: &[PathSeg], has_value: bool) -> Option<u8> {
+        let mut bits = *self.diff_agg.get(path).filter(|bits| **bits != 0)?;
+        if bits & DIFF_ADDED == 0
+            && has_value
+            && self
+                .diff_added
+                .iter()
+                .any(|added| path.starts_with(added) && path.len() > added.len())
+        {
+            bits |= DIFF_ADDED;
         }
-        for k in (1..path.len()).rev() {
-            if let Some(bits) = self.diff_agg.get(&path[..k]) {
-                if *bits != 0 {
-                    return Some(*bits);
-                }
-            }
-        }
-        None
+        Some(bits)
     }
 
     /// scroll_to clamps a scroll offset moved by one wheel tick (+1 = up).

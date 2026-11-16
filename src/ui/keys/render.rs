@@ -74,13 +74,17 @@ impl App {
         // Each mark ORs its kind into the path and every ancestor, so a
         // parent row aggregates all change kinds inside its subtree.
         self.diff_agg.clear();
+        self.diff_added.clear();
         let marks = match self.fs().baseline.as_ref() {
             Some(base) => crate::ui::history::diff_kinds(base, &self.fs().doc),
             None => Vec::new(),
         };
         for (path, kind) in marks {
             let bit = match kind {
-                DiffKind::Added => DIFF_ADDED,
+                DiffKind::Added => {
+                    self.diff_added.push(path.clone());
+                    DIFF_ADDED
+                }
                 DiffKind::Removed => DIFF_REMOVED,
                 DiffKind::Modified => DIFF_MODIFIED,
             };
@@ -1940,11 +1944,11 @@ impl App {
             // An unassigned key (no value or an unset null seed) does not
             // count as added: creating an object does not badge its empty
             // members.
-            let unset = self
+            let has_value = self
                 .doc()
                 .get(&r.path)
-                .is_none_or(|n| matches!(self.doc().value(n), crate::doc::Value::Null));
-            let badge = self.diff_badge_of(&r.path, unset);
+                .is_some_and(|n| !matches!(self.doc().value(n), crate::doc::Value::Null));
+            let badge = self.diff_badge_of(&r.path, has_value);
             match badge {
                 Some(b)
                     if {
