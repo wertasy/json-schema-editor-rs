@@ -3737,3 +3737,360 @@ fn pty_array_parent_shows_element_change_badges() {
     assert_eq!(read_json(&cfg)["servers"][0]["port"], json!(9));
     assert_eq!(read_json(&cfg)["servers"][0]["host"], json!("web"));
 }
+
+/// Mouse routing on overlays: left click selects a file-switcher row (the
+/// session switches to that file) and a reference-input candidate row (the
+/// anchor reference is applied to the focused field).
+#[test]
+fn pty_mouse_click_file_switcher_and_ref_picker_rows() {
+    let dir = mktemp();
+    let schema = dir.path().join("len.schema.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{
+        "copy":{"title":"Copy"},
+        "base":{"type":"object","title":"Base","properties":{"p":{"type":"integer","title":"P"}}},
+        "more":{"type":"object","title":"More","properties":{"q":{"type":"integer","title":"Q"}}}}}"#,
+    );
+    let file_a = dir.path().join("a.yaml");
+    write_file(&file_a, "note: alpha\n");
+    let file_b = dir.path().join("b.yaml");
+    write_file(&file_b, "copy:\nbase: &x\n  p: 1\nmore: &y\n  q: 2\n");
+    let schema_arg = arg(&schema);
+    let a_arg = arg(&file_a);
+    let b_arg = arg(&file_b);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &a_arg, &b_arg], &[], &cache) else {
+        return;
+    };
+    let (_, off) = pty.wait_frame("first file root", 0, &["a.yaml [1/2]", "↑/↓ move"]);
+    pty.pause(Duration::from_millis(200));
+
+    // s opens the file switcher; its title is screen line 0 and the rows
+    // start at line 1, so the second row is line 2 (1-based y=3).
+    pty.send(b"s");
+    let (_, off) = pty.wait_frame("file picker", off, &["Files (2)", "b.yaml"]);
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\x1b[<0;10;3M\x1b[<0;10;3m");
+    let (_, off) = pty.wait_frame("switched to second file", off, &["b.yaml [2/2]"]);
+    pty.pause(Duration::from_millis(200));
+    // `*` on the focused Copy row (scalar: every anchor is a legal
+    // reference target). The candidate list renders after one arrow-down
+    // (cycle selects the first candidate): rows at screen lines 3 and 4
+    // hold x and y. Clicking the second (1-based y=5) applies *y to copy.
+    pty.send(b"*");
+    let (_, off) = pty.wait_frame("reference input", off, &["reference: "]);
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\x1b[B"); // cycle: x selected, candidates render
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\x1b[B"); // cycle to y
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\x1b[<0;10;6M\x1b[<0;10;6m");
+    let (snap, off) = pty.wait_frame("reference applied", off, &["*y"]);
+    assert!(
+        !snap.get(off..).unwrap_or("").contains("reference: "),
+        "the reference input must close after the click"
+    );
+    pty.send(b"\x13"); // ctrl+s
+    pty.wait_frame("saved b.yaml", off, &["Write to ", b_arg.as_str()]);
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+
+    let text = read_text(&file_b);
+    // the y reference was applied to copy: the anchor definition moves to
+    // the new site and more becomes the alias (documented anchor semantics)
+    assert!(
+        text.contains("copy: &y") && text.contains("more: *y"),
+        "the clicked candidate must be applied as the field's reference:\n{text}"
+    );
+    assert!(
+        text.contains("&x") && text.contains("base:"),
+        "the anchor definition must survive untouched:\n{text}"
+    );
+}
+
+/// A right click closes the open overlay: the help page goes away and the
+/// root menu is back.
+#[test]
+fn pty_mouse_right_click_closes_overlay() {
+    let dir = mktemp();
+    let cfg = dir.path().join("rc.json");
+    write_file(&cfg, r#"{"alpha": 1}"#);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(
+        &[cfg_arg.as_str()],
+        &[("JSE_CATALOG_URL", "http://127.0.0.1:1/catalog.json")],
+        &cache,
+    ) else {
+        return;
+    };
+    let (_, off) = pty.wait_frame("schema-less root", 0, &["alpha", "↑/↓ move"]);
+    pty.pause(Duration::from_millis(200));
+
+    pty.send(b"?");
+    let (_, off) = pty.wait_frame("help page open", off, &["Keyboard help"]);
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\x1b[<2;10;5M\x1b[<2;10;5m"); // right click: esc equivalent
+    let (snap, _) = pty.wait_frame("help closed, root back", off, &["↑/↓ move"]);
+    let fresh = &snap[off..];
+    assert!(
+        !fresh.contains("Keyboard help"),
+        "the help page must be gone after the right click:\n{fresh}"
+    );
+    assert!(
+        fresh.contains("alpha"),
+        "the root menu must be rendered again:\n{fresh}"
+    );
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+}
+
+/// While the `:` command input is open a left click on a menu row must not
+/// commit the command, not move the menu cursor and not lose the typed text;
+/// after esc the mouse works on the same row again.
+#[test]
+fn pty_mouse_click_ignored_while_command_input_open() {
+    let dir = mktemp();
+    let cfg = dir.path().join("cmd.json");
+    write_file(&cfg, r#"{"alpha": 1, "beta": 2, "gamma": 3}"#);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(
+        &[cfg_arg.as_str()],
+        &[("JSE_CATALOG_URL", "http://127.0.0.1:1/catalog.json")],
+        &cache,
+    ) else {
+        return;
+    };
+    let (_, off) = pty.wait_frame("schema-less root", 0, &["alpha", "gamma", "↑/↓ move"]);
+    pty.pause(Duration::from_millis(200));
+
+    pty.send(b":");
+    let (_, off) = pty.wait_frame("command input open", off, &[": command ·"]);
+    pty.send(b"w");
+    pty.pause(Duration::from_millis(200));
+    // gamma sits at screen line 4 (1-based y=5): the click must be swallowed.
+    pty.send(b"\x1b[<0;10;5M\x1b[<0;10;5m");
+    pty.pause(Duration::from_millis(200));
+    let snap = pty.snapshot();
+    let fresh = &snap[off..];
+    assert!(
+        fresh.contains(":w"),
+        "the typed command text must survive the click:\n{fresh}"
+    );
+    assert!(
+        fresh.contains(": command ·"),
+        "the command input must stay open:\n{fresh}"
+    );
+    assert!(
+        fresh.contains("> alpha") && !fresh.contains("> gamma"),
+        "the click must not move the menu cursor:\n{fresh}"
+    );
+    assert!(
+        !fresh.contains("Write to "),
+        "the click must not commit the command:\n{fresh}"
+    );
+
+    // esc closes the input; afterwards the same click opens gamma's edit.
+    pty.send(b"\x1b");
+    let (_, off) = pty.wait_frame("command input closed", off, &["↑/↓ move"]);
+    assert!(
+        !pty.snapshot()
+            .get(off..)
+            .unwrap_or("")
+            .contains(": command ·"),
+        "the command hint must be gone after esc"
+    );
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\x1b[<0;10;5M\x1b[<0;10;5m");
+    pty.wait_frame("gamma edit opens", off, &[""]);
+    pty.pause(Duration::from_millis(200));
+    let snap = pty.snapshot();
+    let fresh = &snap[off..];
+    assert!(
+        fresh.contains("> gamma"),
+        "after esc the click must reach the menu row:\n{fresh}"
+    );
+    pty.send(b"\x1b"); // cancel the edit
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+    assert_eq!(read_json(&cfg), json!({"alpha": 1, "beta": 2, "gamma": 3}));
+}
+
+/// The wheel scrolls the help page: two ticks down reveal entries from the
+/// page's tail, two ticks up return to the top.
+#[test]
+fn pty_wheel_scrolls_help_page() {
+    let dir = mktemp();
+    let cfg = dir.path().join("wheel.json");
+    write_file(&cfg, r#"{"alpha": 1}"#);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    // A 12-row terminal shows 9 of the 47 help entries; the "p / P" entry
+    // (desc: smart paste…) sits below the fold.
+    let Some(mut pty) = pty_or_skip_sized(
+        &[cfg_arg.as_str()],
+        &[("JSE_CATALOG_URL", "http://127.0.0.1:1/catalog.json")],
+        &cache,
+        80,
+        12,
+    ) else {
+        return;
+    };
+    let (_, off) = pty.wait_frame("schema-less root", 0, &["alpha", "↑/↓ move"]);
+    pty.send(b"?");
+    let (_, off) = pty.wait_frame("help page open", off, &["Keyboard help"]);
+    pty.pause(Duration::from_millis(200));
+    let snap = pty.snapshot();
+    let page = &snap[snap.rfind("Keyboard help").expect("help frame")..];
+    assert!(
+        page.contains("move (wraps at both ends") && !page.contains("smart paste"),
+        "the top of the help page must show the first entries:\n{page}"
+    );
+
+    pty.send(b"\x1b[<65;10;5M"); // wheel down
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\x1b[<65;10;5M"); // wheel down again
+    pty.wait_frame("help scrolled down", off, &["smart paste"]);
+    pty.pause(Duration::from_millis(200));
+
+    pty.send(b"\x1b[<64;10;5M"); // wheel up
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\x1b[<64;10;5M"); // wheel up again
+    pty.pause(Duration::from_millis(300));
+    let snap = pty.snapshot();
+    let page = &snap[snap.rfind("Keyboard help").expect("help frame")..];
+    assert!(
+        !page.contains("smart paste"),
+        "wheel up must scroll back to the top:\n{page}"
+    );
+    assert!(
+        page.contains("move (wraps at both ends"),
+        "the first entry must be visible again:\n{page}"
+    );
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+}
+
+/// Quitting a multi-file session with one dirty file asks once; answering n
+/// discards everything and aborts with exit 130, writing no file.
+#[test]
+fn pty_multi_file_quit_no_exits_130() {
+    let dir = mktemp();
+    let schema = dir.path().join("mini.schema.json");
+    let file_a = dir.path().join("a.json");
+    let file_b = dir.path().join("b.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{"name":{"type":"string","title":"Name"}}}"#,
+    );
+    write_file(&file_a, r#"{"name": "alpha"}"#);
+    write_file(&file_b, r#"{"name": "beta"}"#);
+    let schema_arg = arg(&schema);
+    let a_arg = arg(&file_a);
+    let b_arg = arg(&file_b);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &a_arg, &b_arg], &[], &cache) else {
+        return;
+    };
+
+    let (_, off) = pty.wait_frame("first file root", 0, &["a.json [1/2]"]);
+    pty.send(b"\r\x15one\r"); // dirty a.json only
+    let (_, off) = pty.wait_frame("a.json dirty", off, &["●"]);
+    pty.send(b"\x1b"); // quit at the root: the save prompt appears
+    let (_, off) = pty.wait_frame("save prompt", off, &["Save changes? (y/n)"]);
+    pty.send(b"n"); // discard and exit
+    pty.wait_exit(130);
+
+    assert_eq!(read_json(&file_a)["name"], json!("alpha"));
+    assert_eq!(read_json(&file_b)["name"], json!("beta"));
+}
+
+/// `:wq` refuses to exit while save-time validation fails; `:wq!` skips the
+/// validation, writes the file and exits 0.
+#[test]
+fn command_wq_bang_skips_validation() {
+    let dir = mktemp();
+    let schema = dir.path().join("req.schema.json");
+    let out_file = dir.path().join("o.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{"port":{"type":"integer","title":"Port"}},"required":["port"]}"#,
+    );
+    write_file(&out_file, r#"{"name": "x"}"#);
+    let schema_arg = arg(&schema);
+    let out_arg = arg(&out_file);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &out_arg], &[], &cache) else {
+        return;
+    };
+
+    let (_, off) = pty.wait_frame("root menu", 0, &["↑/↓ move"]);
+    pty.send(b":wq\r");
+    let (_, off) = pty.wait_frame("save refused", off, &["Cannot save", "port"]);
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\x1b"); // close the error list; the session must continue
+    let (_, off) = pty.wait_frame("back at the menu", off, &["↑/↓ move"]);
+    pty.pause(Duration::from_millis(200));
+    pty.send(b":wq!\r"); // forced save bypasses the validation
+    pty.wait_exit(0);
+
+    assert_eq!(read_json(&out_file)["name"], json!("x"));
+}
+
+/// CLI rejection paths run as plain processes: a missing config argument is
+/// a usage error (exit 2), an http:// config path is refused, a config that
+/// fails to parse is a runtime error (exit 1), and --pick stays fatal when
+/// the schema catalog cannot be loaded.
+#[test]
+fn cli_rejection_paths() {
+    // no positional argument → usage on stderr, exit 2
+    let r = run_jse("", &[]);
+    assert_eq!(r.code, 2, "stderr:\n{}", r.stderr);
+    assert!(r.stderr.contains("no config file"), "stderr:\n{}", r.stderr);
+    assert!(r.stderr.contains("Usage: jse"), "stderr:\n{}", r.stderr);
+
+    // an http:// config path is a usage error, not a fetch
+    let r = run_jse("", &["-a", "http://example.com/cfg.json"]);
+    assert_eq!(r.code, 2, "stderr:\n{}", r.stderr);
+    assert!(
+        r.stderr.contains("config must be a local file path"),
+        "stderr:\n{}",
+        r.stderr
+    );
+
+    // a config that does not parse is a runtime error
+    let dir = mktemp();
+    let broken = dir.path().join("broken.json");
+    write_file(&broken, "{\"name\": ");
+    let broken_arg = arg(&broken);
+    let r = run_jse("", &["-a", broken_arg.as_str()]);
+    assert_eq!(r.code, 1, "stderr:\n{}", r.stderr);
+    assert!(r.stderr.contains("parse config"), "stderr:\n{}", r.stderr);
+
+    // --pick with an unreachable catalog is fatal (the run cannot open)
+    let dir = mktemp();
+    let cfg = dir.path().join("cfg.json");
+    write_file(&cfg, r#"{"name": "x"}"#);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let cache_dir = arg(cache.path());
+    let r = run_jse_env(
+        repo_root(),
+        "",
+        &["-a", "--pick", cfg_arg.as_str()],
+        &[
+            ("JSE_CACHE_DIR", cache_dir.as_str()),
+            ("JSE_CATALOG_URL", "http://127.0.0.1:1/catalog.json"),
+        ],
+        Duration::from_secs(30),
+    );
+    assert_ne!(r.code, 0, "stderr:\n{}", r.stderr);
+    assert!(
+        r.stderr.contains("load schema catalog"),
+        "stderr:\n{}",
+        r.stderr
+    );
+}

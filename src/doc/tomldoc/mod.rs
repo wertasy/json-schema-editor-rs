@@ -140,4 +140,25 @@ mod tests {
         assert_eq!(directive_loc("#:schema"), None);
         assert_eq!(directive_loc("# normal"), None);
     }
+
+    /// When the #:schema directive and the top-level $schema member are
+    /// both present, reading takes the member (schema_location reads the
+    /// field first); without the field the directive still applies.
+    #[test]
+    fn toml_field_schema_beats_directive() {
+        let (doc, meta) =
+            parse("#:schema head.toml\n\"$schema\" = \"field.toml\"\na = 1\n").unwrap();
+        assert_eq!(schema_directive(&doc, &meta).as_deref(), Some("head.toml"));
+        assert_eq!(
+            crate::doc::schema_from_doc(&doc).as_deref(),
+            Some("field.toml")
+        );
+        let (doc2, meta2) = parse("#:schema head.toml\na = 1\n").unwrap();
+        use crate::doc::{Codec, codec_for};
+        let c = codec_for("a.toml");
+        assert_eq!(
+            c.schema_location(&doc2, &meta2).as_deref(),
+            Some("head.toml")
+        );
+    }
 }

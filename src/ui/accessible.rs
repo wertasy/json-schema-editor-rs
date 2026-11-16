@@ -1638,4 +1638,201 @@ mod tests {
             serde_json::json!({"name": "newname"})
         );
     }
+
+    /// Writes one throwaway schema file and returns its location.
+    fn schema_file(name: &str, text: &str) -> String {
+        let tmp = std::env::temp_dir().join("jse-rust-e2e");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join(name);
+        std::fs::write(&path, text).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    /// EOF adopts defaults: with the input stream closed before any answer,
+    /// the root object's Navigate select keeps "Save and exit" and the
+    /// fields keep their schema defaults, so the document still saves.
+    #[test]
+    fn eof_defaults_root_object_save() {
+        let schema_loc = schema_file(
+            "eof-obj.schema.json",
+            r#"{"type":"object","properties":{"name":{"type":"string","title":"Name","default":"abc"}},"required":["name"]}"#,
+        );
+        let saved = Arc::new(Mutex::new(None));
+        let sess = json_session(&schema_loc, "", "/tmp/eof-obj.json", &saved);
+        let (oc, out) = run(vec![sess], "");
+        assert!(oc.saved && !oc.aborted, "outcome {oc:?}\n{out}");
+        in_order(&out, &["Name ", "Navigate ", "Save and exit"]);
+        assert_eq!(
+            saved_json(&saved),
+            serde_json::json!({"$schema": schema_loc, "name": "abc"}),
+            "\n{out}"
+        );
+    }
+
+    /// EOF on a root array defaults the manager to "< Add item": the add
+    /// flow runs (its own fields take EOF defaults) and the following root
+    /// EOF check aborts the session without saving.
+    #[test]
+    fn eof_defaults_root_array_add_item() {
+        let schema_loc = schema_file(
+            "eof-arr.schema.json",
+            r#"{"type":"array","title":"Items","items":{"type":"object","title":"Item","properties":{"v":{"type":"string","title":"V","default":"x"}}}}"#,
+        );
+        let saved = Arc::new(Mutex::new(None));
+        let sess = json_session(&schema_loc, "[]", "/tmp/eof-arr.json", &saved);
+        let (oc, out) = run(vec![sess], "");
+        in_order(&out, &["Items items", "1. < Add item\n2. Save and exit\n"]);
+        assert!(!oc.saved && oc.aborted, "outcome {oc:?}\n{out}");
+        assert!(saved.lock().is_none(), "EOF must not save:\n{out}");
+    }
+
+    /// A multiselect backed by minItems rejects a short selection with
+    /// "select at least N" and re-asks until the minimum is met.
+    #[test]
+    fn multiselect_min_items_retry() {
+        let schema_loc = schema_file(
+            "minitems.schema.json",
+            r#"{"type":"object","properties":{"levels":{"type":"array","title":"Levels","minItems":2,"items":{"type":"string","enum":["debug","info","warn"]}}}}"#,
+        );
+        let saved = Arc::new(Mutex::new(None));
+        let sess = json_session(&schema_loc, "", "/tmp/minitems.json", &saved);
+        // toggle info, confirm → too few; toggle warn, confirm → accepted;
+        // Navigate default = save.
+        let script = "2\n0\n3\n0\n\n";
+        let (oc, out) = run(vec![sess], script);
+        assert!(oc.saved && !oc.aborted, "outcome {oc:?}\n{out}");
+        in_order(
+            &out,
+            &[
+                "Levels ",
+                "Select up to 3 options.\n1.   debug\n",
+                "2.   info",
+                "2. ✓ info",
+                "select at least 2",
+                "3. ✓ warn",
+            ],
+        );
+        let got = saved_json(&saved);
+        assert_eq!(
+            got["levels"],
+            serde_json::json!(["info", "warn"]),
+            "levels after retry:\n{out}"
+        );
+    }
+
+    /// Under --force, answering "y" at the "Save anyway?" confirm writes
+    /// the invalid document and the outcome reports with_errors.
+    #[test]
+    fn force_saves_despite_validation_errors() {
+        let schema_loc = schema_file(
+            "force.schema.json",
+            r#"{"type":"object","properties":{"port":{"type":"integer","title":"Port","minimum":1024}},"required":["port"],"additionalProperties":false}"#,
+        );
+        let saved = Arc::new(Mutex::new(None));
+        let mut sess = json_session(
+            &schema_loc,
+            r#"{"port":8080,"rogue":1}"#,
+            "/tmp/force.json",
+            &saved,
+        );
+        sess.opts.force = true;
+        // Port re-typed, Navigate default = save, save-anyway = y.
+        let (oc, out) = run(vec![sess], "8080\n\ny\n");
+        assert!(
+            oc.saved && oc.with_errors && !oc.aborted,
+            "outcome {oc:?}\n{out}"
+        );
+        in_order(&out, &["Port ", "Navigate ", "Save anyway? [y/N] "]);
+        assert_eq!(
+            saved_json(&saved),
+            serde_json::json!({"$schema": schema_loc, "port": 8080, "rogue": 1}),
+            "\n{out}"
+        );
+    }
+
+    /// "Remove item…" is a two-step flow — pick the entry, confirm — and
+    /// the array loses exactly that item.
+    #[test]
+    fn remove_item_two_step_confirm() {
+        let schema_loc = format!("{GO}/examples/server.schema.json");
+        let cfg = r#"{"$schema": "server.schema.json", "name": "demo", "server": {"port": 8080}, "logging": {"tags": ["alpha", "beta", "gamma"]}}"#;
+        let saved = Arc::new(Mutex::new(None));
+        let sess = json_session(&schema_loc, cfg, "/tmp/remove.json", &saved);
+        let script = concat!(
+            "demo\n",      // Name (required)
+            "2\n2\n",      // Mode → http, Navigate → Logging
+            "2\n0\n",      // Levels: toggle info, confirm
+            "2\n",         // Navigate → Tags items (3 entries)
+            "7\n",         // Remove item…
+            "2\n",         // pick 1: beta
+            "y\n",         // confirm "Remove item 1?"
+            "7\n",         // manager Done (7 options after removal)
+            "0\n1\n",      // Levels confirm, Logging Done
+            "demo\n\n5\n", // Name, Mode default, Save and exit
+        );
+        let (oc, out) = run(vec![sess], script);
+        assert!(oc.saved && !oc.aborted, "outcome {oc:?}\n{out}");
+        in_order(
+            &out,
+            &[
+                "Tags items",
+                "1. < Add item\n2. 0: alpha\n3. 1: beta\n4. 2: gamma\n",
+                "7. Remove item…",
+                "Remove item \n1. 0: alpha\n2. 1: beta\n3. 2: gamma\n",
+                "Remove item 1? [Y/n] ",
+                "1. < Add item\n2. 0: alpha\n3. 1: gamma\n",
+            ],
+        );
+        let got = saved_json(&saved);
+        let tags: Vec<&str> = got["logging"]["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t.as_str().unwrap())
+            .collect();
+        assert_eq!(tags, vec!["alpha", "gamma"], "tags after remove: {got}");
+    }
+
+    /// A root-array document: the manager's default "< Add item" appends
+    /// one item through the item form and the array document saves.
+    #[test]
+    fn root_array_document_saves() {
+        let schema_loc = schema_file(
+            "root-arr.schema.json",
+            r#"{"type":"array","title":"Ports","items":{"type":"integer","title":"Port","minimum":1024}}"#,
+        );
+        let saved = Arc::new(Mutex::new(None));
+        let sess = json_session(&schema_loc, "[]", "/tmp/root-arr.json", &saved);
+        // Add item (default), Port, Save and exit (6th: add, item, up, down,
+        // remove, save).
+        let (oc, out) = run(vec![sess], "\n8080\n6\n");
+        assert!(oc.saved && !oc.aborted, "outcome {oc:?}\n{out}");
+        in_order(
+            &out,
+            &[
+                "Ports items",
+                "1. < Add item\n2. Save and exit\n",
+                "Port ",
+                "1. < Add item\n2. 0: 8080\n3. Move item up…",
+                "6. Save and exit",
+            ],
+        );
+        assert_eq!(saved_json(&saved), serde_json::json!([8080]), "\n{out}");
+    }
+
+    /// A scalar-root document: the root field takes the typed value and
+    /// the document saves as a bare JSON string.
+    #[test]
+    fn scalar_root_document_saves() {
+        let schema_loc = schema_file(
+            "root-scalar.schema.json",
+            r#"{"type":"string","title":"Token"}"#,
+        );
+        let saved = Arc::new(Mutex::new(None));
+        let sess = json_session(&schema_loc, "", "/tmp/root-scalar.json", &saved);
+        let (oc, out) = run(vec![sess], "hello\n");
+        assert!(oc.saved && !oc.aborted, "outcome {oc:?}\n{out}");
+        in_order(&out, &["Token "]);
+        assert_eq!(saved_json(&saved), serde_json::json!("hello"), "\n{out}");
+    }
 }

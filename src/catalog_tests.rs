@@ -16,7 +16,7 @@ fn names(entries: &[Entry]) -> Vec<&str> {
 }
 
 /// Serializes tests that mutate JSE_CATALOG_URL.
-static ENV_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+pub(crate) static ENV_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 #[test]
 fn match_exact_name() {

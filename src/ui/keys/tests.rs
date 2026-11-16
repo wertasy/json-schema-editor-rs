@@ -14403,3 +14403,386 @@ fn undo_of_first_child_edit_stays_in_the_variant_editor() {
         "undo lands the cursor back on b inside the editor"
     );
 }
+
+// --- feature guard tests (audit additions) ---------------------------------
+
+/// json_dump renders the live document for before/after comparisons.
+fn json_dump(doc: &Doc) -> String {
+    crate::doc::codec_for("")
+        .write(doc, &crate::doc::Meta::default())
+        .unwrap_or_default()
+}
+
+/// row_paths lists the current menu's row paths in order.
+fn row_paths(m: &mut App) -> Vec<Vec<PathSeg>> {
+    m.menu_rows().into_iter().map(|r| r.path).collect()
+}
+
+/// macro_keys renders a recorded macro as its key names.
+fn macro_keys(m: &App) -> Vec<String> {
+    m.macro_buf.iter().map(|k| k.key_str()).collect()
+}
+
+/// Restores JSE_CATALOG_URL even when an assertion panics mid-test.
+struct CatalogUrlGuard(Option<String>);
+
+impl CatalogUrlGuard {
+    fn set(url: &str) -> Self {
+        let saved = std::env::var("JSE_CATALOG_URL").ok();
+        // SAFETY: test-only env manipulation, serialized by ENV_LOCK
+        unsafe {
+            std::env::set_var("JSE_CATALOG_URL", url);
+        }
+        CatalogUrlGuard(saved)
+    }
+}
+
+impl Drop for CatalogUrlGuard {
+    fn drop(&mut self) {
+        // SAFETY: test-only env manipulation, serialized by ENV_LOCK
+        unsafe {
+            match self.0.take() {
+                Some(s) => std::env::set_var("JSE_CATALOG_URL", s),
+                None => std::env::remove_var("JSE_CATALOG_URL"),
+            }
+        }
+    }
+}
+
+#[test]
+fn macro_record_stop_and_replay_moves_cursor() {
+    let mut m = mk_app(test_doc(), test_opts());
+    press(&mut m, &["@"]);
+    assert!(m.recording, "@ arms the recorder");
+    assert_eq!(
+        m.notice, "recording — @ stops, . is ignored while recording",
+        "notice = {}",
+        m.notice
+    );
+    press(&mut m, &["j", "j"]);
+    assert_eq!(m.rec_buf.len(), 2, "each key is captured");
+    assert_eq!(cursor_cursor(&mut m), 2, "recorded keys still execute");
+
+    // `.` while recording is swallowed: neither played nor captured
+    press(&mut m, &["."]);
+    assert!(m.recording, "recording continues");
+    assert_eq!(m.rec_buf.len(), 2, "the dot is not recorded");
+    assert_eq!(cursor_cursor(&mut m), 2, "the dot did not replay");
+
+    press(&mut m, &["@"]);
+    assert!(!m.recording, "second @ stops recording");
+    assert_eq!(macro_keys(&m), vec!["j", "j"]);
+    assert_eq!(m.notice, "macro recorded: 2 keys — . plays it");
+
+    // replay walks the same keys from the current position
+    press(&mut m, &["."]);
+    assert_eq!(cursor_cursor(&mut m), 4, "replayed j j from cursor 2");
+    assert_eq!(m.notice, "played 2 keys");
+    assert!(!m.recording, "replay never re-arms the recorder");
+}
+
+#[test]
+fn macro_replays_pending_gg_as_one_jump() {
+    // g has pending semantics; a macro stores the raw keys and replay runs
+    // them one by one, so the buffered gg lands on row 0.
+    let mut m = mk_app(test_doc(), test_opts());
+    press(&mut m, &["down", "down", "@", "g", "g", "@"]);
+    assert!(!m.recording);
+    assert_eq!(macro_keys(&m), vec!["g", "g"]);
+    assert_eq!(cursor_cursor(&mut m), 0, "gg executed while recording");
+    press(&mut m, &["down", "down"]);
+    assert_eq!(cursor_cursor(&mut m), 2);
+    press(&mut m, &["."]);
+    assert_eq!(cursor_cursor(&mut m), 0, "replayed gg jumps home");
+    assert_eq!(m.notice, "played 2 keys");
+}
+
+#[test]
+fn macro_empty_stop_cancels_and_keeps_previous_macro() {
+    let mut m = mk_app(test_doc(), test_opts());
+    press(&mut m, &["@", "j", "@"]);
+    assert_eq!(macro_keys(&m), vec!["j"]);
+
+    // stopping with an empty buffer cancels: the old macro survives
+    press(&mut m, &["@", "@"]);
+    assert!(!m.recording);
+    assert_eq!(m.notice, "recording cancelled (no keys captured)");
+    assert_eq!(macro_keys(&m), vec!["j"], "previous macro kept");
+    press(&mut m, &["."]);
+    assert_eq!(cursor_cursor(&mut m), 2, "replay still uses the old macro");
+}
+
+#[test]
+fn macro_dot_without_macro_hints() {
+    let mut m = mk_app(test_doc(), test_opts());
+    press(&mut m, &["."]);
+    assert!(!m.recording);
+    assert_eq!(m.notice, "no macro recorded (@ records one)");
+    assert_eq!(cursor_cursor(&mut m), 0, "nothing was played");
+}
+
+#[test]
+fn macro_keys_stay_literal_inside_text_input() {
+    let mut m = mk_app(test_doc(), test_opts());
+    press(&mut m, &["enter"]); // name row: in-place editor
+    assert!(matches!(m.overlay, Some(Overlay::Edit(_))));
+    press(&mut m, &["q", "@", "."]);
+    assert!(!m.recording, "input keys never arm the recorder");
+    match &m.overlay {
+        Some(Overlay::Edit(e)) => assert_eq!(e.ti.value(), "webappq@.", "all three are literal"),
+        _ => panic!("editor should stay open"),
+    }
+    press(&mut m, &["esc"]);
+    assert!(m.overlay.is_none());
+    assert_eq!(str_at(&m.fs().doc, &["name"]), "webapp", "esc cancels");
+}
+
+#[test]
+fn macro_limit_stops_recording_with_notice() {
+    let mut m = mk_app(test_doc(), test_opts());
+    let mut keys = vec!["@"];
+    for _ in 0..crate::ui::menu::MAX_MACRO_KEYS {
+        keys.push("j");
+    }
+    press(&mut m, &keys);
+    assert!(!m.recording, "the cap stops recording by itself");
+    assert_eq!(m.macro_buf.len(), crate::ui::menu::MAX_MACRO_KEYS);
+    assert!(
+        m.macro_buf.iter().all(|k| k.key_str() == "j"),
+        "everything up to the cap is kept"
+    );
+    assert!(
+        m.notice.contains("macro limit reached"),
+        "notice = {}",
+        m.notice
+    );
+}
+
+#[test]
+fn z_hides_and_restores_empty_key_rows() {
+    let mut m = mk_app(test_doc(), test_opts());
+    let before = row_paths(&mut m);
+    for key in ["mode", "logging", "auth"] {
+        assert!(before.contains(&sp(&[key])), "{key} row is listed");
+    }
+    assert!(before.contains(&sp(&["name"])));
+    assert_eq!(cursor_cursor(&mut m), 0);
+
+    press(&mut m, &["z"]);
+    assert!(m.hide_empty);
+    assert_eq!(m.notice, "empty fields hidden · z shows them");
+    assert_eq!(
+        row_paths(&mut m),
+        vec![sp(&["name"]), sp(&["server"]), sp(&["mounts"])]
+    );
+    assert_eq!(
+        row_at(&mut m).path,
+        sp(&["name"]),
+        "cursor stays on its row"
+    );
+
+    press(&mut m, &["z"]);
+    assert!(!m.hide_empty);
+    assert_eq!(m.notice, "empty fields shown");
+    let restored = row_paths(&mut m);
+    for key in ["mode", "logging", "auth"] {
+        assert!(restored.contains(&sp(&[key])), "{key} row is back");
+    }
+}
+
+#[test]
+fn fast_move_forward_no_match_and_wrap() {
+    let mut m = mk_app(test_doc(), test_opts());
+    press(&mut m, &["f", "s"]);
+    assert!(m.fast_move.is_none(), "the target key consumed the wait");
+    assert_eq!(row_at(&mut m).path, sp(&["server"]));
+
+    // no key starts with z: the cursor stays put
+    press(&mut m, &["f", "z"]);
+    assert!(m.fast_move.is_none());
+    assert_eq!(cursor_cursor(&mut m), 2, "no match keeps the cursor");
+    assert_eq!(m.notice, "no key starts with \"z\"");
+
+    // the search wraps past the end
+    press(&mut m, &["G"]);
+    assert_eq!(cursor_cursor(&mut m), 5);
+    press(&mut m, &["f", "n"]);
+    assert_eq!(row_at(&mut m).path, sp(&["name"]), "wrap lands on name");
+}
+
+#[test]
+fn fast_move_reverse_and_esc_cancel() {
+    let mut m = mk_app(test_doc(), test_opts());
+    press(&mut m, &["F", "m"]);
+    assert_eq!(row_at(&mut m).path, sp(&["mounts"]), "F searches upward");
+
+    press(&mut m, &["f", "esc"]);
+    assert!(m.fast_move.is_none());
+    assert_eq!(m.notice, "fast move cancelled");
+    assert_eq!(cursor_cursor(&mut m), 4, "cancel leaves the cursor alone");
+    press(&mut m, &["j"]);
+    assert_eq!(cursor_cursor(&mut m), 5, "movement resumes after cancel");
+}
+
+#[test]
+fn fast_move_waits_consume_literal_keys() {
+    let mut m = mk_app(test_doc(), test_opts());
+    // q during the wait is a target character, not the esc alias
+    press(&mut m, &["f", "q"]);
+    assert!(m.fast_move.is_none(), "the wait consumed q");
+    assert!(!m.exiting, "q must not exit the session here");
+    assert_eq!(m.notice, "no key starts with \"q\"");
+    assert_eq!(cursor_cursor(&mut m), 0);
+
+    // the same for `.`: no replay while a fast move waits
+    press(&mut m, &["f", "."]);
+    assert!(m.fast_move.is_none());
+    assert_eq!(m.notice, "no key starts with \".\"");
+    assert_eq!(cursor_cursor(&mut m), 0, "nothing was played");
+}
+
+#[test]
+fn e_hints_no_value_to_edit_on_valueless_rows() {
+    let mut m = mk_app(test_doc(), test_opts());
+    press(&mut m, &["down", "down", "down", "enter"]); // logging
+    press(&mut m, &["enter"]); // levels: enum array
+    assert_eq!(m.top().unwrap().kind, MenuKind::EnumArray);
+    press(&mut m, &["e"]); // cursor on a toggle option row
+    assert_eq!(m.notice, "no value to edit");
+    assert!(m.pending_edit.is_none(), "no editor armed");
+
+    // contrast: a row holding a value arms $EDITOR (stashed in tests)
+    press(&mut m, &["esc", "esc", "home"]);
+    press(&mut m, &["e"]);
+    let edit = m.pending_edit.as_ref().expect("value editor armed");
+    assert_eq!(edit.target, sp(&["name"]));
+}
+
+#[test]
+fn s_hints_only_one_file() {
+    let mut m = mk_app(test_doc(), test_opts());
+    press(&mut m, &["s"]);
+    assert_eq!(m.notice, "only one file is open");
+    assert!(m.overlay.is_none(), "no file picker opened");
+}
+
+#[test]
+fn delete_from_element_form_returns_to_item_list() {
+    let doc = dbuild(|db| {
+        db.obj(vec![(
+            "mounts",
+            db.arr(vec![
+                db.obj(vec![("src", db.s("/data")), ("dst", db.s("/mnt"))]),
+                db.obj(vec![("src", db.s("/b")), ("dst", db.s("/b2"))]),
+            ]),
+        )])
+    });
+    let mut m = mk_app(doc, test_opts());
+    press(&mut m, &["down", "down", "down", "down", "enter"]); // mounts items
+    assert_eq!(m.top().unwrap().kind, MenuKind::Items);
+    press(&mut m, &["enter"]); // element form of item 0
+    assert_eq!(m.top().unwrap().kind, MenuKind::Object);
+
+    press(&mut m, &["D"]);
+    assert!(matches!(m.overlay, Some(Overlay::Confirm(_))));
+    press(&mut m, &["n"]);
+    assert!(m.overlay.is_none());
+    assert_eq!(m.top().unwrap().kind, MenuKind::Object, "n keeps the form");
+    assert_eq!(arr_len(&m.fs().doc, &sp(&["mounts"])), 2);
+
+    press(&mut m, &["D", "y"]);
+    assert!(m.overlay.is_none());
+    assert_eq!(
+        m.top().unwrap().kind,
+        MenuKind::Items,
+        "confirm pops back to the item list"
+    );
+    assert_eq!(arr_len(&m.fs().doc, &sp(&["mounts"])), 1);
+    assert_eq!(
+        sget(&m.fs().doc, &[ks("mounts"), PathSeg::Idx(0), ks("src")]),
+        "/b",
+        "the surviving item is the old second one"
+    );
+}
+
+#[test]
+fn schema_compile_failure_disables_validation_but_opens() {
+    // smodel is lenient about a non-array "required", while the jsonschema
+    // compiler rejects it: the session must still open, minus validation.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let schema = dir.path().join("schema.json");
+    std::fs::write(
+        &schema,
+        br#"{"type":"object","properties":{"a":{"type":"string"}},"required":"not-an-array"}"#,
+    )
+    .expect("schema write");
+    let config = dir.path().join("config.json");
+    std::fs::write(&config, br#"{"a": "x"}"#).expect("config write");
+
+    let sess = crate::session::load_session(
+        config.to_str().expect("config path"),
+        schema.to_str().expect("schema path"),
+        false,
+        false,
+        false,
+    )
+    .expect("a validator compile failure must not fail the load");
+    assert!(
+        sess.opts.validate.is_none(),
+        "compile failure disables save-time validation"
+    );
+    assert!(
+        sess.opts
+            .status
+            .contains("schema compile failed, save-time validation disabled"),
+        "status = {}",
+        sess.opts.status
+    );
+    assert!(!sess.schema.schema_less, "the form tree still applies");
+    let _ = child(&sess.schema, sess.root, "a"); // panics unless mapped
+
+    let mut m = App::new(vec![sess]);
+    assert!(find_row(&mut m, |r, _| r.path == sp(&["a"])).is_some());
+    press(&mut m, &["enter"]); // editing keeps working
+    match &mut m.overlay {
+        Some(Overlay::Edit(e)) => e.ti.set_value("y"),
+        _ => panic!("edit overlay missing"),
+    }
+    press(&mut m, &["enter"]);
+    assert_eq!(str_at(&m.fs().doc, &["a"]), "y");
+}
+
+#[test]
+fn s_catalog_failure_keeps_current_schema() {
+    // the lock serializes with catalog_tests' JSE_CATALOG_URL mutations
+    let _g = crate::catalog_tests::ENV_LOCK.lock();
+    let _guard = CatalogUrlGuard::set("http://127.0.0.1:1/jse-guard-missing-catalog.json");
+
+    let mut opts = test_opts();
+    opts.load_schema = Some(Arc::new(
+        |_: &str| -> Result<crate::ui::LoadedSchema, String> {
+            Err("picker must not reach schema load".to_string())
+        },
+    ));
+    let mut m = mk_app(test_doc(), opts);
+    let root_before = m.fs().schema.root;
+    let doc_before = json_dump(&m.fs().doc);
+
+    press(&mut m, &["S"]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while m.pending_catalog.is_some() && std::time::Instant::now() < deadline {
+        m.poll_jobs();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    m.poll_jobs();
+    assert!(m.pending_catalog.is_none(), "catalog job finished");
+    assert!(
+        m.notice.starts_with("schema catalog:"),
+        "notice = {}",
+        m.notice
+    );
+    assert_eq!(m.fs().schema.root, root_before, "schema kept");
+    assert_eq!(json_dump(&m.fs().doc), doc_before, "document kept");
+    assert!(m.overlay.is_none(), "no picker opened");
+    assert_eq!(m.fs().stack.len(), 1, "navigation untouched");
+}

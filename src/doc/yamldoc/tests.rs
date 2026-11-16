@@ -32,6 +32,19 @@ fn parse_number_normalization() {
     assert_eq!(doc.write(), want.write());
 }
 
+/// Non-core YAML tags resolve to plain strings (!!binary, unknown !Foo):
+/// the payload parses as a string value and the tag does not survive a
+/// write (unknown → string).
+#[test]
+fn parse_tags_degrade_to_strings() {
+    for (src, val) in [("v: !!binary aGk=\n", "aGk="), ("v: !Foo bar\n", "bar")] {
+        let (doc, meta) = parse(src).unwrap();
+        let want = must_json(&serde_json::json!({ "v": val }).to_string());
+        assert_eq!(doc.write(), want.write(), "value in {src:?}");
+        assert_eq!(write_string(&doc, Some(&meta)), format!("v: {val}\n"));
+    }
+}
+
 #[test]
 fn parse_errors() {
     let cases = [
@@ -485,6 +498,27 @@ fn yaml_explicit_schema_member() {
     c.clear_schema_location(&mut p.doc, &mut p.meta);
     assert!(c.schema_location(&p.doc, &p.meta).is_none());
     assert_eq!(c.write(&p.doc, &p.meta).unwrap(), "name: demo\n");
+}
+
+/// When the header directive and the top-level $schema member are both
+/// present, reading takes the member (schema_location reads the field
+/// first); without the field the directive still applies.
+#[test]
+fn yaml_field_schema_beats_directive() {
+    let c = codec_for("a.yaml");
+    let src = "# yaml-language-server: $schema=head.json\n$schema: field.json\nname: demo\n";
+    let p = c.parse(src).unwrap();
+    assert_eq!(
+        c.schema_location(&p.doc, &p.meta).as_deref(),
+        Some("field.json")
+    );
+    let p2 = c
+        .parse("# yaml-language-server: $schema=head.json\nname: demo\n")
+        .unwrap();
+    assert_eq!(
+        c.schema_location(&p2.doc, &p2.meta).as_deref(),
+        Some("head.json")
+    );
 }
 
 #[test]
