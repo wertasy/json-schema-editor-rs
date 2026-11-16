@@ -74,7 +74,6 @@ impl App {
         // Each mark ORs its kind into the path and every ancestor, so a
         // parent row aggregates all change kinds inside its subtree.
         self.diff_agg.clear();
-        self.diff_removed.clear();
         let marks = match self.fs().baseline.as_ref() {
             Some(base) => crate::ui::history::diff_kinds(base, &self.fs().doc),
             None => Vec::new(),
@@ -142,7 +141,6 @@ impl App {
             }
         }
         self.diff_added = added_paths;
-        self.diff_removed = removed_counts;
         for (path, bit) in entries {
             *self.diff_agg.entry(path).or_insert(0) |= bit;
         }

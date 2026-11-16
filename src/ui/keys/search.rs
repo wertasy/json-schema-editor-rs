@@ -71,53 +71,56 @@ impl App {
 
     /// adaptiveJump drives ctrl+j/k: cycle the pending change ring left by
     /// the last replace/undo/redo, else the validation-issue keys, else the
-    /// parked search results, else the keys changed against the load/last
-    /// save baseline (the rows carrying ●); with no changes at all it
-    /// reports and stays put.
+    /// keys changed against the load/last save baseline (the rows carrying
+    /// ●), then an armed replace/undo/redo step ring (the locations that
+    /// step changed — relevant when an undo restored a cleaned batch and
+    /// the baseline diff went quiet), then validation-issue keys, then the
+    /// parked search results; with no changes at all it reports and stays
+    /// put. The baseline diff leads: after an undo/redo the step ring holds
+    /// only that step's own locations, while the user still wants to visit
+    /// every entry that remains changed.
     pub(super) fn adaptive_jump(&mut self, rows: &[Row], dir: i64) {
-        let ring = match self.fs().change_jump.clone() {
+        let ring = match self.changed_ring() {
             Some(ring) if !ring.is_empty() => ring,
-            _ => {
-                let issues: Vec<Vec<PathSeg>> = {
-                    let f = self.fs();
-                    let mut paths: Vec<Vec<PathSeg>> = Vec::new();
-                    for it in &f.issues_now {
-                        if let Some(p) = &it.path {
-                            if !paths.contains(p) {
-                                paths.push(p.clone());
-                            }
-                        }
-                    }
-                    paths
-                };
-                if !issues.is_empty() {
-                    issues
-                } else {
-                    let hits: Vec<Vec<PathSeg>> = match &self.fs().search_parked {
-                        Some(s) => {
-                            let mut paths: Vec<Vec<PathSeg>> = Vec::new();
-                            for r in &s.results {
-                                if !paths.contains(&r.path) {
-                                    paths.push(r.path.clone());
+            _ => match self.fs().change_jump.clone() {
+                Some(ring) if !ring.is_empty() => ring,
+                _ => {
+                    let issues: Vec<Vec<PathSeg>> = {
+                        let f = self.fs();
+                        let mut paths: Vec<Vec<PathSeg>> = Vec::new();
+                        for it in &f.issues_now {
+                            if let Some(p) = &it.path {
+                                if !paths.contains(p) {
+                                    paths.push(p.clone());
                                 }
                             }
-                            paths
                         }
-                        None => Vec::new(),
+                        paths
                     };
-                    if !hits.is_empty() {
-                        hits
+                    if !issues.is_empty() {
+                        issues
                     } else {
-                        match self.changed_ring() {
-                            Some(ring) => ring,
-                            None => {
-                                self.notice = "no changes since load/save".to_string();
-                                return;
+                        let hits: Vec<Vec<PathSeg>> = match &self.fs().search_parked {
+                            Some(s) => {
+                                let mut paths: Vec<Vec<PathSeg>> = Vec::new();
+                                for r in &s.results {
+                                    if !paths.contains(&r.path) {
+                                        paths.push(r.path.clone());
+                                    }
+                                }
+                                paths
                             }
+                            None => Vec::new(),
+                        };
+                        if !hits.is_empty() {
+                            hits
+                        } else {
+                            self.notice = "no changes since load/save".to_string();
+                            return;
                         }
                     }
                 }
-            }
+            },
         };
         self.jump_ring(&ring, dir, rows);
     }

@@ -913,6 +913,43 @@ fn array_element_removal_marks_parent() {
     );
 }
 
+/// After undo/redo the ctrl+j/k ring must still cycle between the changed
+/// entries (the batch delete restores three locations; the ring walks them).
+#[test]
+fn undo_redo_ring_cycles_changed_entries() {
+    let doc = dbuild(|db| {
+        db.obj(vec![(
+            "mounts",
+            db.arr(vec![
+                db.obj(vec![("src", db.s("/a"))]),
+                db.obj(vec![("src", db.s("/b"))]),
+                db.obj(vec![("src", db.s("/c"))]),
+                db.obj(vec![("src", db.s("/d"))]),
+            ]),
+        )])
+    });
+    let mut m = items_app(doc);
+    m.fs_mut().baseline = Some(m.fs().doc.clone());
+    press(&mut m, &["down", "down", "down", "down", "enter"]); // mounts items
+    // visual-select rows 1..3 and batch-delete them in one key
+    press(&mut m, &["v", "down", "down", "d"]);
+    assert_eq!(arr_len(&m.fs().doc, &sp(&["mounts"])), 1);
+    press(&mut m, &["u"]); // undo the batch delete: three restored locations
+    let ring = m.fs().change_jump.clone().expect("ring armed");
+    assert_eq!(ring.len(), 3, "three restored locations ringed: {ring:?}");
+    press(&mut m, &["ctrl+j"]);
+    let c1 = cursor_cursor(&mut m);
+    press(&mut m, &["ctrl+j"]);
+    let c2 = cursor_cursor(&mut m);
+    assert!(
+        c1 != c2,
+        "ctrl+j must move between changed entries; ring={ring:?} c1={c1} c2={c2}"
+    );
+    press(&mut m, &["ctrl+j"]);
+    let c3 = cursor_cursor(&mut m);
+    assert!(c3 != c2 || c3 != c1, "ctrl+j must keep cycling");
+}
+
 /// Deleting two adjacent array elements badges both surviving positions
 /// (the rows now occupying the deleted slots) and the array parent row.
 #[test]
@@ -964,15 +1001,12 @@ fn array_multi_delete_marks_every_affected_slot() {
         .lines()
         .find(|l| l.contains("nums") && l.contains('-'))
         .expect("parent row");
-    assert!(
-        parent.contains("- ×2"),
-        "parent row carries the count:\n{parent:?}"
-    );
+    assert!(parent.contains('-'), "parent row carries -:\n{parent:?}");
 }
 
 /// Deleting more elements than the array keeps rows for: the removed slots
-/// beyond the end cannot render rows, so the parent row shows the count
-/// (`- ×3`) instead.
+/// beyond the end cannot render rows, so only the array parent row shows
+/// the removal instead.
 #[test]
 fn multi_tail_deletions_count_on_parent() {
     let schema = schema_from_json(
@@ -1019,8 +1053,8 @@ fn multi_tail_deletions_count_on_parent() {
         .find(|l| l.contains("nums"))
         .expect("parent row");
     assert!(
-        parent.contains("- ×3"),
-        "the parent row must show the removal count:\n{parent:?}\n{view}"
+        parent.contains('-'),
+        "the parent row must show the removal:\n{parent:?}\n{view}"
     );
 }
 
@@ -3658,11 +3692,13 @@ fn undo_relands_changed_key_and_ctrl_j_wraps_ring() {
     assert_eq!(row_at(&mut m).path, sp(&["a"]), "undo lands on the change");
     assert_eq!(m.fs().change_jump, Some(vec![sp(&["a"])]));
 
-    // a single-entry ring wraps on both directions
+    // ctrl+j jumps to the entry still changed against the baseline (b was
+    // edited to B2 and never undone); ctrl+k returns to the undone key
     press(&mut m, &["ctrl+j"]);
-    assert_eq!(row_at(&mut m).path, sp(&["a"]));
+    assert_eq!(row_at(&mut m).path, sp(&["b"]));
+    // the only remaining changed entry: ctrl+k wraps onto itself
     press(&mut m, &["ctrl+k"]);
-    assert_eq!(row_at(&mut m).path, sp(&["a"]));
+    assert_eq!(row_at(&mut m).path, sp(&["b"]));
 }
 
 #[test]

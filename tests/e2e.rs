@@ -1333,6 +1333,49 @@ fn pty_shell_tab_arrows_keep_the_candidate_list() {
 
 #[cfg(unix)]
 #[test]
+fn pty_shell_tab_uses_real_system_bash_machinery() {
+    // No fake scripts: the driver sources the system bash-completion
+    // machinery and completes `git st` from git's own completion rule.
+    // Skipped when the machinery or git is missing on the host.
+    if !std::path::Path::new("/usr/share/bash-completion/bash_completion").exists()
+        && !std::path::Path::new("/etc/bash_completion").exists()
+    {
+        eprintln!("SKIP: no system bash-completion machinery");
+        return;
+    }
+    if std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+    {
+        eprintln!("SKIP: git missing");
+        return;
+    }
+    let dir = mktemp();
+    let schema = dir.path().join("s.json");
+    let cfg = dir.path().join("c.json");
+    write_file(&schema, r#"{"type":"object"}"#);
+    write_file(&cfg, r#"{"name":"x"}"#);
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+        return;
+    };
+    pty.wait_frame("root menu", 0, &["↑/↓ move"]);
+    pty.send(b":");
+    let (_, off) = pty.wait_frame("command prompt", 0, &[": command"]);
+    pty.send(b"!git st\t");
+    pty.wait_frame(
+        "git candidates from the system machinery",
+        off,
+        &["git stash"],
+    );
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+}
+
 fn pty_shell_argument_tab_uses_bash_completion() {
     // a unix machine without bash cannot run the completion driver
     if std::process::Command::new("bash")

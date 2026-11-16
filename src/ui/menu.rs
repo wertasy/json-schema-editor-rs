@@ -912,10 +912,6 @@ pub struct App {
     /// over the path and its whole subtree (the empty path aggregates the
     /// entire document for the root row)
     pub diff_agg: std::collections::HashMap<Vec<crate::doc::jsondoc::PathSeg>, u8>,
-    /// removed-element count per container path (aggregated over the whole
-    /// subtree): a parent row shows `- ×N` when several children were
-    /// deleted and the removed rows themselves are gone
-    pub diff_removed: std::collections::HashMap<Vec<crate::doc::jsondoc::PathSeg>, usize>,
     /// paths marked as added (whole added subtrees): children carrying a
     /// value inside these inherit the `+` badge
     pub diff_added: Vec<Vec<crate::doc::jsondoc::PathSeg>>,
@@ -980,7 +976,6 @@ impl App {
             builtin_clipboard: None,
             mouse_targets: Vec::new(),
             diff_agg: std::collections::HashMap::new(),
-            diff_removed: std::collections::HashMap::new(),
             diff_added: Vec::new(),
             pending_catalog: None,
             pending_schema: None,
@@ -1522,12 +1517,6 @@ impl App {
         }
         if bits & DIFF_REMOVED != 0 {
             out.push_str(&style::mark_del(" -"));
-            // several removals under this row: surface the count
-            if let Some(n) = self.diff_removed.get(path)
-                && *n > 1
-            {
-                out.push_str(&style::mark_del(&format!(" ×{n}")));
-            }
         }
         if bits & DIFF_MODIFIED != 0 {
             out.push_str(&style::mark_mod(" ~"));
