@@ -245,15 +245,73 @@ fn completion_candidate(v: &str) -> bool {
     !v.is_empty() && !v.contains('\r') && !v.contains('\n')
 }
 
-/// filterCompletions keeps candidates starting with prefix
-/// (case-insensitive); an empty prefix keeps everything.
-fn filter_completions(cands: &[String], prefix: &str) -> Vec<String> {
-    let lp = prefix.to_lowercase();
-    cands
-        .iter()
-        .filter(|c| completion_candidate(c) && (lp.is_empty() || c.to_lowercase().starts_with(&lp)))
-        .cloned()
-        .collect()
+/// fuzzy_match matches query against text case-insensitively as a
+/// subsequence and returns the matched char indices plus a quality score
+/// (lower is better): 0 exact, 1 prefix, 2 substring, 3 subsequence. The
+/// indices drive the red matched-text highlight in the dropdown.
+pub(crate) fn fuzzy_match(query: &str, text: &str) -> Option<(u8, Vec<usize>)> {
+    if query.is_empty() {
+        return Some((4, Vec::new()));
+    }
+    let lq: Vec<char> = query.to_lowercase().chars().collect();
+    let lt: Vec<char> = text.to_lowercase().chars().collect();
+    if lq.len() > lt.len() {
+        return None;
+    }
+    if lt == lq {
+        return Some((0, (0..lt.len()).collect()));
+    }
+    if lt.starts_with(&lq) {
+        return Some((1, (0..lq.len()).collect()));
+    }
+    if let Some(pos) = lt.windows(lq.len()).position(|w| w == lq.as_slice()) {
+        return Some((2, (pos..pos + lq.len()).collect()));
+    }
+    // subsequence: greedy left-to-right keeps the earliest occurrence of
+    // every query char, so the highlight stays where a reader expects it
+    let mut q = 0usize;
+    let mut hits = Vec::with_capacity(lq.len());
+    for (i, c) in lt.iter().enumerate() {
+        if q < lq.len() && *c == lq[q] {
+            hits.push(i);
+            q += 1;
+        }
+    }
+    if q == lq.len() { Some((3, hits)) } else { None }
+}
+
+/// fuzzy_filter keeps candidates that fuzzy_match the query, best match
+/// first (score, then the candidate's original order). An empty query keeps
+/// everything unhighlighted and unsorted.
+pub(crate) fn fuzzy_filter(
+    cands: impl IntoIterator<Item = String>,
+    query: &str,
+    usable: impl Fn(&str) -> bool,
+) -> Vec<(String, Vec<usize>)> {
+    let mut matched: Vec<(u8, usize, String, Vec<usize>)> = cands
+        .into_iter()
+        .enumerate()
+        .filter(|(_, c)| usable(c))
+        .filter_map(|(i, c)| fuzzy_match(query, &c).map(|(score, hits)| (score, i, c, hits)))
+        .collect();
+    matched.sort_by_key(|(score, i, ..)| (*score, *i));
+    matched.into_iter().map(|(.., c, hits)| (c, hits)).collect()
+}
+
+/// filterCompletions fuzzy-matches candidates against the query
+/// (case-insensitive subsequence; prefix/substring rank first); an empty
+/// query keeps everything. Returns each candidate with its matched char
+/// indices for the red highlight.
+fn filter_completions(cands: &[String], query: &str) -> Vec<(String, Vec<usize>)> {
+    fuzzy_filter(cands.iter().cloned(), query, |c| completion_candidate(c))
+}
+
+/// filter_enum_keywords fuzzy-matches option displays against the query
+/// (keyword search in the enum dropdown); an empty query keeps every
+/// option. Unlike filter_completions an exact match stays listed: the
+/// input text itself names a selectable option.
+fn filter_enum_keywords(opts: &[EnumOpt], query: &str) -> Vec<(String, Vec<usize>)> {
+    fuzzy_filter(opts.iter().map(|o| o.display.clone()), query, |_| true)
 }
 
 /// enumIndex returns the cursor position of the current (or default) value
@@ -288,18 +346,6 @@ fn enum_index(schema: &Schema, fn_: FormNodeId, vdoc: &Doc, v: Option<NodeId>) -
 /// (case-insensitive); an empty query matches everything.
 fn list_search_match(q: &str, text: &str) -> bool {
     q.is_empty() || text.to_lowercase().contains(&q.to_lowercase())
-}
-
-/// filter_enum_keywords keeps options whose display contains the query as
-/// a case-insensitive substring (keyword search in the enum dropdown); an
-/// empty query keeps every option. Unlike filter_completions an exact
-/// match stays listed: the input text itself names a selectable option.
-fn filter_enum_keywords(opts: &[EnumOpt], query: &str) -> Vec<String> {
-    let lq = query.to_lowercase();
-    opts.iter()
-        .filter(|o| lq.is_empty() || o.display.to_lowercase().contains(&lq))
-        .map(|o| o.display.clone())
-        .collect()
 }
 
 /// enumChoiceError names the options a failed enum input must choose from,

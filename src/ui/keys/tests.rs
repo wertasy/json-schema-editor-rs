@@ -13,6 +13,28 @@ use crate::smodel::{EnumOpt, FormNode, FormNodeId, Kind, Schema};
 use crate::ui::menu::{alias_at, same_menu_row};
 use crate::ui::{FileSession, Issue, Options};
 
+/// plain strips ANSI SGR sequences from a view string: the suggestion rows
+/// interleave red highlight runs, so plain-text assertions read the stripped
+/// view.
+fn plain(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut esc = false;
+    for c in s.chars() {
+        if esc {
+            if c == 'm' {
+                esc = false;
+            }
+            continue;
+        }
+        if c == '\x1b' {
+            esc = true;
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
 // --- fixtures ---------------------------------------------------------------
 
 /// Builds a Schema arena plus the Doc arena its enum/default values point
@@ -687,7 +709,7 @@ fn menu_enum_overlay_search_filters_and_selects() {
         }
         _ => panic!("enum dropdown should stay open while searching"),
     }
-    let view = m.view();
+    let view = plain(&m.view());
     assert!(view.contains("grpc"), "matching option is listed:\n{view}");
     assert!(
         !view.contains("http"),
@@ -870,7 +892,7 @@ fn enum_dropdown_sits_below_the_input() {
     m.width = 80;
     m.height = 12;
     press(&mut m, &["down", "enter", "g", "r"]);
-    let view = m.view();
+    let view = plain(&m.view());
     let lines: Vec<&str> = view.lines().collect();
     // the edited Mode row carries the keyword being typed; the matching
     // option is listed right below it
@@ -915,10 +937,10 @@ fn enum_dropdown_anchors_at_the_input_start() {
         let view = m.view();
         let line = view
             .lines()
-            .find(|l| l.contains("\x1b[7mproduction"))
+            .find(|l| l.contains("\x1b[7") && plain(l).trim().starts_with("production"))
             .expect("highlighted option row")
             .to_string();
-        let start = line.find("\x1b[7m").expect("reverse video");
+        let start = line.find("\x1b[7").expect("reverse video");
         (display_width(&line[..start]), view)
     };
 
@@ -938,7 +960,7 @@ fn enum_dropdown_anchors_at_the_input_start() {
         "long keyword must not re-anchor the dropdown at the caret:\n{view}"
     );
     assert!(
-        view.contains("production-beta"),
+        plain(&view).contains("production-beta"),
         "options must keep their full text, not `…tail` rows:\n{view}"
     );
 }
@@ -12764,9 +12786,9 @@ fn edit_completion_window_stays_at_the_input_start() {
     let view = app.view();
     let line = view
         .lines()
-        .find(|l| l.contains("\x1b[2;48;5;236malpha"))
+        .find(|l| l.contains("\x1b[2;48;5;236") && plain(l).contains("alpha"))
         .expect("candidate line");
-    let start = line.find("\x1b[2;48;5;236m").expect("candidate background");
+    let start = line.find("\x1b[2;48;5;236").expect("candidate background");
     assert_eq!(
         display_width(&line[..start]),
         expected,
@@ -12783,9 +12805,9 @@ fn edit_completion_window_stays_at_the_input_start() {
     let view = app.view();
     let line = view
         .lines()
-        .find(|l| l.contains("\x1b[2;48;5;236malpha"))
+        .find(|l| l.contains("\x1b[2;48;5;236") && plain(l).contains("alpha"))
         .expect("candidate line");
-    let start = line.find("\x1b[2;48;5;236m").expect("candidate background");
+    let start = line.find("\x1b[2;48;5;236").expect("candidate background");
     assert_eq!(
         display_width(&line[..start]),
         expected,
@@ -12799,11 +12821,14 @@ fn edit_completion_window_stays_at_the_input_start() {
         _ => panic!("edit overlay is not open"),
     }
     let view = app.view();
-    let line = view
+    // the window's first row is the selected candidate (sug_idx 0); the
+    // faint rows below mark where the overlay rectangle sits
+    let win = view
         .lines()
-        .find(|l| l.contains("\x1b[7malpha"))
-        .expect("selected candidate line");
-    let start = line.find("\x1b[7m").expect("selected candidate background");
+        .position(|l| l.contains("\x1b[2;48;5;236"))
+        .expect("candidate window");
+    let line = view.lines().nth(win - 1).expect("selected candidate line");
+    let start = line.find("\x1b[7").expect("selected candidate background");
     assert_eq!(
         display_width(&line[..start]),
         expected,
@@ -13262,7 +13287,7 @@ fn anchor_candidate_overlay_uses_reverse_video_and_arrow_selection() {
 #[test]
 fn candidate_overlay_width_tracks_content_with_a_cap_and_ellipsis() {
     let short = vec!["alpha".to_string(), "beta".to_string()];
-    let lines = App::suggestion_overlay_lines(&short, 0, "", 2, 0, 80);
+    let lines = App::suggestion_overlay_lines(&short, 0, "", 2, 0, 80, &[]);
     assert_eq!(display_width(&lines[0]), SUG_MIN_WIDTH);
     assert_eq!(
         display_width(&lines[1]),
@@ -13271,7 +13296,7 @@ fn candidate_overlay_width_tracks_content_with_a_cap_and_ellipsis() {
     );
 
     let long = vec![format!("{}TAIL", "x".repeat(100))];
-    let lines = App::suggestion_overlay_lines(&long, 0, "", 1, 0, 80);
+    let lines = App::suggestion_overlay_lines(&long, 0, "", 1, 0, 80, &[]);
     assert_eq!(display_width(&lines[0]), 80, "fills the available width");
     assert!(
         lines[0].contains('…'),
@@ -13286,9 +13311,84 @@ fn candidate_overlay_width_tracks_content_with_a_cap_and_ellipsis() {
         "the full long candidate must be truncated"
     );
 
-    let lines = App::suggestion_overlay_lines(&long, 0, "", 1, 0, 20);
+    let lines = App::suggestion_overlay_lines(&long, 0, "", 1, 0, 20, &[]);
     assert_eq!(display_width(&lines[0]), 20, "terminal width still caps it");
     assert!(lines[0].contains("TAIL"), "tail kept at narrow widths too");
+}
+
+// --- fuzzy completion matching ----------------------------------------------
+
+#[test]
+fn fuzzy_match_scores_and_indices() {
+    // subsequence: "outp" matches inside "out-proxy" (the '-' is skipped),
+    // indices mark the hit
+    let (score, hits) = fuzzy_match("outp", "out-proxy").expect("outp matches");
+    assert_eq!(score, 3);
+    assert_eq!(hits, vec![0, 1, 2, 4]);
+    // "pro" and "op" are subsequences too
+    assert!(fuzzy_match("pro", "out-proxy").is_some());
+    let (_, op_hits) = fuzzy_match("op", "out-proxy").expect("op matches");
+    assert_eq!(op_hits, vec![0, 4]); // o(ut-) p(roxy), greedy earliest
+    // tighter matches rank better
+    assert!(fuzzy_match("prod", "prod").unwrap().0 < fuzzy_match("prod", "prod-uat").unwrap().0);
+    assert!(fuzzy_match("rod", "prod").unwrap().0 < fuzzy_match("rd", "prod").unwrap().0);
+    assert!(fuzzy_match("xyz", "out-proxy").is_none());
+    assert!(fuzzy_match("", "out-proxy").unwrap().1.is_empty());
+}
+
+#[test]
+fn fuzzy_filter_ranks_prefix_before_subsequence() {
+    let cands = vec![
+        "out-proxy".to_string(),
+        "prod".to_string(),
+        "proxy-url".to_string(),
+    ];
+    let matched = filter_completions(&cands, "pro");
+    assert_eq!(
+        matched.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>(),
+        vec!["prod", "proxy-url", "out-proxy"],
+        "prefix matches first, then longer subsequences"
+    );
+    let (_, hits) = &matched[2];
+    assert_eq!(hits.clone(), vec![4, 5, 6], "pro at the tail of out-proxy");
+}
+
+#[test]
+fn edit_suggestions_fuzzy_match_and_highlight() {
+    let schema = schema_build(|b| {
+        let mut name = scalar("name", "Name", "string");
+        name.suggestions = vec!["out-proxy".into(), "upstream".into()];
+        let name = b.id(name);
+        let other = b.id(scalar("other", "Other", "string"));
+        b.id(FormNode {
+            key: "$".into(),
+            kind: Kind::Object,
+            children: vec![name, other],
+            ..FormNode::default()
+        })
+    });
+    let doc = dbuild(|db| db.obj(vec![("name", db.s("")), ("other", db.s("x"))]));
+    let mut app = app_with(schema, doc, test_opts());
+    press(&mut app, &["enter"]);
+    press(&mut app, &["o", "u", "t", "p"]);
+    match &app.overlay {
+        Some(Overlay::Edit(e)) => {
+            assert_eq!(e.sugs, vec!["out-proxy"], "fuzzy subsequence matches");
+            assert_eq!(
+                e.sug_hl,
+                vec![vec![0, 1, 2, 4]],
+                "matched chars highlighted"
+            );
+        }
+        _ => panic!("edit overlay is not open"),
+    }
+    // the dropdown renders the matched runs in bold red on the row background
+    let view = app.view();
+    assert!(
+        view.contains("\x1b[2;48;5;236;1;31mout\x1b[0m"),
+        "matched text must be red: {view:?}"
+    );
+    assert!(plain(&view).contains("out-proxy"), "candidate still listed");
 }
 
 #[test]
@@ -13304,6 +13404,7 @@ fn candidate_overlay_hides_a_long_shared_prefix() {
         2,
         0,
         120,
+        &[],
     );
     assert!(
         !lines[0].contains("https://raw.githubusercontent.com"),
@@ -13320,8 +13421,15 @@ fn candidate_overlay_hides_a_long_shared_prefix() {
 
     // Below the length threshold the candidates keep their full text: a
     // short typed prefix stays visible in every row.
-    let lines =
-        App::suggestion_overlay_lines(&["wa".to_string(), "wq".to_string()], -1, "w", 2, 0, 80);
+    let lines = App::suggestion_overlay_lines(
+        &["wa".to_string(), "wq".to_string()],
+        -1,
+        "w",
+        2,
+        0,
+        80,
+        &[],
+    );
     assert!(
         lines[0].contains("wa") && lines[1].contains("wq"),
         "short typed prefixes must not be stripped: {lines:?}"

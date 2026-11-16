@@ -3328,6 +3328,41 @@ fn pty_mouse_err_list_row_click_jumps() {
     assert_eq!(read_json(&cfg)["srv"]["port"], json!("x"));
 }
 
+/// Fuzzy autocomplete: typing a subsequence ("outp") lists and applies the
+/// "out-proxy" suggestion.
+#[test]
+fn pty_mouse_fuzzy_completion_applies_subsequence_match() {
+    let dir = mktemp();
+    let schema = dir.path().join("fuzzy.schema.json");
+    let cfg = dir.path().join("fuzzy.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{"proxy":{"anyOf":[{"type":"string"},{"enum":["out-proxy","upstream"]}]}}}"#,
+    );
+    write_file(&cfg, r#"{"proxy": ""}"#);
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+        return;
+    };
+    let (_, off) = pty.wait_frame("root", 0, &["proxy", "↑/↓ move"]);
+    pty.pause(Duration::from_millis(200));
+
+    pty.send(b"\r"); // open the inline edit with the suggestion dropdown
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"outp"); // fuzzy: matches "out-proxy", not "upstream"
+    pty.wait_frame("fuzzy candidate", off, &["out-proxy"]);
+    pty.send(b"\t"); // take the highlighted candidate into the input
+    pty.send(b"\r"); // commit
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\x13"); // ctrl+s
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+    assert_eq!(read_json(&cfg)["proxy"], json!("out-proxy"));
+}
+
 /// Hovering the mouse over menu rows moves the selection cursor with it
 /// (no enter, no edit), as long as no overlay owns the pointer.
 #[test]

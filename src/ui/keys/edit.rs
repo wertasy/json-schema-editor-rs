@@ -305,6 +305,7 @@ impl App {
             cands: Vec::new(),
             sug_prefix: pre.clone(),
             sugs: opts.iter().map(|o| o.display.clone()).collect(),
+            sug_hl: Vec::new(),
             sug_idx: cursor as i64,
             sug_col: display_width(&pre),
         }));
@@ -363,6 +364,7 @@ impl App {
                     cands,
                     sug_prefix: String::new(),
                     sugs: Vec::new(),
+                    sug_hl: Vec::new(),
                     sug_idx: -1,
                     sug_col: 0,
                 }));
@@ -1245,20 +1247,25 @@ impl App {
                 // a prefix), and matching options stay listed. The first
                 // match is highlighted so enter always commits a visible
                 // option — the picker's old cursor-to-top-match rule.
-                e.sugs = filter_enum_keywords(&src.enum_, &prefix);
+                let matched = filter_enum_keywords(&src.enum_, &prefix);
+                e.sug_hl = matched.iter().map(|(_, h)| h.clone()).collect();
+                e.sugs = matched.into_iter().map(|(d, _)| d).collect();
                 e.sug_idx = if e.sugs.is_empty() { -1 } else { 0 };
                 return;
             }
             if src.tag_ref.is_empty() && !src.suggestions.is_empty() {
                 let opts = filter_completions(&src.suggestions, &prefix);
                 if !opts.is_empty() {
-                    e.sugs = opts;
+                    e.sug_hl = opts.iter().map(|(_, h)| h.clone()).collect();
+                    e.sugs = opts.into_iter().map(|(d, _)| d).collect();
                     e.sug_idx = -1;
                     return;
                 }
             }
         }
-        e.sugs = filter_completions(&e.cands, &prefix);
+        let matched = filter_completions(&e.cands, &prefix);
+        e.sug_hl = matched.iter().map(|(_, h)| h.clone()).collect();
+        e.sugs = matched.into_iter().map(|(d, _)| d).collect();
         e.sug_idx = -1;
     }
 }

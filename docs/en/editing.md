@@ -25,9 +25,9 @@ Inside the input box:
 ### Text autocomplete
 
 - Candidates first come from **existing values of the same key in the document**: string fields take string values, `integer`/`number` take numeric literals; deduplicated, in document order, excluding this spot.
-- Filtered by the entered prefix, case-insensitive.
+- **Fuzzy matching**: candidates are filtered as case-insensitive subsequences (`outp` matches `out-proxy`, `op` hits too), and the matched characters are shown **bold red** in the candidate rows; tighter matches rank first (exact > prefix > substring > subsequence), the rest keep candidate order. The input itself stays free text: `enter` commits what is typed, `tab` adopts the highlighted candidate.
 - **Multi-line values do not participate in completion** (strings containing newlines or tabs), to avoid breaking the hint line.
-- When the schema offers a set of values, only those are used first (e.g. in `oneOf`, an "open string + string set" merges into a text input, such as workflow's `shell`). Only when the entered prefix matches none of the options does it fall back to document candidates; the field remains free text, and values not listed by the schema can still be entered.
+- When the schema offers a set of values, only those are used first (e.g. in `oneOf`, an "open string + string set" merges into a text input, such as workflow's `shell`). Only when the entered keyword matches none of the options does it fall back to document candidates; the field remains free text, and values not listed by the schema can still be entered.
 - Fields with `x-tag-reference` take `tag` values as candidates by reference domain: e.g. `http_client` → `http_clients[].tag` (both singular and plural key names accepted, at any depth); compound domain names also accept a nested match where the last word (including its plural) appears under a member named after the first word, e.g. `dns_server` → `dns.servers[].tag`.
 - Scalar variants of `oneOf`/`anyOf` and strings inside object variants complete the same way; `$ref` shared definitions also complete by the field's own key.
 - The hint line `tab: a · b · c` shows a scrolling window of three candidates, with `…` on either side indicating more; `tab`/`shift+tab` cycle forward/backward filling in candidates, wrapping at both ends.
@@ -35,7 +35,7 @@ Inside the input box:
 ### Enum dropdown
 
 - Scalar enums (including discriminant keys in oneOf union menus) no longer open a separate selection page: `enter` opens the input box in place on the field line, with all options listed in an autocomplete-style dropdown; when the current value is among the options, that option is pre-filled and highlighted (when the value is missing — including explicit null — or not among the options, the default value is used, then the first item).
-- The input box content is the search keyword: typing filters options by **case-insensitive substring**; when the box still holds the highlighted option, typing directly overwrites the whole value and restarts the search (combobox convention). `↑`/`↓`/`tab` cycle through matches, `backspace` corrects the query.
+- The input box content is the search keyword: typing filters options as **case-insensitive fuzzy subsequences** (`pro`, `op`, and `outp` all hit `out-proxy`), the matched characters are bold red, and tighter matches (prefix, substring) rank before subsequences. When the box still holds the highlighted option, typing directly overwrites the whole value and restarts the search (combobox convention). `↑`/`↓`/`tab` cycle through matches, `backspace` corrects the query.
 - `enter` applies the highlighted item; when the box content equals an option (case-insensitive), that option is applied as well. What gets applied is the schema's option node itself: non-string members (booleans, numbers, null) and numeric literals are written back as-is. With no match, `enter` shows `must be one of: ...` in red and lists all options, leaving the document unchanged; `esc` cancels.
 - An option identical to the input is **not** filtered out — it is the very value to apply; an empty query lists all options.
 

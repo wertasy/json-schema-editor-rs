@@ -37,6 +37,28 @@ fn mark_target(b: &str, hits: &mut Vec<(usize, usize, MouseTarget)>, t: MouseTar
     hits.push((start, 1, t));
 }
 
+/// styled_sug_row renders one completion row: unmatched runs carry the
+/// row's base look, the fuzzy-matched runs add the bold red highlight.
+fn styled_sug_row(text: &str, base: &str, hits: &[usize]) -> String {
+    let hit: std::collections::HashSet<usize> = hits.iter().copied().collect();
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut run = String::new();
+    let mut run_hit = false;
+    for (k, c) in text.chars().enumerate() {
+        let h = hit.contains(&k);
+        if !run.is_empty() && h != run_hit {
+            out.push_str(&style::sug_run(base, run_hit, &run));
+            run.clear();
+        }
+        run_hit = h;
+        run.push(c);
+    }
+    if !run.is_empty() {
+        out.push_str(&style::sug_run(base, run_hit, &run));
+    }
+    out
+}
+
 impl App {
     // --- rendering (Go menu.go View layer) ----------------------------------
 
@@ -337,7 +359,9 @@ impl App {
     }
 
     /// suggestion_overlay_lines renders one candidate window: the selected
-    /// row is reverse-video across the full rectangle, the rest are faint.
+    /// row is reverse-video across the full rectangle, the rest are faint,
+    /// and the fuzzy-matched text (`hl`, char indices per candidate) is
+    /// bold red in every row.
     pub(super) fn suggestion_overlay_lines(
         sugs: &[String],
         idx: i64,
@@ -345,6 +369,7 @@ impl App {
         max: usize,
         left: usize,
         max_width: usize,
+        hl: &[Vec<usize>],
     ) -> Vec<String> {
         let avail = max_width.saturating_sub(left);
         if sugs.is_empty() || max == 0 || avail == 0 {
@@ -357,18 +382,15 @@ impl App {
         // clip_left_ellipsis, which cuts only when the shown text does not
         // fit the width.
         let strip = end - start > 1 && query.chars().count() >= SUG_STRIP_PREFIX_MIN;
-        let displays: Vec<String> = (start..end)
-            .map(|i| {
-                let raw = &sugs[i];
-                match strip.then(|| strip_query(raw, query)).flatten() {
-                    Some(tail) if !tail.is_empty() => tail.to_string(),
-                    _ => raw.clone(),
-                }
-            })
-            .collect();
-        let natural = displays
+        let shown_of = |raw: &str| -> String {
+            match strip.then(|| strip_query(raw, query)).flatten() {
+                Some(tail) if !tail.is_empty() => tail.to_string(),
+                _ => raw.to_string(),
+            }
+        };
+        let natural = sugs[start..end]
             .iter()
-            .map(|shown| display_width(shown))
+            .map(|raw| display_width(&shown_of(raw)))
             .max()
             .unwrap_or(0);
         let width = natural.max(SUG_MIN_WIDTH).min(avail);
@@ -376,22 +398,40 @@ impl App {
             return Vec::new();
         }
         let mut out = Vec::with_capacity(max);
-        for (j, shown) in displays.iter().enumerate() {
-            let i = start + j;
+        for i in start..end {
             let on = selected && i == sel;
-            let mut line = shown.clone();
-            if display_width(&line) > width {
-                line = clip_left_ellipsis(&line, width);
+            let base = if on { "7" } else { "2;48;5;236" };
+            let raw = &sugs[i];
+            let mut shown = shown_of(raw);
+            // stripping drops the typed prefix from the shown text: the
+            // highlight indices shift with it and prefix-only hits (the
+            // whole query is the prefix) disappear entirely
+            let lead = raw.chars().count() - shown.chars().count();
+            let mut hits: Vec<usize> = hl
+                .get(i)
+                .map(|v| v.iter().filter(|c| **c >= lead).map(|c| c - lead).collect())
+                .unwrap_or_default();
+            // keep the tail visible: when the shown text does not fit, cut
+            // its head and shift the highlight with it
+            if display_width(&shown) > width {
+                let clipped = clip_left_ellipsis(&shown, width);
+                let dropped = shown.chars().count() + 1 - clipped.chars().count();
+                shown = clipped;
+                hits = hits
+                    .into_iter()
+                    .filter(|c| *c >= dropped)
+                    .map(|c| c - dropped)
+                    .collect();
             }
             // Fill the row so the background paints a solid rectangle, not
-            // just the glyphs of the candidate text.
-            let pad = width.saturating_sub(display_width(&line));
-            line.push_str(&" ".repeat(pad));
-            out.push(if on {
-                style::sug_sel(&line)
-            } else {
-                style::sug_dim(&line)
-            });
+            // just the glyphs of the candidate text: the padding joins the
+            // plain text before styling, so an unhighlighted row stays one
+            // SGR sequence.
+            let pad = width.saturating_sub(display_width(&shown));
+            if pad > 0 {
+                shown.push_str(&" ".repeat(pad));
+            }
+            out.push(styled_sug_row(&shown, base, &hits));
         }
         out
     }
@@ -463,6 +503,7 @@ impl App {
             CMD_SUG_WINDOW,
             left,
             line_right,
+            &[],
         );
         Self::indent_overlay(lines, left)
     }
@@ -501,6 +542,7 @@ impl App {
             CMD_SUG_WINDOW,
             left,
             line_right,
+            &[],
         );
         Self::indent_overlay(lines, left)
     }
@@ -1041,8 +1083,9 @@ impl App {
             0
         };
         let left = (text_left + base.saturating_sub(shift)).min(line_right.saturating_sub(rect));
-        let lines =
-            Self::suggestion_overlay_lines(&e.sugs, e.sug_idx, query, capacity, left, line_right);
+        let lines = Self::suggestion_overlay_lines(
+            &e.sugs, e.sug_idx, query, capacity, left, line_right, &e.sug_hl,
+        );
         if lines.is_empty() {
             return None;
         }
@@ -1149,6 +1192,7 @@ impl App {
                         max,
                         left + base,
                         self.width.saturating_sub(1),
+                        &[],
                     )
                 } else {
                     Vec::new()

@@ -100,6 +100,16 @@ pub mod style {
     pub fn sug_dim(s: &str) -> String {
         render("2;48;5;236", s)
     }
+    /// sug_run styles one run of a completion row: `base` carries the row's
+    /// own look (dim, or reverse for the highlighted row) and `hit` adds
+    /// the bold red matched-text highlight on top of it.
+    pub fn sug_run(base: &str, hit: bool, s: &str) -> String {
+        if hit {
+            render(&format!("{base};1;31"), s)
+        } else {
+            render(base, s)
+        }
+    }
 }
 
 pub const MENU_HELP: &str =
@@ -433,6 +443,8 @@ pub struct EditState {
     pub sug_prefix: String,
     /// cands filtered by the current input prefix
     pub sugs: Vec<String>,
+    /// matched char indices per sugs entry (fuzzy highlight)
+    pub sug_hl: Vec<Vec<usize>>,
     /// tab cycle position (-1 = none)
     pub sug_idx: i64,
     /// display column of the caret when the current suggestion list was
