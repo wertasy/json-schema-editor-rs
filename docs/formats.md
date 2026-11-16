@@ -1,40 +1,40 @@
-# 配置文件格式
+# Configuration file formats
 
-## 按扩展名选择
+## Selection by extension
 
-大小写不敏感：
+Case-insensitive:
 
-| 扩展名 | 格式 | 行为 |
+| Extension | Format | Behavior |
 |---|---|---|
-| `.json` / `.jsonc` | JSONC | 严格 JSON 的超集：`//`、`/* ... */` 注释与对象/数组尾随逗号；其余文法按 JSON。 |
-| `.yaml` / `.yml` | YAML | 见下文。 |
-| `.toml` | TOML | 根表、`[table]` / `[[array]]`、点号键、内联表、数组、注释与日期时间字面量。 |
-| 其他 / 无扩展名 | JSONC | 历史行为：一律按 JSON 处理；带注释也能打开。 |
+| `.json` / `.jsonc` | JSONC | A strict superset of JSON: `//` and `/* ... */` comments plus trailing commas in objects/arrays; the rest of the grammar follows JSON. |
+| `.yaml` / `.yml` | YAML | See below. |
+| `.toml` | TOML | Root table, `[table]` / `[[array]]`, dotted keys, inline tables, arrays, comments, and date-time literals. |
+| Other / no extension | JSONC | Historical behavior: always treated as JSON; files with comments still open. |
 
-配置文件不存在时，jse 从空对象开始，保存时创建文件。读取/解析失败会报错并 exit 1。
+When the config file does not exist, jse starts from an empty object and creates the file on save. Read/parse failures report an error and exit 1.
 
 ## JSONC
 
-- 支持行注释、块注释和尾随逗号。
-- 无注释的 `.json` 保存输出与纯 JSON 编辑器完全一致（不引入格式变化）。
-- 带注释或尾随逗号的旧 JSON 也能打开；保存时尾随逗号不会保留（输出是规范 JSON + 注释）。
-- 字符串转义、数字语法等遵循 JSON。
+- Supports line comments, block comments, and trailing commas.
+- Saving a comment-free `.json` produces output identical to what a plain JSON editor writes (no formatting changes introduced).
+- Legacy JSON with comments or trailing commas also opens; trailing commas are not preserved on save (the output is canonical JSON + comments).
+- String escapes, number syntax, and so on follow JSON.
 
-### 注释如何跟随
+### How comments follow
 
-注释附着在键/值上，而不是固定在行号：
+Comments attach to keys/values rather than to fixed line numbers:
 
-- 编辑成员：注释保留。
-- 删除成员：该成员的注释一并消失。
-- 新增成员：没有注释。
-- 与值同行、写在逗号后的注释归该值；下一行的注释归下一个键。
-- 空行不保证保留。
+- Editing a member: comments are preserved.
+- Deleting a member: that member's comments disappear with it.
+- Adding a member: no comments.
+- A comment on the same line as its value, written after the comma, belongs to that value; a comment on the next line belongs to the next key.
+- Blank lines are not guaranteed to be preserved.
 
 ## YAML
 
-### 锚点与别名
+### Anchors and aliases
 
-别名引用**不展开成副本**：
+Alias references are **not expanded into copies**:
 
 ```yaml
 base: &base
@@ -43,101 +43,101 @@ base: &base
 prod: *base
 ```
 
-- 进入 `prod` 的菜单时，看到的是 `base` 的字段；编辑会直接修改被引用的原始对象，所有引用同步变化。
-- 引用行 / 锚点定义行的摘要带 `*base` / `&base` 徽标；菜单标题追加 `: *base` / `: &base`。
-- `ctrl+e` 或菜单顶部 `< Expand >` 会把引用物化为独立副本，之后编辑只影响副本；未展开时保存仍写 `*base`，锚点 `&base` 也保留。
-- `&` 设置/修改锚点，`*` 设置/修改引用，`ga` 跳到锚点定义处，`gr` 跳到其他使用处。详见[编辑功能：YAML 锚点与合并键](editing.md#yaml-锚点与合并键)。
+- Entering the `prod` menu shows the fields of `base`; edits modify the referenced original object directly, and all references change in sync.
+- Summaries on the reference line / anchor definition line carry a `*base` / `&base` badge; the menu title gets `: *base` / `: &base` appended.
+- `ctrl+e` or `< Expand >` at the top of the menu materializes the reference as an independent copy; afterwards edits only affect the copy. When not expanded, saving still writes `*base`, and the anchor `&base` is kept.
+- `&` sets/modifies an anchor, `*` sets/modifies a reference, `ga` jumps to the anchor definition, `gr` jumps to the other usages. See [Editing: YAML anchors and merge keys](editing.md#yaml-anchors-and-merge-keys).
 
-### 合并键
+### Merge keys
 
-`<<: *base1` / `<<: [*base1, *base2]` 原样保留，菜单按 YAML 语义合并展示：
+`<<: *base1` / `<<: [*base1, *base2]` are preserved as-is; menus merge and display them with YAML semantics:
 
-- 合并出的键落在对应 schema 字段的槽位上；本映射自有键优先，靠前的 anchor 优先。
-- 值摘要带来源 `*base1` 徽标，标题行显示 `<<: *base1 *base2`。
-- 编辑 merged key 会写回定义它的源映射，所有合并方同步变化。
-- `ctrl+e` 可在当前映射中把某个 merged value 物化为独立副本并遮蔽合并值。
-- `<` 添加/修改合并键。
-- required 的 merged key 不能删除；要断开合并，先移除对应 `<<`。
+- Merged keys land in the slots of the corresponding schema fields; the mapping's own keys win, and earlier anchors win.
+- Value summaries carry a source `*base1` badge; the title line shows `<<: *base1 *base2`.
+- Editing a merged key writes back to the source mapping that defines it; all merging mappings change in sync.
+- `ctrl+e` materializes a merged value as an independent copy inside the current mapping, shadowing the merged value.
+- `<` adds/modifies merge keys.
+- A required merged key cannot be deleted; to break the merge, remove the corresponding `<<` first.
 
-### 标量与标签
+### Scalars and tags
 
-- 时间戳（如 `2024-01-02T03:04:05Z`）按字符串编辑，保存后写回原文本。
-- `!!binary` 与未知标签按普通字符串处理；保存后不再带标签。
-- 数字归一化为 JSON 数字：`0x1F` → `31`、`1_000` → `1000`；`1.0`、`1e3` 这类合法 JSON 字面量保持原样。
-- `.inf` / `.nan` 无法用 JSON 表示，解析报错。
-- 多文档（`---` 分隔的第二个文档）、非字符串映射键：解析报错。
-- 空 YAML 文档报错；不存在的文件仍从空对象开始。
+- Timestamps (e.g. `2024-01-02T03:04:05Z`) are edited as strings and written back as the original text on save.
+- `!!binary` and unknown tags are treated as plain strings; the tag is dropped on save.
+- Numbers are normalized to JSON numbers: `0x1F` → `31`, `1_000` → `1000`; literals that are already valid JSON, such as `1.0` and `1e3`, stay as-is.
+- `.inf` / `.nan` cannot be represented in JSON and are parse errors.
+- Multi-document files (a second document separated by `---`) and non-string mapping keys are parse errors.
+- An empty YAML document is an error; a nonexistent file still starts from an empty object.
 
-### 写回格式
+### Write-back format
 
-YAML 由内置 emitter 写回，风格与 yaml.v3 的 block 输出对齐：
+YAML is written back by the built-in emitter, styled after yaml.v3's block output:
 
-- 2 空格缩进，不做宽度折行。
-- 空集合使用 flow 形式（`{}` / `[]`）。
-- 多行字符串使用 literal block 与 chomping 指示符。
-- 双引号转义，包括 astral 字符。
-- 空行和部分引号风格可能被归一化；语义、注释、锚点、键序保留。
+- 2-space indentation, no width wrapping.
+- Empty collections use flow form (`{}` / `[]`).
+- Multi-line strings use literal blocks with chomping indicators.
+- Double-quoted escapes, including astral characters.
+- Blank lines and some quote styles may be normalized; semantics, comments, anchors, and key order are preserved.
 
 ## TOML
 
-### 结构与标量
+### Structure and scalars
 
-- TOML 文档按根表处理：`[server]` 与 `server.host = ...` 都生成嵌套对象，`[[mounts]]` 生成对象数组，`{ x = 1 }` 是内联表。
-- 注释跟随成员：写在键/表头同一行的注释保留在该行；独占一行的注释归下一个键/表头，文件末尾的注释保留在文件末尾。
-- 十六进制/八进制/二进制整数和下划线数字（`0x1F`、`0o17`、`0b101`、`1_000`）在**未编辑时**按原字面量写回；编辑数字字段后写成十进制规范形式。
-- 日期/时间字面量（`1979-05-27T07:32:00Z`、`07:32:00` 等）按字符串展示与校验：未编辑时保留原字面量，编辑该字段后写成带引号的 TOML 字符串。
-- `inf` / `nan` 无法用 JSON 表示，解析报错；重复键、重复定义的表、尝试扩展内联表也会解析报错。
-- 根值必须是表。空 TOML 文件等于空表；不存在的文件仍从空对象开始。
+- A TOML document is treated as a root table: `[server]` and `server.host = ...` both produce nested objects, `[[mounts]]` produces an array of objects, and `{ x = 1 }` is an inline table.
+- Comments follow members: a comment on the same line as a key/table header stays on that line; a comment on its own line belongs to the next key/table header; comments at the end of the file stay at the end of the file.
+- Hexadecimal/octal/binary integers and underscored numbers (`0x1F`, `0o17`, `0b101`, `1_000`) are written back as the original literal **when unedited**; after a numeric field is edited it is written as canonical decimal.
+- Date/time literals (`1979-05-27T07:32:00Z`, `07:32:00`, etc.) are displayed and validated as strings: the original literal is kept when unedited; after the field is edited it is written as a quoted TOML string.
+- `inf` / `nan` cannot be represented in JSON and are parse errors; duplicate keys, tables defined twice, and attempts to extend an inline table are also parse errors.
+- The root value must be a table. An empty TOML file equals an empty table; a nonexistent file still starts from an empty object.
 
-### 写回格式
+### Write-back format
 
-TOML 由内置 emitter 规范写回：
+TOML is written back in canonical form by the built-in emitter:
 
-- 标量成员排在子表头之前（TOML 语法要求，后续键会归入上一个表）。
-- 所有元素都是表的数组写成 `[[array]]`；其他数组写成内联形式。
-- 键序、注释、未编辑的标量字面量保留；空行、点号键的写法、引号风格、内联表布局可能被归一化。
-- 新建/编辑出的 `null` 占位键不写入（TOML 没有 null）；数组里的 null 会让保存报错。
+- Scalar members come before sub-table headers (required by TOML syntax; later keys would otherwise belong to the preceding table).
+- Arrays whose elements are all tables are written as `[[array]]`; other arrays are written inline.
+- Key order, comments, and unedited scalar literals are preserved; blank lines, the spelling of dotted keys, quote styles, and inline table layout may be normalized.
+- `null` placeholder keys that were created/edited in are not written (TOML has no null); a null inside an array makes saving fail with an error.
 
-## schema 指向的写法
+## How the schema pointer is recorded
 
-| 格式 | `-s` / SchemaStore 选择结果的记录方式 |
+| Format | How the `-s` / SchemaStore selection result is recorded |
 |---|---|
-| JSON / JSONC | 顶层 `"$schema": "<位置>"`。已有非空值保留；已有空值/显式 null 时原位填入；缺失时插到首位。 |
-| YAML | 默认写文件头 `# yaml-language-server: $schema=<位置>`。**若加载到的 schema 定义了顶层 `$schema` 属性**，改写文档的 `$schema` 字段（缺失时插入首位，空值/显式 null 时原位填入），并移除旧的同类注释；已有非空 `$schema` 值或注释时保留该值。 |
-| TOML | 默认写文件头 `#:schema <位置>`。**若加载到的 schema 定义了顶层 `$schema` 属性**，改写文档的 `"$schema"` 字段（缺失时插入首位，空值/显式 null 时原位填入），并移除旧的同类注释；已有非空 `$schema` 值或注释时保留该值。 |
+| JSON / JSONC | Top-level `"$schema": "<location>"`. An existing non-empty value is kept; an existing empty value / explicit null is filled in place; when missing it is inserted as the first key. |
+| YAML | By default writes the file header `# yaml-language-server: $schema=<location>`. **If the loaded schema defines a top-level `$schema` property**, the document's `$schema` field is rewritten (inserted as the first key when missing, filled in place when empty / explicitly null) and the old comment of the same kind is removed; an existing non-empty `$schema` value or comment is kept. |
+| TOML | By default writes the file header `#:schema <location>`. **If the loaded schema defines a top-level `$schema` property**, the document's `"$schema"` field is rewritten (inserted as the first key when missing, filled in place when empty / explicitly null) and the old comment of the same kind is removed; an existing non-empty `$schema` value or comment is kept. |
 
-这些指向都会被后续启动识别为 schema 来源。`--pick` 会先清除旧指向再写新值。
+All of these pointers are recognized as schema sources on later starts. `--pick` clears the old pointer before writing the new one.
 
-## 原始编辑与外部编辑器
+## Raw editing and external editors
 
-内置 raw 编辑器、`$EDITOR` 外编、schema 未定义键的值编辑，都使用**文件自身格式**：
+The built-in raw editor, the `$EDITOR` external editor, and editing the value of a key not defined in the schema all use the **file's own format**:
 
-- JSON/JSONC 文件：JSON 文本。
-- YAML 文件：YAML 文本。
-- TOML 文件：整份文档用 TOML；单个值用 TOML 值表达式（标量、`[...]`、`{ ... }`）。
+- JSON/JSONC files: JSON text.
+- YAML files: YAML text.
+- TOML files: the whole document uses TOML; a single value uses a TOML value expression (scalar, `[...]`, `{ ... }`).
 
-例外：`$EDITOR` 外编和内置 raw 编辑器编辑**字符串值**时使用字符串本身的文本（无引号、无转义），应用时原样写回为字符串。
+Exception: when the `$EDITOR` external editor and the built-in raw editor edit a **string value**, they use the string's own text (no quotes, no escapes) and write it back verbatim as the string on apply.
 
-编辑整份文档、编辑无法表单化的字段、编辑无值的 schema 未定义键都一致。提交时按对应格式做语法校验，语义合法性交给保存期校验。
+Editing the whole document, editing a field that cannot be represented as a form, and editing a schema-undefined key with no value all behave the same. Syntax is checked in the corresponding format on submit; semantic validity is left to save-time validation.
 
-## 降级为原始编辑
+## Degradation to raw editing
 
-以下情况该字段渲染为「Edit as JSON/YAML/TOML」文本区域：
+In the following cases the field is rendered as an "Edit as JSON/YAML/TOML" text area:
 
-- `$ref` 不可达；
-- 数组套数组等无法表单化的结构；
-- 未知类型；
-- schema 深度超过 32 层；
-- 递归 `$ref` 无法在有限深度内展开。
+- `$ref` is unreachable;
+- structures that cannot be represented as a form, such as arrays of arrays;
+- unknown types;
+- schema depth exceeds 32 levels;
+- a recursive `$ref` cannot be expanded within a finite depth.
 
-文本区域提交时只检查语法；保存时仍由 schema 校验兜底。详见[校验与保存：降级规则](validation.md#降级规则)。
+Submitting the text area only checks syntax; schema validation still acts as the final safety net at save time. See [Validation and saving: degradation rules](validation.md#degradation-rules).
 
-## 扩展新格式
+## Adding a new format
 
-新增格式只需：
+Adding a new format only requires:
 
-1. 在 `src/doc/` 下实现一个只依赖 `src/doc/jsondoc` 的转换模块；
-2. 实现 `src/doc/mod.rs` 的 `Codec` trait（`extensions`、`parse`、`write`、`empty`、schema 指向的读写、`notices`）；
-3. 把实现加入同文件的 `FORMATS` 注册表。
+1. Implementing a conversion module under `src/doc/` that depends only on `src/doc/jsondoc`;
+2. Implementing the `Codec` trait from `src/doc/mod.rs` (`extensions`, `parse`, `write`, `empty`, schema pointer read/write, `notices`);
+3. Adding the implementation to the `FORMATS` registry in the same file.
 
-格式元数据（注释表、YAML 别名计数等）放在 `Meta` 中随会话保存；`write` 必须能在编辑后忠实写回。具体约束见 [AGENTS.md](../AGENTS.md#format-layer)。
+Format metadata (comment tables, YAML alias counts, etc.) is stored in `Meta` and saved with the session; `write` must be able to write back faithfully after edits. For the exact constraints see [AGENTS.md](../AGENTS.md#format-layer).

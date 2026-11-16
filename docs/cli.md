@@ -1,104 +1,104 @@
-# 命令行
+# Command line
 
 ```text
-jse [-s <schema路径|http(s)://URL>] [-p|--pick] [-f|--force]
+jse [-s <schema path|http(s)://URL>] [-p|--pick] [-f|--force]
     [-a|--accessible] [-v|--version] [-h|--help] <config.(json|jsonc|yaml|yml|toml)>...
 ```
 
-一切以 `/config.(json|jsonc|yaml|yml|toml)>...` 位置参数都是要编辑的本地配置文件；一个进程可以同时打开多个。
+All `<config.(json|jsonc|yaml|yml|toml)>...` positional arguments are local configuration files to edit; a single process can open several at once.
 
-## 参数
+## Flags
 
-| 参数 | 说明 |
+| Flag | Description |
 |---|---|
-| `-s`, `--schema <path\|URL>` | 指定 JSON Schema：本地路径、`file://`、`http(s)://`。会按配置文件格式写入其 schema 指向（已有非空指向则保留）。 |
-| `-p`, `--pick` | 强制打开 SchemaStore 检索选择器；覆盖 `-s` 与配置自带的 `$schema`，并为每个文件各选一次。 |
-| `-f`, `--force` | 保存时即使 schema 校验失败也写入。结果行变为 `Saved with validation errors (--force): <path>`。 |
-| `-a`, `--accessible` | 行式问答模式，不使用全屏 TUI。详见[行式模式](accessible.md)。 |
-| `-v`, `--version` | 打印版本并退出。 |
-| `-h`, `--help` | 打印帮助并退出。 |
+| `-s`, `--schema <path\|URL>` | Specify the JSON Schema: local path, `file://`, or `http(s)://`. It is written into the config's schema pointer according to the config format (an existing non-empty pointer is kept). |
+| `-p`, `--pick` | Force opening the SchemaStore search picker; overrides `-s` and the config's own `$schema`, and picks once for each file. |
+| `-f`, `--force` | Write on save even when schema validation fails. The result line becomes `Saved with validation errors (--force): <path>`. |
+| `-a`, `--accessible` | Line-oriented question-and-answer mode without the full-screen TUI. See [Line mode](accessible.md). |
+| `-v`, `--version` | Print the version and exit. |
+| `-h`, `--help` | Print help and exit. |
 
-参数解析兼容 GNU getopt 风格：
+Argument parsing is compatible with GNU getopt style:
 
-- 选项可出现在位置参数之后：`jse a.json -s schema.json`。
-- 长选项支持 `--schema=path`；短选项可合并：`-fa`；带值的短选项可紧贴值：`-sschema.json`（`-s=path` 也接受）。
-- `--` 之后全部当作文件名。文件名以 `-` 开头时必须用它：`jse -- -name.json`。
-- `-h`/`-v` 一经解析立即生效，不再处理后续参数。
+- Options may appear after positional arguments: `jse a.json -s schema.json`.
+- Long options support `--schema=path`; short options can be combined: `-fa`; a value-taking short option can be attached to its value: `-sschema.json` (`-s=path` is also accepted).
+- Everything after `--` is treated as a file name. It is required when a file name starts with `-`: `jse -- -name.json`.
+- `-h`/`-v` take effect as soon as they are parsed; later arguments are not processed.
 
-## 基本行为
+## Basic behavior
 
-- **文件不存在**：从空对象文档开始，保存时创建。
-- **配置必须是本地路径**：把 `http(s)://...` 放在位置参数会报 `config must be a local file path`，exit 2。
-- **没有位置参数**：报错并打印用法，exit 2。
-- **TUI 需要终端**：非 `--accessible` 模式下 stdin 不是终端会拒绝启动（exit 1），避免在半管道环境里画出错乱的界面。
-- **先全部加载再进界面**：多文件模式下，任一文件读取或解析失败都会在界面出现前终止整个运行；每个文件各自解析 schema。
-- **没有 schema 也能编辑**：`-s`、配置指向和 SchemaStore 都找不到时进入无 schema 模式（对象为键菜单、数组为条目菜单、其他值按运行时类型；保存不校验），不会因缺少 schema 退出。详见[Schema 来源](schema-sources.md#4-全部失败无-schema-模式)。
-- **格式按扩展名**：`.json`/`.jsonc` 用 JSONC，`.yaml`/`.yml` 用 YAML，`.toml` 用 TOML；其它扩展名按 JSONC。详见[配置文件格式](formats.md)。
+- **File does not exist**: starts from an empty object document, created on save.
+- **Config must be a local path**: putting `http(s)://...` in a positional argument fails with `config must be a local file path`, exit 2.
+- **No positional arguments**: errors and prints usage, exit 2.
+- **The TUI needs a terminal**: in non-`--accessible` mode, startup is refused when stdin is not a terminal (exit 1), avoiding a garbled UI in a half-piped environment.
+- **Everything loads before the UI**: in multi-file mode, a failure to read or parse any file terminates the whole run before the interface appears; each file's schema is parsed individually.
+- **Editing works without a schema**: when `-s`, the config pointer, and SchemaStore all come up empty, jse enters schema-less mode (objects as key menus, arrays as item menus, other values by runtime type; no validation on save) — it does not exit because of the missing schema. See [Schema sources](schema-sources.md#4-all-sources-fail-schema-less-mode).
+- **Format by extension**: `.json`/`.jsonc` use JSONC, `.yaml`/`.yml` use YAML, `.toml` uses TOML; other extensions are treated as JSONC. See [Configuration file formats](formats.md).
 
-## 多文件会话
+## Multi-file sessions
 
 ```sh
 jse -s server.schema.json a.json b.yaml c.json
 ```
 
-- 启动显示第一个文件；标题行是文件名，右侧显示 `[1/3]`（子菜单里仍带文件名：`[1/3 a.json]`）。
-- `s` 打开文件切换器（`↑/↓` 或 `j/k` 移动，`enter` 切换，`esc` 关闭）。有未保存改动的文件在切换器里带 `●`。
-- 每个文件保留自己的面包屑、光标、撤销栈、变更基线和问题列表。
-- `ctrl+o` / `ctrl+i`（`tab`）按导航历史后退/前进，可跨文件回退，例如切到文件 B 后再 `ctrl+o` 会回到文件 A 的离开位置。
-- `ctrl+s` / `w` **只保存当前文件**。根屏按 `esc`/`q` 退出时若有多个文件有改动，询问 `Save changes in N files? (y/n)`，`y` 会逐个保存。
-- 批量保存会按顺序写入；某文件校验失败时停在那个文件并打开错误列表，修复后重新退出，或带 `--force` 强存。
+- Startup shows the first file; the title line shows the file name with `[1/3]` on the right (submenus keep the file name: `[1/3 a.json]`).
+- `s` opens the file switcher (`↑/↓` or `j/k` to move, `enter` to switch, `esc` to close). Files with unsaved changes carry a `●` in the switcher.
+- Each file keeps its own breadcrumb, cursor, undo stack, change baseline, and issue list.
+- `ctrl+o` / `ctrl+i` (`tab`) move back/forward through the navigation history, across files as well — e.g. after switching to file B, `ctrl+o` returns to the position where you left file A.
+- `ctrl+s` / `w` **save only the current file**. When exiting with `esc`/`q` at the root screen and multiple files have changes, jse asks `Save changes in N files? (y/n)`; `y` saves them one by one.
+- Batch saves are written in order; when a file fails validation, saving stops at that file and opens the error list — fix it and exit again, or force the write with `--force`.
 
-`--accessible` 模式下文件按参数顺序**逐个**编辑：每个文件从根屏走一遍问答，全部完成后进程退出。
+In `--accessible` mode, files are edited **one at a time** in argument order: each file walks through the question-and-answer flow from the root screen, and the process exits once all files are done.
 
-## 退出码与 stdout
+## Exit codes and stdout
 
-| 退出码 | 含义 | stdout 结果行 |
+| Exit code | Meaning | stdout result line |
 |---|---|---|
-| 0 | 已保存；或无未保存改动时正常退出 | `Saved to <path>`（多文件每行一个）/ `No changes, nothing written` / `Saved with validation errors (--force): <paths>` |
-| 1 | 运行错误：读取/解析配置失败、schema 抓取或编译前置失败、TUI 错误、stdin 不是终端 | 错误信息写到 stderr |
-| 2 | 用法错误：未知参数、没有配置文件、`--pick` 中止、`--pick` 选择器缺少终端 | 错误信息与用法写到 stderr |
-| 130 | 用户中止：根屏选 `n` 放弃、`ctrl+c` | `Aborted, no changes written`；若此前保存过：`Saved to <path>; aborted (changes after the last save are lost)` |
+| 0 | Saved; or normal exit with no unsaved changes | `Saved to <path>` (one line per file in multi-file mode) / `No changes, nothing written` / `Saved with validation errors (--force): <paths>` |
+| 1 | Runtime error: failed to read/parse the config, schema fetch or compile prerequisite failed, TUI error, stdin is not a terminal | Error message goes to stderr |
+| 2 | Usage error: unknown flag, no config file, `--pick` aborted, `--pick` picker lacks a terminal | Error message and usage go to stderr |
+| 130 | User abort: chose `n` at the root screen to discard, `ctrl+c` | `Aborted, no changes written`; if something was saved earlier: `Saved to <path>; aborted (changes after the last save are lost)` |
 
-注意：
+Notes:
 
-- `--force` 强存仍是 exit 0。
-- `ctrl+c` 不写文件；但会话中已经 `ctrl+s`/`w` 保存的内容会留在磁盘上，其结果行会说明最后一次保存之后的修改已丢失。
-- 根屏在没有改动时按 `esc`/`q` 直接退出，不写文件，输出 `No changes, nothing written`。
+- A `--force` write is still exit 0.
+- `ctrl+c` writes no files; but anything already saved with `ctrl+s`/`w` during the session stays on disk, and its result line notes that changes after the last save are lost.
+- Pressing `esc`/`q` at the root screen with no changes exits directly, writes nothing, and prints `No changes, nothing written`.
 
-## 示例
+## Examples
 
 ```sh
-# 显式 schema
+# Explicit schema
 jse -s examples/server.schema.json server.json
 
-# schema 已写在配置的 $schema / YAML 文件头 / TOML `#:schema` 里
+# Schema already present in the config's $schema / YAML header / TOML `#:schema`
 jse server.yaml
 jse Cargo.toml
 
-# 远端 schema
+# Remote schema
 jse -s https://example.com/schemas/server.schema.json server.json
 
-# 强制从 SchemaStore 检索（即使配置已有 schema）
+# Force the SchemaStore picker (even when the config already has a schema)
 jse --pick .github/workflows/ci.yml
 
-# 校验失败也写入
+# Write despite validation errors
 jse --force -s schema.json broken.json
 
-# 行式模式（交互式逐行问答；脚本示例见 docs/accessible.md）
+# Line mode (interactive line-by-line Q&A; see docs/accessible.md for scripting)
 jse --accessible -s examples/server.schema.json new.json
 ```
 
-## 环境变量
+## Environment variables
 
-| 变量 | 作用 |
+| Variable | Purpose |
 |---|---|
-| `JSE_CACHE_DIR` | 覆盖远端 schema / SchemaStore 目录缓存目录，`:` 命令历史文件（`cmd-history`）也存在这里。默认 `$XDG_CACHE_HOME/jse`（通常 `~/.cache/jse`）。目录不可写时静默不缓存。 |
-| `JSE_CATALOG_URL` | 覆盖 SchemaStore 目录地址，用于测试或内网镜像。 |
-| `JSE_BASH_COMPLETION` | 覆盖 `:` 命令行 shell 参数补全加载的 bash-completion 核心脚本路径；未设置时按标准位置查找。 |
-| `EDITOR` / `VISUAL` | 外部编辑器；都没有时用 `vi`。 |
-| `HTTPS_PROXY` / `https_proxy`、`HTTP_PROXY` / `http_proxy`、`ALL_PROXY` / `all_proxy` | 远端请求代理，按此顺序取第一个非空值。 |
-| `NO_PROXY` / `no_proxy` | 不走代理的主机列表；支持 `*`、域名后缀与前导点。 |
-| `XDG_CACHE_HOME` | 缓存根目录；未设置时用平台默认缓存目录。 |
-| `JSE_VERSION_OVERRIDE`、`JSE_COMMIT`、`JSE_BUILD_DATE` | **仅构建时**注入版本元数据（发布工作流使用）。 |
+| `JSE_CACHE_DIR` | Overrides the cache directory for remote schemas / the SchemaStore catalog; the `:` command history file (`cmd-history`) also lives here. Default `$XDG_CACHE_HOME/jse` (usually `~/.cache/jse`). When the directory is not writable, caching is silently skipped. |
+| `JSE_CATALOG_URL` | Overrides the SchemaStore catalog URL, for testing or intranet mirrors. |
+| `JSE_BASH_COMPLETION` | Overrides the bash-completion core script loaded for shell argument completion on the `:` line; when unset, the standard locations are tried. |
+| `EDITOR` / `VISUAL` | External editor; `vi` when neither is set. |
+| `HTTPS_PROXY` / `https_proxy`, `HTTP_PROXY` / `http_proxy`, `ALL_PROXY` / `all_proxy` | Proxy for remote requests; the first non-empty value in this order wins. |
+| `NO_PROXY` / `no_proxy` | Host list that bypasses the proxy; supports `*`, domain suffixes, and leading dots. |
+| `XDG_CACHE_HOME` | Cache root directory; the platform default cache directory is used when unset. |
+| `JSE_VERSION_OVERRIDE`, `JSE_COMMIT`, `JSE_BUILD_DATE` | Inject version metadata **at build time only** (used by the release workflow). |
 
-`JSE_CACHE_DIR` 不能通过空值禁用缓存；想强制刷新就删除缓存目录或换一个目录。
+`JSE_CACHE_DIR` cannot disable caching by being set to an empty value; to force a refresh, delete the cache directory or switch to a different one.

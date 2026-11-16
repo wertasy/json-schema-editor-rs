@@ -45,21 +45,29 @@ impl App {
             .unwrap_or_else(|| delta.to_string())
     }
 
-    /// edit_wheel applies the mouse wheel to the focused inline edit: the
-    /// number in the input is bumped by delta (+1 wheel up / -1 wheel down);
-    /// an empty numeric field seeds from the schema default. Any other
-    /// content ignores the wheel. Returns whether the screen changed.
+    /// edit_wheel applies the mouse wheel to the focused inline edit. On an
+    /// enum dropdown the wheel walks the candidate list (up = previous,
+    /// down = next, like the arrows); on a number it bumps the input by
+    /// delta (+1 wheel up / -1 wheel down); an empty numeric field seeds
+    /// from the schema default. Any other content ignores the wheel.
+    /// Returns whether the screen changed.
     pub(crate) fn edit_wheel(&mut self, delta: i64) -> bool {
         let Some(Overlay::Edit(mut e)) = self.overlay.take() else {
             return false;
         };
-        let typed_numeric = e
+        let node = e
             .fn_
             .map(|f| &self.fs().schema.nodes[f as usize])
-            .or(e.synth.as_ref())
-            .is_some_and(|n| {
-                n.kind == Kind::Scalar && matches!(n.json_type.as_str(), "integer" | "number")
-            });
+            .or_else(|| e.synth.as_ref());
+        let is_enum = node.is_some_and(|n| !n.enum_.is_empty());
+        if is_enum && !e.sugs.is_empty() {
+            cycle_text_sugs(&mut e.ti, &e.sugs, &mut e.sug_idx, -delta);
+            self.overlay = Some(Overlay::Edit(e));
+            return true;
+        }
+        let typed_numeric = node.is_some_and(|n| {
+            n.kind == Kind::Scalar && matches!(n.json_type.as_str(), "integer" | "number")
+        });
         let cur = e.ti.value().trim().to_string();
         let next = match bump_number_literal(&cur, delta) {
             Some(lit) => lit,

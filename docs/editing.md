@@ -1,244 +1,244 @@
-# 编辑功能
+# Editing features
 
-所有编辑**即时写回**内存中的文档；保存只是把当前文档写到磁盘。每次按键最多产生一步撤销。
+All edits are **written back immediately** to the in-memory document; saving just writes the current document to disk. Each key press produces at most one undo step.
 
-## 字段编辑
+## Field editing
 
-| 字段类型 | `enter` 行为 |
+| Field type | `enter` behavior |
 |---|---|
-| `string` / `integer` / `number` | 光标行下方就地输入；非法值红字拦截，不写入。 |
-| `boolean` | 切换（`space` 也可）。 |
-| `enum` | 打开行内输入，选项以自动补全式下拉列出（见下文「枚举下拉」）。`space` 切换数组成员。 |
-| 普通对象 | 进入子菜单。 |
-| 数组 | 进入数组管理菜单。 |
-| 映射（`additionalProperties`） | 进入映射菜单，键是文档成员。 |
-| `oneOf` / `anyOf` | 变体选择或直接编辑当前变体。 |
-| 无法表单化 / 无 `type` | 已有值按运行时类型直接编辑（标量就地、布尔切换、对象/数组进子菜单）；无值或显式 null 时才先选类型。`t` 可显式打开类型选择器。 |
+| `string` / `integer` / `number` | In-place input below the cursor line; invalid values are blocked in red text and not written. |
+| `boolean` | Toggle (`space` also works). |
+| `enum` | Opens inline input with the options listed in an autocomplete-style dropdown (see [Enum dropdown](#enum-dropdown) below). `space` toggles array members. |
+| Plain object | Enters the sub-menu. |
+| Array | Enters the array management menu. |
+| Map (`additionalProperties`) | Enters the map menu; keys are document members. |
+| `oneOf` / `anyOf` | Variant selection, or direct editing of the current variant. |
+| Not form-able / no `type` | Existing values are edited directly by their runtime type (scalars in place, booleans toggled, objects/arrays into sub-menus); the type picker comes first only when there is no value or an explicit null. `t` explicitly opens the type picker. |
 
-输入框内：
+Inside the input box:
 
-- `enter` 应用，`esc` 取消。
-- `tab`/`ctrl+n`、`shift+tab`/`ctrl+p`（别名 `ctrl+j`/`ctrl+k`，候选窗口打开时生效）循环补全候选。
-- 普通行内移动/删除键可用；`alt+f`/`alt+b` 按词前后移动（空白及 `,.+-=_/\:?!$#@*` 分词），`ctrl+a`/`ctrl+e` 行首/行尾，`ctrl+k`/`ctrl+u`/`ctrl+w` 删除。
-- 终端较窄、值比输入区宽时，输入框水平滚动，视口始终跟着光标（光标及其前后文本保持可见），超出的部分以视口外的原文为准，不会被修改或截断。
+- `enter` applies, `esc` cancels.
+- `tab`/`ctrl+n`, `shift+tab`/`ctrl+p` (aliases `ctrl+j`/`ctrl+k`, active while the candidate window is open) cycle through completion candidates.
+- Normal inline movement/deletion keys work; `alt+f`/`alt+b` move by word (whitespace and `,.+-=_/\:?!$#@*` split words), `ctrl+a`/`ctrl+e` go to line start/end, `ctrl+k`/`ctrl+u`/`ctrl+w` delete.
+- When the terminal is narrow and the value is wider than the input area, the input box scrolls horizontally and the viewport always follows the cursor (the cursor and the text around it stay visible); text outside the viewport is taken from the original value and is never modified or truncated.
 
-### 文本自动补全
+### Text autocomplete
 
-- 候选首先来自**文档中同键已存在的值**：字符串字段取字符串值，`integer`/`number` 取数字字面量；去重、按文档顺序、不含本处。
-- **模糊匹配**：按不区分大小写的子序列过滤（`outp` 能匹配 `out-proxy`、`op` 也能命中），匹配的字符在候选行中**红色加粗**显示；更紧的匹配排前面（完全相等 > 前缀 > 子串 > 子序列），其余按候选顺序稳定排序。输入框自身仍是自由文本，`enter` 提交输入内容，`tab` 采纳高亮候选。
-- **多行值不参与补全**（含换行或制表符的字符串），避免撑破提示行。
-- schema 给出可选值时优先只用这些值（例如 `oneOf` 中「开放字符串 + 字符串集合」合并成文本输入，如 workflow 的 `shell`）。已输入关键词与全部选项都不匹配时，才回退到文档候选；字段始终是自由文本，schema 未列出的值仍可输入。
-- 带 `x-tag-reference` 的字段按引用域取 `tag` 值作为候选：如 `http_client` → `http_clients[].tag`（兼容单复数两种键名，不限层级）；复合域名还接受末词（含复数）在首词同名成员下的嵌套匹配，如 `dns_server` → `dns.servers[].tag`。
-- `oneOf`/`anyOf` 的标量变体与对象变体内的字符串同样补全；`$ref` 共享定义也按字段自身的键补全。
-- 提示行 `tab: a · b · c` 显示三个候选的滚动窗口，两侧 `…` 表示还有更多；`tab`/`shift+tab` 前后循环填入，两端回绕。
+- Candidates first come from **existing values of the same key in the document**: string fields take string values, `integer`/`number` take numeric literals; deduplicated, in document order, excluding this spot.
+- **Fuzzy matching**: candidates are filtered as case-insensitive subsequences (`outp` matches `out-proxy`, `op` hits too), and the matched characters are shown **bold red** in the candidate rows; tighter matches rank first (exact > prefix > substring > subsequence), the rest keep candidate order. The input itself stays free text: `enter` commits what is typed, `tab` adopts the highlighted candidate.
+- **Multi-line values do not participate in completion** (strings containing newlines or tabs), to avoid breaking the hint line.
+- When the schema offers a set of values, only those are used first (e.g. in `oneOf`, an "open string + string set" merges into a text input, such as workflow's `shell`). Only when the entered keyword matches none of the options does it fall back to document candidates; the field remains free text, and values not listed by the schema can still be entered.
+- Fields with `x-tag-reference` take `tag` values as candidates by reference domain: e.g. `http_client` → `http_clients[].tag` (both singular and plural key names accepted, at any depth); compound domain names also accept a nested match where the last word (including its plural) appears under a member named after the first word, e.g. `dns_server` → `dns.servers[].tag`.
+- Scalar variants of `oneOf`/`anyOf` and strings inside object variants complete the same way; `$ref` shared definitions also complete by the field's own key.
+- The hint line `tab: a · b · c` shows a scrolling window of three candidates, with `…` on either side indicating more; `tab`/`shift+tab` cycle forward/backward filling in candidates, wrapping at both ends.
 
-### 枚举下拉
+### Enum dropdown
 
-- 标量枚举（含 oneOf 并集菜单里的判别键）不再打开独立的选择页：`enter` 在字段行就地打开输入框，全部选项以自动补全式下拉列出，当前值在选项中时预填该选项并高亮（值缺失——含显式 null——或不在选项中时取默认值，再取第一项）。
-- 输入框中的内容就是搜索关键词：键入即按**不区分大小写的模糊子序列**过滤选项（`pro`、`op`、`outp` 都能命中 `out-proxy`），匹配的字符红色加粗，更紧的匹配（前缀、子串）排在子序列前面。输入框仍持有高亮选项时，直接键入会覆盖整个值、重新开始搜索（组合框习惯）。`↑`/`↓`/`tab` 在匹配项间循环，`backspace` 修正查询。
-- `enter` 应用高亮项；输入框内容与某选项一致（不区分大小写）时也按该选项应用。应用的是 schema 里的选项节点本身：非字符串成员（布尔、数字、null）与数字字面量按原样写回。无匹配时 `enter` 红字提示 `must be one of: ...` 并列出全部选项，不改文档；`esc` 取消。
-- 与输入完全相同的选项**不会**被过滤掉——它就是要应用的值；空查询列出全部选项。
+- Scalar enums (including discriminant keys in oneOf union menus) no longer open a separate selection page: `enter` opens the input box in place on the field line, with all options listed in an autocomplete-style dropdown; when the current value is among the options, that option is pre-filled and highlighted (when the value is missing — including explicit null — or not among the options, the default value is used, then the first item).
+- The input box content is the search keyword: typing filters options as **case-insensitive fuzzy subsequences** (`pro`, `op`, and `outp` all hit `out-proxy`), the matched characters are bold red, and tighter matches (prefix, substring) rank before subsequences. When the box still holds the highlighted option, typing directly overwrites the whole value and restarts the search (combobox convention). `↑`/`↓`/`tab` cycle through matches, `backspace` corrects the query.
+- `enter` applies the highlighted item; when the box content equals an option (case-insensitive), that option is applied as well. What gets applied is the schema's option node itself: non-string members (booleans, numbers, null) and numeric literals are written back as-is. With no match, `enter` shows `must be one of: ...` in red and lists all options, leaving the document unchanged; `esc` cancels.
+- An option identical to the input is **not** filtered out — it is the very value to apply; an empty query lists all options.
 
-## 对象、映射与数组
+## Objects, maps and arrays
 
-### 对象与映射
+### Objects and maps
 
-- 字段按 schema 声明顺序排列；schema 未定义的键排在后面，保持文档顺序。
-- `a` / `A`：在光标成员前/后添加 schema 未定义的键。先输入键名，再按下 `enter`：
-  - 键名不能为空，不能与 schema 字段或已有键重复。
-  - 映射（`additionalProperties`）的值按子 schema 编辑；对象/数组值立即创建空容器；无具体类型的值先选类型，再进就地输入、子菜单或 `JSON` raw 文本区。
-  - 映射受 `patternProperties` 约束时，新键必须匹配该正则，否则行内提示 `key must match <pattern>`。
-- `d`：删除键值对；required 合并键等受保护行拒绝。
-- 映射的键就是文档成员；删除映射键即删除该成员。
+- Fields are ordered by schema declaration; keys not defined by the schema come after, keeping document order.
+- `a` / `A`: add a schema-undefined key before/after the cursor member. Type the key name first, then press `enter`:
+  - The key name must not be empty and must not duplicate a schema field or an existing key.
+  - Map (`additionalProperties`) values are edited according to the sub-schema; object/array values create an empty container immediately; values without a concrete type pick a type first, then enter in-place input, a sub-menu, or the `JSON` raw text area.
+  - When a map is constrained by `patternProperties`, the new key must match the regex, otherwise the inline hint `key must match <pattern>` appears.
+- `d`: delete the key-value pair; protected rows such as required merge keys refuse.
+- A map's keys are document members; deleting a map key deletes that member.
 
-### 数组
+### Arrays
 
-| 按键 | 作用 |
+| Key | Action |
 |---|---|
-| `< Add item >` / `a` / `A` | 数组为空时显示 `< Add item >`；`a` / `A` 在光标条目**前/后**插入新条目。 |
-| `D` | 删除当前数组条目（在条目表单内同样有效，删除后回到条目列表），需确认 `Remove this item? (y/n)`。 |
-| `d` / `delete` | 删除光标条目（无确认）。 |
-| `J` / `K` | 下移 / 上移条目，光标跟随；一次按键一步撤销。 |
-| `Ngg` | 跳到下标 N（越界钳到末项，`0gg` 第一项）。 |
-| `v` 或 `m` | 选中条目标签 `key[N]`，批量 `y`/`x`/`d`。 |
+| `< Add item >` / `a` / `A` | `< Add item >` shows when the array is empty; `a` / `A` inserts a new entry **before/after** the cursor entry. |
+| `D` | Deletes the current array entry (also works inside the entry form; returns to the entry list after deletion), with confirmation `Remove this item? (y/n)`. |
+| `d` / `delete` | Deletes the cursor entry (no confirmation). |
+| `J` / `K` | Move entry down / up, cursor follows; one key press = one undo step. |
+| `Ngg` | Jump to index N (clamped to the last item when out of bounds, `0gg` first item). |
+| `v` or `m` | Selects entry labels `key[N]`, for batch `y`/`x`/`d`. |
 
-- 对象条目进入条目表单；按 `D` 删除当前条目，确认后回到条目列表。
-- 标量条目插入时先放 `null` 占位，取消编辑会留下空位，可 `d` 删除。
-- `d` 删除当前键值对或数组条目时不确认（required 合并键等受保护行拒绝）；`D` 删除数组条目（条目列表或条目表单内）保留原「此条」行的 `y/n` 确认。两者确认策略不同是刻意保留的（`d` 覆盖键对与条目行，`D` 专用于数组条目且可在条目表单内触发），不是遗漏。
-- `oneOf` / 任意类型条目同样先放 `null` 占位并打开类型选择器；选中标量后直接在该条目行就地输入。
-- 对象/数组条目插入时立即创建空容器占位。
-- `items` 为枚举的数组显示为多选 toggle 列表；`/` 按选项文本过滤，`enter` 切换当前匹配项（过滤保持，可连续切换），`esc` 取消过滤并把光标恢复到打开搜索时的行。
+- Object entries open the entry form; press `D` to delete the current entry — after confirmation you return to the entry list.
+- Scalar entries are inserted with a `null` placeholder; canceling the edit leaves an empty slot, which `d` can delete.
+- `d` deletes the current key-value pair or array entry without confirmation (protected rows such as required merge keys refuse); `D` deleting an array entry (in the entry list or inside the entry form) keeps the original this-item row's `y/n` confirmation. The differing confirmation policies are intentional (`d` covers key-value pairs and entry rows, `D` is dedicated to array entries and can also be triggered inside the entry form), not an omission.
+- `oneOf` / any-type entries likewise place a `null` placeholder first and open the type picker; after a scalar is picked, editing happens in place on that entry line.
+- Object/array entries create an empty container placeholder immediately on insertion.
+- Arrays whose `items` is an enum display as a multi-select toggle list; `/` filters by option text, `enter` toggles the current match (the filter persists, so you can keep toggling), `esc` cancels the filter and restores the cursor to the row it was on when the search opened.
 
 ### oneOf / anyOf
 
-- 每个变体一行：`●` 当前变体 + 变体名；无标题变体用结构签名占标题列（与任意类型选择器一致），有标题时右侧再显示结构签名，不合成 `variant N` 标签。
-- **无值**：先选类型再编辑。
-- **已有值**：`enter` 跳过类型拣选，直接进入当前变体的编辑界面。
-- 光标在变体 key（oneOf 字段行）或变体子菜单内按 `t` 打开变体选择器；无需先进入标量编辑（枚举变体的下拉内 `t` 是普通字符，先 `esc` 退出再按）。切换已有值前确认 `Replace current value? (y/n)`；确认时若原值是标量且能作为目标数组的元素（如 `string` → `array[string]`、`integer`/`number` → 对应元素类型的数组），原值保留为数组的第一个元素，否则丢弃（或写入 schema 默认值）。
-- 标量变体：回到上一级菜单，在字段行就地编辑；提交后 `●` 移到该变体。
-- 枚举变体：与标量枚举相同的行内下拉（编辑框内 `esc` 退出后，再按 `t` 切换变体）。
-- 对象/数组/映射变体：各自子菜单（映射变体列出文档键，可 `a`/`d`）。
-- `items` 是「全对象 oneOf」的数组：空数组的 `< Add item >`（或任意数组的 `a`/`A`）进入并集字段菜单，按已填字段（如判别 `const`）自动识别变体；改判别键即可切换。经 `<<` 合并来的键同样参与识别。
-- 普通 oneOf 变体选择器与任意类型选择器共用同一个搜索栏组件（`/` 进入、`search:` 状态行、相同编辑/移动键），但列表只包含该 oneOf 自己的变体，不会混入 JSON 内建类型或 `$defs` 类型。
-- 选择器底部的 `variant:` 显示当前匹配变体：有类型名时显示 `variant: DnsRule {type, inbound, ip_version, query_type, +51}`，无类型名时只显示结构签名。
-- `allOf` 按约束交集合并：同名 `properties`、`items`、`additionalProperties`、`patternProperties` 递归合并（两侧 `$ref` 都生效），`required` 取并集，数值/长度/数组与对象数量边界取更严者；其中的 `oneOf`/`anyOf` 按分配律展开为嵌套变体。
+- One variant per line: `●` marks the current variant + variant name; untitled variants use the structural signature in the title column (consistent with the any-type picker), and when titled, the structural signature is shown on the right — no synthetic `variant N` labels.
+- **No value**: pick a type first, then edit.
+- **Existing value**: `enter` skips type picking and goes straight into the current variant's editing interface.
+- With the cursor on a variant key (the oneOf field row) or inside the variant sub-menu, `t` opens the variant picker; no need to enter scalar editing first (inside the enum variant's dropdown, `t` is a plain character — `esc` out first, then press). Switching an existing value first confirms `Replace current value? (y/n)`; on confirmation, if the original value is a scalar and can serve as an element of the target array (e.g. `string` → `array[string]`, `integer`/`number` → an array of the corresponding element type), the original value is kept as the array's first element, otherwise discarded (or the schema default is written).
+- Scalar variants: return to the parent menu and edit in place on the field line; after commit `●` moves to that variant.
+- Enum variants: the same inline dropdown as scalar enums (after `esc` exits the edit box, press `t` again to switch variants).
+- Object/array/map variants: their own sub-menus (map variants list document keys, with `a`/`d`).
+- Arrays whose `items` is an "all-object oneOf": the empty array's `< Add item >` (or any array's `a`/`A`) enters the union field menu, which identifies the variant automatically from already-filled fields (such as a discriminant `const`); changing the discriminant key switches variants. Keys merged in via `<<` participate in identification too.
+- The plain oneOf variant picker and the any-type picker share the same search bar component (`/` to enter, the `search:` status line, identical editing/movement keys), but the list contains only that oneOf's own variants — JSON built-in types or `$defs` types are never mixed in.
+- The `variant:` line at the bottom of the picker shows the currently matched variant: with a type name it shows `variant: DnsRule {type, inbound, ip_version, query_type, +51}`, without one, only the structural signature.
+- `allOf` merges by constraint intersection: same-named `properties`, `items`, `additionalProperties`, `patternProperties` merge recursively (`$ref` on either side takes effect), `required` takes the union, numeric/length/array and object count bounds take the stricter one; any `oneOf`/`anyOf` inside expand distributively into nested variants.
 
-### schema 未定义的键
+### Keys not defined by the schema
 
-文档有、schema 没有的键显示为黄色行，带 `(not in schema)` 与值摘要，行尾 `<warn>`：
+Keys present in the document but missing from the schema display as yellow rows, with `(not in schema)` and a value summary, `<warn>` at end of line:
 
-- 已有值时 `enter` 按值的运行时类型直接编辑：字符串/数字就地输入，布尔切换，对象/数组进入 schema-less 子菜单；不会先弹类型选择器，也不会直接拉起 `$EDITOR`。
-- 无值（缺失或显式 null）时才主动打开类型选择器：JSON 内建类型 `String`、`Number`、`Boolean`、`Object`、`Array`、`Null`，以及 schema 顶层 `$defs` / `definitions` 中定义的命名类型（按定义顺序排在 `Null` 之后、`JSON` 之前）。
-- `t` 可在已有值上显式打开同一个类型选择器，用于主动切换类型；切换前确认 `Replace current value? (y/n)`，标量到兼容数组变体的切换同样保留原值为第一个元素。
-- 选中 schema 定义的类型会使用该定义的真实表单：对象按 `properties` 下钻、枚举进入行内下拉、数组进入条目菜单、`oneOf` 定义进入其变体选择器；定义若降级为 raw（例如递归或不可达 `$ref`）则不会列入。
-- 类型较多时在变体/类型选择器内按 `/` 进入搜索模式。搜索栏与 `Select a schema` 一致：查询从空开始、块状光标，支持 `←`/`→`/`Home`/`End`、`alt+f`/`alt+b` 按词移动、`backspace`/`delete`、`ctrl+a/e/k/u/w` 编辑；`tab`/`shift+tab` 与 `ctrl+j`/`ctrl+k` 移动结果。光标保持当前行（打开选择器时即当前变体）；键入即实时收窄列表（匹配标题、键与结构签名）。`enter` 选中，`esc` 清除搜索并把光标恢复到打开搜索时的行；搜索模式中的 `u` 是普通字符，不会触发撤销，也不会打开字段搜索 overlay。
-- 选择器内 `String`/`Number` 就地输入，`Boolean` 直接切换，`Object`/`Array` 进入可直接增删键/条目的子菜单，`Null` 写入 `null`；`JSON` 打开内置 raw 文本区，已有值按当前文件格式预填（显式按 `e` 仍可外编）。
-- `d` 删除。
-- `a`/`A` 新增的键没有值，因此先选类型；键以 `null` 占位并保留插入位置，取消类型选择后可用 `d` 删除。
-- 同时作为编辑器级警告进入问题列表（`unknown key ... not in the schema`），不阻断保存；顶层 `$schema`（编辑器自动写回的指向）不警告。匹配 `patternProperties` 任一模式的键属于 schema 已知键，不会显示该标记或警告（多模式 `patternProperties` 不生成映射表单，仍按运行时形状编辑）。`additionalProperties` 为 `true` 或对象 schema 的对象同样视为开放映射：`properties` 之外的键不显示该标记或警告，仍按运行时形状编辑。oneOf/anyOf 的对象分支同理：值未唯一定位到单个分支时，任一分支开放即可；唯一定位时以命中分支为准。
-- schema 明确定义类型的字段不显示此选择器：`enter` 始终按 schema 类型编辑。
-- 如果 `additionalProperties: false` 已产生校验错误，不重复列出未知键警告。
+- With an existing value, `enter` edits directly by the value's runtime type: strings/numbers in-place input, booleans toggle, objects/arrays enter the schema-less sub-menu; no type picker pops up first, and `$EDITOR` is not launched directly.
+- Only when there is no value (missing or explicit null) does the type picker open proactively: JSON built-in types `String`, `Number`, `Boolean`, `Object`, `Array`, `Null`, plus named types defined in the schema's top-level `$defs` / `definitions` (in definition order, after `Null` and before `JSON`).
+- `t` can explicitly open the same type picker on an existing value, for proactively switching types; confirm `Replace current value? (y/n)` before switching, and scalar-to-compatible-array-variant switches likewise keep the original value as the first element.
+- Picking a schema-defined type uses that definition's real form: objects drill down by `properties`, enums enter the inline dropdown, arrays enter the entry menu, and `oneOf` definitions enter their variant picker; definitions degraded to raw (e.g. recursive or unreachable `$ref`) are not listed.
+- When there are many types, press `/` inside the variant/type picker to enter search mode. The search bar matches `Select a schema`: the query starts empty with a block cursor, supporting `←`/`→`/`Home`/`End`, `alt+f`/`alt+b` word-wise movement, `backspace`/`delete`, `ctrl+a/e/k/u/w` editing; `tab`/`shift+tab` and `ctrl+j`/`ctrl+k` move through results. The cursor stays on the current row (the current variant when the picker opened); typing narrows the list in real time (matching titles, keys, and structural signatures). `enter` selects, `esc` clears the search and restores the cursor to the row it was on when the search opened; `u` inside search mode is a plain character — it triggers neither undo nor the field search overlay.
+- Inside the picker, `String`/`Number` edit in place, `Boolean` toggles directly, `Object`/`Array` enter sub-menus where keys/entries can be added or removed directly, `Null` writes `null`; `JSON` opens the built-in raw text area, pre-filled with the existing value in the current file format (pressing `e` explicitly still opens the external editor).
+- `d` deletes.
+- Keys added by `a`/`A` have no value, so a type is picked first; the key sits with a `null` placeholder at its insertion position and can be deleted with `d` after canceling type selection.
+- It also enters the issue list as an editor-level warning (`unknown key ... not in the schema`) without blocking saving; the top-level `$schema` (the pointer the editor writes back automatically) does not warn. A key matching any `patternProperties` pattern counts as a schema-known key and shows neither the marker nor the warning (multi-pattern `patternProperties` generates no map form; editing still follows the runtime shape). An object whose `additionalProperties` is `true` or a schema is likewise an open mapping: keys outside `properties` show neither the marker nor the warning, and still edit by their runtime shape. oneOf/anyOf object branches follow the same rule: when the value does not pin a single variant, any open branch counts; a pinned variant governs.
+- Fields whose type the schema explicitly defines never show this picker: `enter` always edits according to the schema type.
+- If `additionalProperties: false` has already produced a validation error, the unknown-key warning is not listed a second time.
 
-## 原始编辑与外部编辑器
+## Raw editing and the external editor
 
-- **raw JSON/YAML/TOML 外编**：`E` 在 `$EDITOR` 中编辑**光标行的值**；光标不在值行（或根标量/空根）时编辑整份文档。内容按文件自身格式（JSON/YAML/TOML），字符串值除外（见下）。退出后解析并作为一步撤销应用；语法无效只提示，保留原文档。
-- 整份文档的 raw 编辑（内置文本区或 `$EDITOR`）在应用时重新解析格式元数据：新文本里的注释与 schema 指令随文档一起生效，旧注释不会残留。
-- **内置 raw 文本区**：用于无法表单化的字段、以及任意类型选择器中的 `JSON` 变体；`ctrl+s` 应用，`esc` 取消；语法错误留在文本区并提示。
-- **单值外编**：`e` 在光标行打开 `$EDITOR` 编辑该值；无值提示 `no value to edit`。对象/数组容器行也可用。
-- **字符串值解除引号**：`e` / `E` 编辑字符串值时，临时文件里是**字符串本身的文本**——没有引号、没有格式转义；应用时编辑器里的文本原样写回为字符串值（`y` 复制与内置 raw 文本区的同一条规则）。文本里的空格保留；开头与结尾的换行会被去掉；清空内容等于删除该值。
-- **多行字符串**：含换行的字符串 `enter` 不就地输入，直接进 `$EDITOR`（临时文件只含该字符串的原始多行文本，三种格式一致）。
-- GUI 编辑器需要等待模式，例如设置 `EDITOR="code --wait"`。
+- **raw JSON/YAML/TOML external editing**: `E` edits **the value on the cursor line** in `$EDITOR`; when the cursor is not on a value line (or the root is a scalar/empty), it edits the whole document. Content follows the file's own format (JSON/YAML/TOML), except string values (see below). On exit it is parsed and applied as one undo step; invalid syntax only warns, and the original document is kept.
+- Raw editing of the whole document (built-in text area or `$EDITOR`) re-parses format metadata when applied: comments and schema directives in the new text take effect along with the document, and old comments do not linger.
+- **Built-in raw text area**: used for fields that cannot be represented as a form, and for the `JSON` variant in the any-type picker; `ctrl+s` applies, `esc` cancels; syntax errors stay in the text area with a hint.
+- **Single-value external editing**: `e` opens `$EDITOR` on the cursor line to edit that value; with no value it hints `no value to edit`. Object/array container rows work too.
+- **String values open unquoted**: when `e` / `E` edits a string value, the temp file holds **the string's own text** — no quotes, no format escaping; on apply the edited text is written back verbatim as the string value (the same rule as `y` copy and the built-in raw text area). Spaces in the text are kept; leading and trailing line breaks are stripped; emptying the buffer deletes the value.
+- **Multi-line strings**: a string containing newlines does not edit in place on `enter` — it goes straight to `$EDITOR` (the temp file contains the string's raw multi-line text, identical in all three formats).
+- GUI editors need wait mode, e.g. set `EDITOR="code --wait"`.
 
-## 复制、剪切与粘贴
+## Copy, cut and paste
 
-### 复制 / 剪切
+### Copy / cut
 
-`y` / `x` 作用于 **`"key": value` 键值对**，`Y` / `X` 只作用于**值**。
+`y` / `x` act on **`"key": value` key-value pairs**, `Y` / `X` act on **the value only**.
 
-- 文本格式随文件类型：
-  - JSON/JSONC：`"name": "webapp"`，值用紧凑 JSON；键序与 `1.0` 这类数字字面量保持。
-  - YAML：`name: webapp`；容器值/容器对输出多行块；锚点/引用以普通值导出。
-  - TOML：键值对写成内联表 `{ name = "webapp" }`；值用 TOML 值表达式；日期时间等未编辑字面量保持原样。
-- 字符串在各格式都按原样复制（不带引号/转义）；数字/布尔/显式 null 按字面量。
-- **数组条目菜单**：`y`/`Y` 都复制元素值；`x`/`X` 都剪切元素值并删除条目。其他页面 `y`/`x` 拒绝无对象键的行（`y copies object keys only`）。
-- 文档中缺失的字段提示 `no value to copy`，操作行提示 `nothing to copy`。
-- 成功提示 `Copied key-value pair` / `Copied value`；系统剪贴板不可用、只复制到内置剪贴板时提示带 ` (built-in clipboard)` 后缀；失败提示 `copy failed: ...`，不显示被复制内容。
-- 剪切 = 复制 + 删除；整批剪切算一步撤销。系统剪贴板写入失败时退回内置剪贴板，剪切照常删除；删除侧拒绝（required 合并行、锚点载体等）时行保留，已复制的内容保留，并提示原因。
-- 系统剪贴板依赖平台工具，见[安装：运行环境](install.md#运行环境)；Windows 只能写、不能读。没有工具、工具执行失败或读取失败时，jse 退回**会话内置剪贴板**：保存本次会话 `y`/`x` 复制的内容，`p`/`P`/`ctrl+v` 优先读系统剪贴板、失败时贴回内置内容。内置剪贴板只在当前会话内有效，不会进入系统剪贴板。
+- Text format follows the file type:
+  - JSON/JSONC: `"name": "webapp"`, values in compact JSON; key order and numeric literals like `1.0` are preserved.
+  - YAML: `name: webapp`; container values/pairs output as multi-line blocks; anchors/references are exported as plain values.
+  - TOML: key-value pairs are written as inline tables `{ name = "webapp" }`; values use TOML value expressions; unedited literals such as datetimes are kept as-is.
+- Strings are copied verbatim in every format (no quotes/escaping); numbers/booleans/explicit null as literals.
+- **Array entry menu**: both `y`/`Y` copy the element value; both `x`/`X` cut the element value and delete the entry. On other pages `y`/`x` refuse rows without object keys (`y copies object keys only`).
+- Fields missing from the document hint `no value to copy`; action rows hint `nothing to copy`.
+- Success hints `Copied key-value pair` / `Copied value`; when the system clipboard is unavailable and the copy went only to the built-in clipboard, the hint carries the ` (built-in clipboard)` suffix; failure hints `copy failed: ...` without showing the copied content.
+- Cut = copy + delete; a whole batch cut counts as one undo step. When writing to the system clipboard fails, it falls back to the built-in clipboard and the cut still deletes; when the delete side refuses (required merge rows, anchor carriers, etc.), the row is kept, the copied content is kept, and the reason is hinted.
+- The system clipboard depends on platform tools, see [Installation: runtime requirements](install.md#runtime-requirements); on Windows it is write-only. With no tools, on tool execution failure, or on read failure, jse falls back to the **session built-in clipboard**: it keeps what `y`/`x` copied during this session, and `p`/`P`/`ctrl+v` read the system clipboard first, pasting the built-in content back on failure. The built-in clipboard lives only within the current session and never enters the system clipboard.
 
-### 智能粘贴
+### Smart paste
 
-`p` 贴进**当前菜单展示的容器**；`P` 贴进**光标所指的容器**（光标不在容器行上时落到当前菜单的容器）。
+`p` pastes into **the container the current menu shows**; `P` pastes into **the container the cursor points at** (when the cursor is not on a container row, it falls back to the current menu's container).
 
-- `P` 在值行上遇到剪贴板里的**单个值**（`123`、`"hello"`、`true`、`null`）：直接替换该值，一步撤销。值行包括普通字段、对象/数组/oneOf 键值行、oneOf 变体选择器中的行，以及根标量/根 oneOf 文档。多选时替换所有选中行；无值的选中行会创建该键，提示 `pasted value into N keys`。
-- **纯文本**在目标能容纳字符串时可直接粘贴（JSON/JSONC/YAML/TOML 都适用）：当前值本身是字符串，或 schema 是文本字段/枚举/无约束 any-JSON 字段/含字符串叶子的 oneOf。`y`/`Y` 复制字符串本来就不带引号，`P` 能原样贴回；带一对 `""` 的文本去掉引号后为字符串内容。纯数字、布尔、容器等目标仍拒绝无法解析的文本。
-- 在任意文本输入框（值编辑、原始文本区、搜索、新增键、写路径、锚点/合并键、注释编辑）内，`ctrl+v` 或终端的 `ctrl+shift+v`（括号粘贴）会把系统剪贴板文本插入光标处（读取失败时改用会话内置剪贴板，见上）；多行文本在原始文本区按行插入。
-- `p` 遇到单个值只提示：`a single value replaces a row's value — press P on the row`。
-- 剪贴板是完整 JSON 对象 `{...}`：键合并进映射。已有键原位覆盖值；新键按剪贴板顺序插到光标行下方（`p`）或上方（`P`）。光标行无键时追加到末尾。
-- `P` 贴入光标行自己的容器：对象/数组行贴进该值；**oneOf 行按当前变体的对象或数组值**作为目标，`p` 仍贴进当前菜单的容器。
-- **数组条目菜单**的 `p`/`P` 是位置粘贴：剪贴板内容（部分元素、完整 `[...]`，或完整 `{...}` 作为单个条目）插到光标条目下方/上方；光标不在条目行时追加。
-- 不带括号的部分内容按「键值对 / 数组元素」自动识别；单个结尾逗号自动剥除。
-- **纯文本贴进数组**拆成条目：多行按行拆；单行按**顶层**逗号/空白拆（引号与括号内的分隔符不拆，`{"src":"/c"},{"src":"/d"}` 是两个对象）。每段先是 JSON 值，解析不了就按该段字面文本作字符串。`P` 在字符串行上仍把整段单行文本作为该行的字符串值；可解析的单个值（`123`、`"hello"`）不变，`p` 仍只提示。
-- 类型不匹配（键值对贴进枚举数组、数组元素贴进映射等）、剪贴板为空、不是合法 JSON/YAML/TOML：只提示，不改文档（数组目标里的纯文本按上行拆条目，不在此列）。
-- 编辑 YAML 文档时同样接受 YAML：块映射（逐行 `x: 1`）、块序列（逐行 `- 1`）、流式 `{...}`/`[...]`；编辑 TOML 文档时接受 TOML 文档（`x = 1`、`[table]`）或单个 TOML 值（含 `y`/`Y` 复制出的纯字符串）；JSON 在各格式照常可用。
-- 每次粘贴 = 一步撤销；保存时照常校验。
+- `P` on a value row with a **single value** in the clipboard (`123`, `"hello"`, `true`, `null`): replaces that value directly, one undo step. Value rows include plain fields, object/array/oneOf key-value rows, rows inside the oneOf variant picker, and root scalar/root oneOf documents. With multi-select, every selected row is replaced; selected rows without a value get the key created, hinting `pasted value into N keys`.
+- **Plain text** can be pasted directly when the target can hold a string (works in JSON/JSONC/YAML/TOML): the current value is itself a string, or the schema is a text field/enum/unconstrained any-JSON field/a oneOf with string leaves. `y`/`Y` copy strings without quotes in the first place, so `P` pastes them back verbatim; text wrapped in a pair of `""` becomes string content once the quotes are stripped. Targets like plain numbers, booleans, and containers still reject unparseable text.
+- Inside any text input box (value editing, the raw text area, search, new key, write path, anchors/merge keys, comment editing), `ctrl+v` or the terminal's `ctrl+shift+v` (bracketed paste) inserts system clipboard text at the cursor (on read failure, the session built-in clipboard is used instead, see above); multi-line text is inserted line by line in the raw text area.
+- When `p` encounters a single value it only hints: `a single value replaces a row's value — press P on the row`.
+- A complete JSON object `{...}` in the clipboard: keys merge into the map. Existing keys overwrite values in place; new keys are inserted below the cursor row (`p`) or above it (`P`) in clipboard order. When the cursor row has no key, they are appended at the end.
+- `P` pastes into the cursor row's own container: object/array rows paste into that value; **oneOf rows use the current variant's object or array value** as the target, while `p` still pastes into the current menu's container.
+- The **array entry menu**'s `p`/`P` are positional pastes: clipboard content (partial elements, a complete `[...]`, or a complete `{...}` as a single entry) is inserted below/above the cursor entry; appended when the cursor is not on an entry row.
+- Partial content without brackets is recognized automatically as key-value pair / array element; a single trailing comma is stripped automatically.
+- **Plain text pasted into an array** splits into entries: multi-line splits by line; a single line splits on **top-level** commas/whitespace (separators inside quotes and brackets do not split — `{"src":"/c"},{"src":"/d"}` is two objects). Each piece is first tried as a JSON value, falling back to a string of the piece's literal text when unparseable. `P` on a string row still takes the whole single-line text as that row's string value; parseable single values (`123`, `"hello"`) are unchanged, and `p` still only hints.
+- Type mismatches (key-value pairs into an enum array, array elements into a map, etc.), an empty clipboard, or invalid JSON/YAML/TOML: hint only, no document change (plain text into array targets is not in this category — it splits into entries per the bullet above).
+- While editing a YAML document, YAML is accepted as well: block mappings (`x: 1` per line), block sequences (`- 1` per line), flow `{...}`/`[...]`; while editing a TOML document, TOML documents are accepted (`x = 1`, `[table]`) or single TOML values (including plain strings copied by `y`/`Y`); JSON works as usual in every format.
+- Each paste = one undo step; validation still runs on save.
 
-### 多选与连选
+### Multi-select and range select
 
-- `m`：开/关光标行的标记。可选行是对象菜单的键值行（含 schema 未定义键）和数组菜单的条目标签；操作行不可选。选中行行首显示红色 `>`，key/标签变红。
-- 选中后：
-  - `y` 一次复制全部：对象菜单复制为紧凑对象/块映射；数组菜单把各元素压成单行紧凑值后用逗号连接（`{"src":"/a"},{"src":"/b"}`；bare 安全的字符串按原样、其余字符串加引号），可原样贴回任意数组。
-  - `d` 一次删除全部（一步撤销；数组按下标倒序删除；受保护行跳过并提示）。
-  - `x`/`X` 批量剪切。
-  - 操作后选区清空。
-  - `esc`/`q` 先清空选区并留在当前菜单；没有选区时才返回上一级。
-- `v`：连选。选区是起点（按 `v` 处）与光标之间的连续范围；`j`/`k`/方向键移动时扩展/缩小；`gg`/`G` 一步到第一个/最后一个可选行并把途经行全部标记。`v` 结束连选；`esc`/`q` 结束连选并清除标记。
-- `y`/`x`/`X`/`d`/`p`/`P` 作用于选区时先自动结束连选，再执行操作；操作完成后选区清空，`j`/`k` 恢复普通移动。
-- 进入/返回子菜单即结束连选；输出提示显示在底部帮助栏。
+- `m`: toggles the marker on the cursor row. Selectable rows are object menu key-value rows (including schema-undefined keys) and array menu entry labels; action rows are not selectable. Selected rows show a red `>` at line start, and the key/label turns red.
+- Once selected:
+  - `y` copies everything at once: object menus copy as a compact object/block mapping; array menus compress each element into a single-line compact value and join them with commas (`{"src":"/a"},{"src":"/b"}`; bare-safe strings as-is, other strings quoted), which can be pasted back into any array as-is.
+  - `d` deletes everything at once (one undo step; arrays delete in reverse index order; protected rows are skipped with a hint).
+  - `x`/`X` batch cut.
+  - The selection clears after an action.
+  - `esc`/`q` first clears the selection and stays in the current menu; only with no selection do they go up one level.
+- `v`: range select. The selection is the contiguous range between the starting point (where `v` was pressed) and the cursor; `j`/`k`/arrow keys extend/shrink it while moving; `gg`/`G` jumps to the first/last selectable row in one step, marking every row passed. `v` ends range select; `esc`/`q` ends it and clears the markers.
+- When `y`/`x`/`X`/`d`/`p`/`P` act on a selection they automatically end range select first, then perform the action; after the action the selection clears and `j`/`k` resume normal movement.
+- Entering or returning from a sub-menu ends range select; output hints appear in the bottom help bar.
 
-## 搜索与替换
+## Search and replace
 
-### 搜索
+### Search
 
-`/` 从**当前面包屑路径向下**搜索当前子树。打开时重建索引；`esc` 回到打开搜索前的菜单。
+`/` searches the current subtree **downward from the current breadcrumb path**. The index is rebuilt when it opens; `esc` returns to the menu as it was before the search opened.
 
-- 默认按**正则**匹配；`alt+x` 切到字面量子串。
-- 默认大小写不敏感；`alt+i` 切换。
-- 匹配标题/键名**或该行自身的值**；对象/数组/oneOf 行的概览是子项汇总，不参与匹配（子项自身行会命中）。未设 `—` 不参与。
-- 结果每行 `路径  概览`，路径格式与面包屑一致。
-- 排序：键名与查询完全一致的行置顶，其余保持文档顺序。
-- 以 `$` 开头的查询按文档路径匹配：`$`、`$.`、`$[` 前缀；数组下标写 `[N]`（如 `$.mounts[0]`）。以 `.` 开头的查询从任意节点按路径段匹配（`.src`、`.mounts.0`）；任何含 `[N]` 下标的查询与点写法等价——`[0]`、`mounts[0].src`、输入中的未闭合 `[0` 都按下标匹配。
-- `enter` 跳转到对应菜单并定位，**跳转可逆**：落点按 `esc` 回到搜索结果（重建索引、保留查询与光标）；继续下钻则先逐级返回，再回列表。在搜索列表 `esc` 关闭并回到打开搜索前的菜单。
-- 无 schema 文件与 schema 未定义键的命中按值的**运行时形状**重建菜单（对象值进入键菜单、数组值进入条目菜单），落点直接是高亮的成员/条目行，不需要逐级 `enter` 下钻。
-- `oneOf` 变体 key 只生成一条结果（未设值显示 `… —`）；数组元素是变体时，`enter` 定位到该 key 所在的行（必要时进入当前变体编辑器），不会先打开旧的变体选择页。
-- 只索引文档中实际存在的父对象/数组元素：父对象缺失、数组为空或下标越界时，不会凭空生成 `$.endpoints[0].servers[0].server` 这类路径。
-- 数组元素按文档值索引，与 `items` 的形状无关：枚举数组的元素同样出现（`enter` 定位到对应 toggle 行）；`items` 缺失或降级为 raw 的数组（如嵌套数组）连内部值一起按 raw 路径索引，跳转按运行时形状定位到具体元素或持有该值的字段行；`anyOf`/`oneOf` 中命中数组变体的字段（如 sing-box `rule_set: string | string[]`）按其数组元素展开，跳转到条目菜单。
-- 表单层降级为 raw 的字段（布尔 schema、递归 `$ref`、不支持的结构）以及映射条目的 raw 值，其内部键与数组元素同样进入索引；跳转按运行时形状重建其对象/数组菜单并定位到具体键/元素。
+- Matches by **regex** by default; `alt+x` switches to literal substring.
+- Case-insensitive by default; `alt+i` toggles.
+- Matches titles/key names **or the row's own value**; the overview of object/array/oneOf rows is a child summary and does not participate in matching (the child rows themselves can hit). Unset `—` does not participate.
+- Each result row is `path  overview`, with the path format matching the breadcrumb.
+- Ordering: rows whose key name exactly matches the query come first, the rest keep document order.
+- Queries starting with `$` match by document path: `$`, `$.`, `$[` prefixes; array indices are written `[N]` (as in `$.mounts[0]`). Queries starting with `.` match path segments from any node (`.src`, `.mounts.0`); any query carrying an `[N]` subscript matches the same way — `[0]`, `mounts[0].src`, or an unclosed `[0` while typing, equivalent to the dot spelling.
+- `enter` jumps to the corresponding menu and positions there; **jumps are reversible**: `esc` at the landing point returns to the search results (rebuilding the index, keeping query and cursor); if you drill down further, you return level by level first, then back to the list. `esc` in the search list closes it and returns to the menu as it was before the search opened.
+- Hits in schema-less files and schema-undefined keys rebuild the menu by the value's **runtime shape** (object values enter the key menu, array values the entry menu), so the landing point is directly the highlighted member/entry row — no need to `enter` down level by level.
+- A `oneOf` variant key produces a single result (`… —` when unset); when an array element is a variant, `enter` positions to the row containing that key (entering the current variant editor when necessary), never opening the old variant selection page first.
+- Only parent objects/array elements actually present in the document are indexed: when a parent object is missing, an array empty, or an index out of bounds, paths like `$.endpoints[0].servers[0].server` are never fabricated.
+- Array elements are indexed by document value, regardless of the `items` shape: elements of enum arrays appear as well (`enter` positions to the corresponding toggle row); arrays whose `items` is missing or degraded to raw (e.g. nested arrays) index their internal values by raw path too, and jumping locates the specific element or the field row holding the value by runtime shape; fields hitting an array variant inside `anyOf`/`oneOf` (e.g. sing-box `rule_set: string | string[]`) expand by their array elements and jump to the entry menu.
+- Fields whose form layer degraded to raw (boolean schemas, recursive `$ref`, unsupported structures) and raw values of map entries: their internal keys and array elements enter the index too; jumping rebuilds their object/array menu by runtime shape and positions to the specific key/element.
 
-### 替换
+### Replace
 
-- `r` 直接进入替换模式；或在 `/` 打开后按 `tab` 挂出替换输入框（`tab` 切换搜索/替换焦点）。
-- 结果列表显示字符串值命中预览：`路径  旧值 → 新值`。数字/布尔/枚举/容器不参与；只替换文档中实际存在的字符串（未设字段的默认值不替换），schema 未定义键里的字符串同样可替换。
-- `enter`（替换框）：替换当前高亮值中的**所有出现处**，并移到下一命中。
-- `ctrl+r`：一次替换全部；关闭 overlay 并提示 `replaced N occurrence(s) in M value(s)`，光标自动落到第一处替换值，其余替换处可用 `ctrl+j`/`ctrl+k` 循环跳转。
-- `esc`：替换模式下先退回普通搜索列表（保留查询与光标），再按一次才关闭 overlay；已完成的替换不会被撤销。
-- 空查询时 `enter`/`ctrl+r` 不动作。
-- 大小写开关与正则模式对搜索、替换统一生效；正则替换串可用 `$1`/`${1}` 引用捕获组，`$0` 是整段匹配。
-- 每次替换 = 一步撤销；替换全部也是一步。
+- `r` enters replace mode directly; or after opening `/`, press `tab` to bring up the replace input box (`tab` switches search/replace focus).
+- The result list shows previews of string value hits: `path  old → new`. Numbers/booleans/enums/containers do not participate; only strings actually present in the document are replaced (defaults of unset fields are not replaced), and strings in schema-undefined keys are replaceable too.
+- `enter` (in the replace box): replaces **all occurrences** within the currently highlighted value and moves to the next hit.
+- `ctrl+r`: replaces everything at once; closes the overlay and hints `replaced N occurrence(s) in M value(s)`, the cursor lands on the first replaced value automatically, and the remaining replacement spots can be cycled with `ctrl+j`/`ctrl+k`.
+- `esc`: in replace mode it first returns to the plain search list (keeping query and cursor); press again to close the overlay. Completed replacements are not undone.
+- With an empty query, `enter`/`ctrl+r` do nothing.
+- The case toggle and regex mode apply uniformly to both search and replace; the regex replacement string can reference capture groups with `$1`/`${1}`, and `$0` is the whole match.
+- Each replacement = one undo step; replace-all is one step too.
 
-## 撤销 / 重做
+## Undo / redo
 
-- 列表模式 `u` 撤销，`ctrl+r` 重做。
-- 每次按键 = 一步；批量删除、批量剪切、粘贴、替换全部各算一步。
-- 新修改清空重做链；每边上限 100 步。
-- 撤销/重做不改变“上次保存”基线，变更标记仍相对上次保存。
-- 撤销后若当前菜单路径已不存在，退到最近仍存在的层级。
+- In list mode `u` undoes, `ctrl+r` redoes.
+- Each key press = one step; batch delete, batch cut, paste, and replace-all each count as one step.
+- New modifications clear the redo chain; each side is capped at 100 steps.
+- Undo/redo does not change the "last saved" baseline; change markers remain relative to the last save.
+- If the current menu path no longer exists after an undo, it falls back to the nearest level that still exists.
 
-## 宏
+## Macros
 
-- `@` 开始录制（底栏右侧红色 `● REC n`），再按 `@` 停止。
-- `.` 回放最后一次宏。
-- 输入框（就地编辑、raw 编辑、搜索）内 `@`/`.` 是普通字符，会被录下并在回放时照常键入。
-- 录制中 `@` 在任何非输入上下文（含 overlay）优先停止录制；非录制时 `@`/`.` 在所有非输入上下文（含问题列表）拦截。
-- 空缓冲停止 = 取消并保留上一条宏；录制中（非输入上下文）`.` 被忽略且不记录，回放不会嵌套触发。
-- `q` 在非输入上下文等同 `esc`，录制时记作 `esc`；输入框内 `q` 是普通字符，照常录制。
-- 仅内存、单条宏、上限 500 键（达到即停止并保留已录部分）。
-- 回放从当前界面状态立即重放；遇到 `ctrl+c` 或根屏退出停止；`ctrl+s` 只保存，回放继续。落到不同菜单可能产生不同结果，由使用者负责。
+- `@` starts recording (a red `● REC n` at the right of the bottom bar); press `@` again to stop.
+- `.` replays the last macro.
+- Inside input boxes (in-place editing, raw editing, search) `@`/`.` are plain characters — they get recorded and typed as usual on replay.
+- While recording, `@` in any non-input context (including overlays) stops recording first; when not recording, `@`/`.` are intercepted in all non-input contexts (including the issue list).
+- Stopping with an empty buffer = cancel, keeping the previous macro; while recording (non-input contexts), `.` is ignored and not recorded, so replay never triggers nested.
+- `q` in non-input contexts equals `esc` and is recorded as `esc`; inside input boxes `q` is a plain character, recorded as usual.
+- Memory only, a single macro, capped at 500 keys (it stops when the cap is reached, keeping what was recorded).
+- Replay starts immediately from the current interface state; it stops on `ctrl+c` or root screen exit; `ctrl+s` only saves and replay continues. Landing in different menus may produce different results — that is the user's responsibility.
 
-## 另存副本 `W`
+## Save a copy `W`
 
-- 根菜单/列表模式 `W` 在**终端底部、帮助栏上方**打开 `Write to` 输入行（无 `>` 光标前缀），预填当前文件路径，可直接编辑；菜单列表不会为它让出滚动行。
-- `enter` 写入该路径，使用与 `ctrl+s` 相同的校验门；校验失败打开错误列表，`--force` 下可强存到该路径。
-- 成功提示 `Wrote to ...`；`esc` 取消；路径为空提示 `path required`。
-- 路径补全：输入行下方实时列出当前目录匹配项（大小写不敏感；目录与目录的符号链接补 `/`；点开头文件仅在前缀以 `.` 开头时出现）；`tab`/`ctrl+n`、`shift+tab`/`ctrl+p` 循环；`enter` 始终按行内当前文本写入。
-- `W` 只写副本：会话保存目标、变更基线和未保存状态都不变。
+- In the root menu/list mode, `W` opens a `Write to` input line **at the bottom of the terminal, above the help bar** (no `>` cursor prefix), pre-filled with the current file path and directly editable; the menu list does not yield scroll rows for it.
+- `enter` writes to that path, using the same validation gate as `ctrl+s`; on validation failure the error list opens, and with `--force` you can force-save to that path.
+- Success hints `Wrote to ...`; `esc` cancels; an empty path hints `path required`.
+- Path completion: matches from the current directory are listed in real time below the input line (case-insensitive; directories and symlinks to directories get a `/`; dot-files appear only when the prefix starts with `.`); `tab`/`ctrl+n`, `shift+tab`/`ctrl+p` cycle; `enter` always writes the current inline text.
+- `W` only writes a copy: the session save target, change baseline, and unsaved state all stay unchanged.
 
-## YAML 锚点与合并键
+## YAML anchors and merge keys
 
-### 锚点 / 别名
+### Anchors / aliases
 
-- 进入别名对象的菜单时，顶部出现 `< Expand >` 行（`ctrl+e` 也可物化光标所在引用）。其下展示被引用的原始对象；查看与编辑都作用于原件，所有引用同步变化。
-- `&`：设置/修改当前值的锚点。输入框预填当前名称；改为空删除锚点（被引用时拒绝并提示引用数）；改名自动同步所有引用；重名拒绝。
-- `*`：让当前值引用某个锚点。`tab` 在现有锚点名间补全，候选按字段 schema 的类型过滤，并跳过会造成循环引用的锚点；输入前缀实时过滤。空名称删除引用。
-- `ga`：从引用/锚点行跳到定义处。`gr`：跳到该锚点的其他使用处（其余 `*alias` 引用与 `<<` 合并了它的映射；多个时打开选择器）。
-- `< Expand >` / `ctrl+e` 物化为独立副本（提示 `alias expanded`），此后编辑只影响副本；未展开时保存原样写 `*base`。
-- 锚点身份会随撤销/重做保留。
+- Entering the menu of an alias object shows a `< Expand >` row at the top (`ctrl+e` also materializes the reference under the cursor). Below it the referenced original object is displayed; viewing and editing act on the original, and all references change in sync.
+- `&`: sets/modifies the current value's anchor. The input box is pre-filled with the current name; emptying it deletes the anchor (refused with the reference count when referenced); renaming syncs all references automatically; duplicate names are refused.
+- `*`: makes the current value reference an anchor. `tab` completes among existing anchor names, candidates filtered by the field schema's type, skipping anchors that would create circular references; the entered prefix filters in real time. An empty name removes the reference.
+- `ga`: jumps from a reference/anchor row to its definition. `gr`: jumps to the anchor's other usages (the remaining `*alias` references and maps merging it via `<<`; a picker opens when there are several).
+- `< Expand >` / `ctrl+e` materializes an independent copy (hinting `alias expanded`); from then on editing affects only the copy; when not expanded, saving writes `*base` as-is.
+- Anchor identity survives undo/redo.
 
-### 合并键
+### Merge keys
 
-- `<<: *base1` / `<<: [*base1, *base2]` 原样保留，映射菜单按 YAML 语义合并展示。
-- 顺序：merged keys 落在对应 schema 字段的槽位上；本映射自有键与靠前 anchor 优先；schema 未定义的 merged keys 排在本映射自有行之后，按合并顺序。
-- 合并链逐层解析：anchor 自有键优先于它通过 `<<` 继承的键；继承键沿链指向实际定义映射。
-- 值摘要前带来源 `*base1` 徽标，标题行显示 `<<: *base1 *base2`。
-- 编辑 merged key（就地输入、`space`、枚举循环、`e`、`&`/`*`、钻取、`d`）都写入定义它的源映射，所有合并方同步变化。
-- required 的 merged key 不能 `d` 删除（会让所有合并方失去该键）。
-- `ctrl+e` 在当前映射中把值物化为独立副本并遮蔽合并值（提示 `merged key expanded`）。
-- `<` 编辑当前映射的合并键：输入空格/逗号分隔的 anchor 名；空输入清除合并；`tab` 补全当前 token。
-- 合并键参与 oneOf 变体识别与 required 标记。
+- `<<: *base1` / `<<: [*base1, *base2]` are preserved as-is; the map menu displays them merged with YAML semantics.
+- Order: merged keys land in the slots of their corresponding schema fields; this map's own keys and earlier anchors take priority; schema-undefined merged keys come after this map's own rows, in merge order.
+- Merge chains resolve layer by layer: an anchor's own keys take priority over the keys it inherits via `<<`; inherited keys point along the chain to the map that actually defines them.
+- Value summaries carry a source `*base1` badge, and the title line shows `<<: *base1 *base2`.
+- Editing a merged key (in-place input, `space`, enum cycling, `e`, `&`/`*`, drilling down, `d`) writes to the source map that defines it, and all merging parties change in sync.
+- A required merged key cannot be deleted with `d` (that would make all merging parties lose the key).
+- `ctrl+e` materializes the value as an independent copy within the current map and shadows the merged value (hinting `merged key expanded`).
+- `<` edits the current map's merge keys: enter space/comma-separated anchor names; empty input clears the merge; `tab` completes the current token.
+- Merge keys participate in oneOf variant identification and required marking.
 
-## 文件切换与多文件
+## File switching and multiple files
 
-- `s` 打开文件切换器；每个文件保留面包屑、光标、撤销栈、基线、问题列表和未保存标记。
-- `ctrl+o`/`ctrl+i` 在导航历史中后退/前进，可跨文件。
-- `ctrl+s`/`w` 只保存当前文件；根屏退出时可一次保存所有有改动的文件。
-- `W` 另存副本只影响目标文件，不改变会话。
+- `s` opens the file switcher; each file keeps its breadcrumb, cursor, undo stack, baseline, issue list, and unsaved marker.
+- `ctrl+o`/`ctrl+i` move back/forward in the navigation history, across files.
+- `ctrl+s`/`w` save only the current file; on root screen exit, all changed files can be saved in one go.
+- `W` save-a-copy affects only the target file, not the session.

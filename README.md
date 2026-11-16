@@ -1,10 +1,10 @@
-# jse — JSON Schema 驱动的终端配置编辑器
+# jse — JSON Schema-driven terminal configuration editor
 
-English documentation: [README.en.md](README.en.md) · [user manual (`docs/en/`)](docs/en/index.md)
+中文文档：[README.zh.md](README.zh.md) · [user manual (`docs/zh/`)](docs/zh/index.md)
 
-`jse` 读取一份 JSON Schema，把配置文件变成 menuconfig 风格的终端界面：单屏滚动列表、面包屑、就地编辑、层级钻取；保存前用 JSON Schema 做权威校验。适合编辑服务端配置、CI 工作流、sing-box 规则这类「有 schema、但手写 JSON/YAML/TOML 容易出错」的文件。
+`jse` reads a JSON Schema and turns a configuration file into a menuconfig-style terminal interface: a single-screen scrolling list, breadcrumbs, in-place editing, and hierarchical drill-down; before saving, the JSON Schema acts as the authoritative validation. It suits files that have a schema but are error-prone to write by hand in JSON/YAML/TOML, such as server configs, CI workflows, and sing-box rule sets.
 
-支持 **JSON / JSONC / YAML / TOML**，保留注释、键序、数字字面量、YAML 锚点/别名与合并键；一个进程可同时打开多个配置文件。也提供 `--accessible` 行式问答模式，可在管道、脚本和屏幕阅读器中使用。
+It supports **JSON / JSONC / YAML / TOML**, preserving comments, key order, number literals, YAML anchors/aliases and merge keys; one process can open multiple configuration files at once. It also provides a `--accessible` line-mode Q&A mode for use in pipes, scripts, and with screen readers.
 
 ```
 Server Configuration                              ●
@@ -18,112 +18,112 @@ $
 ↑/↓ move · enter edit/open · esc back · ctrl+s/w save · / search · : command · ? help
 ```
 
-## 特性
+## Features
 
-- **Schema 驱动**：`properties`/`required`、`enum`/`const`、`oneOf`/`anyOf`/`allOf`、`$ref`（含远端）、数组、映射、`patternProperties` 都会生成对应表单；未覆盖的关键字仍在保存时校验。
-- **格式保真**：JSONC/TOML 注释、YAML 注释、锚点、别名和 `<<` 合并键原样保留；键序、`1.0` 这类数字字面量以及 TOML 的十六进制/下划线数字与日期时间字面量在未编辑时不变；写入为同目录临时文件 + rename 的原子写。
-- **高效编辑**：vim 风格移动与跳转、多选、复制/剪切/智能粘贴、当前子树搜索与正则替换、撤销/重做、宏录制、`$EDITOR` 外编、文本自动补全；schema 未定义或无 `type` 的键按运行时类型直接编辑，仅在无值时先选内建类型或 schema `$defs` 命名类型。
-- **Schema 自动发现**：`-s`、配置自带的 `$schema`、YAML 文件头指令、TOML `#:schema` 指令，或 SchemaStore 目录匹配/检索；会话中按 `S` 可重新搜索并切换当前文件的 schema。远端 schema 带 24 小时缓存与离线回退。找不到 schema 时仍可打开文件直接编辑（对象/数组按结构导航，其他值按运行时类型；保存不校验）。
-- **错误可见**：加载即列出校验问题，字段行与问题列表实时刷新；未知键作为警告而非错误；`--force` 可强存。
-- **多文件会话**：`jse a.json b.json` 同开多个文件，`s` 切换，`ctrl+o`/`ctrl+i` 在导航历史中后退/前进；退出时一次保存全部改动。
+- **Schema-driven**: `properties`/`required`, `enum`/`const`, `oneOf`/`anyOf`/`allOf`, `$ref` (including remote), arrays, maps, and `patternProperties` all generate corresponding forms; keywords not covered are still validated at save time.
+- **Format fidelity**: JSONC/TOML comments, YAML comments, anchors, aliases, and `<<` merge keys are preserved as-is; key order, number literals like `1.0`, and TOML hexadecimal/underscored numbers and date-time literals stay unchanged unless edited; writes use an atomic write to a temp file in the same directory + rename.
+- **Efficient editing**: vim-style movement and jumps, multi-select, copy/cut/smart paste, search and regex replace within the current subtree, undo/redo, macro recording, `$EDITOR` external editing, and text auto-completion; keys undefined in the schema or without a `type` are edited directly by runtime type — only when a key has no value do you first pick a built-in type or a named type from the schema `$defs`.
+- **Schema auto-discovery**: `-s`, the config's own `$schema`, YAML file-header directives, TOML `#:schema` directives, or SchemaStore directory matching/search; during a session, `S` re-searches and switches the current file's schema. Remote schemas come with a 24-hour cache and offline fallback. When no schema is found, the file still opens for direct editing (objects/arrays are navigated by structure, other values by runtime type; saving skips validation).
+- **Visible errors**: validation issues are listed at load time, and field lines and the issue list refresh in real time; unknown keys are warnings, not errors; `--force` forces a save.
+- **Multi-file sessions**: `jse a.json b.json` opens several files at once, `s` switches between them, and `ctrl+o`/`ctrl+i` move backward/forward through navigation history; on exit, all changes are saved in one pass.
 
-## 安装
+## Installation
 
-预编译二进制见 [Releases](https://github.com/wertasy/json-schema-editor-rs/releases)：Linux（musl 静态）/ macOS / Windows，amd64 与 arm64；压缩包内含 `jse`、`README.md`、`docs/`、`AGENTS.md`、`LICENSE`，`checksums.txt` 提供 SHA-256 校验和。
+Prebuilt binaries are on [Releases](https://github.com/wertasy/json-schema-editor-rs/releases): Linux (static musl) / macOS / Windows, amd64 and arm64; each archive contains `jse`, `README.md`, `docs/`, `AGENTS.md`, `LICENSE`, and `checksums.txt` provides SHA-256 checksums.
 
-从源码构建：
+Building from source:
 
 ```sh
 cargo build --release
-cargo install --path .        # 安装到 ~/.cargo/bin
-cargo install json-schema-editor  # 从 crates.io 安装 jse
+cargo install --path .        # install to ~/.cargo/bin
+cargo install json-schema-editor  # install jse from crates.io
 ```
 
-`jse --version` 输出版本、提交与构建时间。Linux 静态发布目标为 `x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl`。
+`jse --version` prints the version, commit, and build time. The Linux static release targets are `x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl`.
 
-## 快速开始
+## Quick start
 
 ```sh
-# 1. 显式指定 schema，编辑已有文件（原地写回）
+# 1. Specify a schema explicitly; edit an existing file (written back in place)
 jse -s examples/server.schema.json examples/server.config.json
 
-# 2. schema 已记录在配置里，直接打开
+# 2. The schema is already recorded in the config; just open it
 jse server.json
 
-# 3. 让 jse 从 SchemaStore 按文件名自动匹配或检索 schema
+# 3. Let jse match or search for a schema from SchemaStore by file name
 jse .github/workflows/ci.yml
 
-# 4. 没有 schema 来源时直接编辑（无校验，结构仍可导航）
+# 4. Edit directly when there is no schema source (no validation; structure is still navigable)
 jse notes.json
 
-# 5. 行式模式（无全屏 TUI，适合脚本/管道）
+# 5. Line mode (no full-screen TUI; good for scripts/pipes)
 jse --accessible -s examples/server.schema.json server.json
 ```
 
-文件不存在时从空文档开始，保存时创建。多个文件可一次打开：
+When a file does not exist, editing starts from an empty document, created on save. Multiple files can be opened at once:
 
 ```sh
 jse -s server.schema.json a.json b.yaml
 ```
 
-`-s` 指定的 schema 会按文件格式写回配置（JSON/JSONC 顶层 `$schema`；YAML 默认写文件头 `# yaml-language-server: $schema=...`；TOML 默认写文件头 `#:schema <位置>`；若 schema 定义了顶层 `$schema` 属性则写入该字段），下次启动可省略 `-s`。
+The schema given via `-s` is written back into the config according to the file format (top-level `$schema` for JSON/JSONC; YAML by default writes the file header `# yaml-language-server: $schema=...`; TOML by default writes the file header `#:schema <location>`; if the schema defines a top-level `$schema` property, that field is written), so `-s` can be omitted on the next launch.
 
-## 键位速查
+## Key bindings at a glance
 
-| 按键 | 作用 |
+| Key | Action |
 |---|---|
-| `↑`/`↓` 或 `j`/`k` | 移动光标（首尾循环） |
-| 鼠标左键 / 右键 | 点击行 = 移动光标并 `enter`；右键 = `esc` 返回 |
-| 滚轮（编辑数字时） | 输入框中的数字加 1 / 减 1 |
-| `ctrl+f`/`PgDn`、`ctrl+b`/`PgUp` | 向下/向上翻页（列表、弹层与注释/帮助页） |
-| `enter` / `→` / `l` | 编辑字段或进入子菜单 |
-| `←` / `h` / `esc` / `q` | 返回上一级；根屏 `esc`/`q` 退出并询问保存 |
-| `space` | 切换布尔值 / 枚举数组成员 |
-| `-` / `=` / `+` | 数字键快速减 1 / 加 1；无值时填入 `-1` / `1`。对象未知键、数组元素及 schema 未定义的运行时数字同样有效 |
-| `c` | 展开/折叠当前行的描述（schema help + 文档注释）；一页放不下时打开可滚动注释页 |
-| `C` | 编辑当前键的文档注释（文档中已有的键无注释时可新增，空文本删除） |
-| `gg` / `G` | 跳到列表首行 / 末行；数组菜单 `Ngg` 跳到第 N 项 |
-| `/` / `r` | 在当前路径下搜索 / 搜索替换 |
-| `m` / `v` | 标记单项 / 连选；配合 `y`、`x`、`d` 批量操作 |
-| `y` / `Y` / `p` / `P` | 复制键值对 / 复制值 / 智能粘贴到菜单 / 粘贴到光标容器 |
-| `u` / `ctrl+r` | 撤销 / 重做 |
-| `:` | vi 风格命令模式：`w`/`wa`/`wq`/`waq` 保存（加 `!` 跳过校验），`q`/`q!` 退出；`!<cmd>` 仅执行 shell，`r !<cmd>` 输出写入光标值，`a !<cmd>` 每行追加到字符串数组，`w !<cmd>` 把文档送入命令 stdin；`%` 代表当前文件；tab 只按光标前的内容补全内置命令、`$PATH` 命令、bash 补全或路径，并保留光标后的文本；`!!` 重跑上一条 shell 命令 |
-| `E` / `ctrl+e` | 用外部编辑器编辑光标行的值（raw JSON/YAML/TOML；非值行时编辑整份文档） / 物化 YAML 别名与合并值 |
-| `ctrl+s` / `w` | 保存当前文件并留在编辑器 |
-| `W` | 另存副本到指定路径 |
-| `s` | 多文件时打开文件切换器 |
-| `S` | 打开 SchemaStore 搜索，切换当前文件的 schema |
-| `ctrl+o` / `ctrl+i` (`tab`) | 导航历史后退 / 前进 |
-| `?` | 完整键位帮助 |
+| `↑`/`↓` or `j`/`k` | Move the cursor (wraps at both ends) |
+| Mouse left / right button | Click a row = move the cursor and press `enter`; right click = `esc` back |
+| Wheel (while editing a number) | Increment / decrement the number in the input |
+| `ctrl+f`/`PgDn`, `ctrl+b`/`PgUp` | Page down/up (list, overlays, and comment/help pages) |
+| `enter` / `→` / `l` | Edit a field or enter a submenu |
+| `←` / `h` / `esc` / `q` | Go back one level; on the root screen `esc`/`q` exits and asks to save |
+| `space` | Toggle a boolean / enum array member |
+| `-` / `=` / `+` | Quickly decrement / increment a number by 1; fill in `-1` / `1` when there is no value. Also works for unknown object keys, array elements, and runtime numbers not defined by the schema |
+| `c` | Expand/collapse the description of the current line (schema help + doc comments); opens a scrollable comment page when it does not fit on one page |
+| `C` | Edit the doc comment of the current key (adds one for keys in the document that lack a comment; empty text deletes it) |
+| `gg` / `G` | Jump to the first / last line of the list; in array menus `Ngg` jumps to item N |
+| `/` / `r` | Search under the current path / search and replace |
+| `m` / `v` | Mark a single item / range select; combine with `y`, `x`, `d` for batch operations |
+| `y` / `Y` / `p` / `P` | Copy key-value pair / copy value / smart paste into the menu / paste into the container at the cursor |
+| `u` / `ctrl+r` | Undo / redo |
+| `:` | vi-style command mode: `w`/`wa`/`wq`/`waq` save (add `!` to skip validation), `q`/`q!` quit; `!<cmd>` only runs a shell command, `r !<cmd>` writes the output into the value at the cursor, `a !<cmd>` appends each line to a string array, `w !<cmd>` feeds the document to the command's stdin; `%` stands for the current file; tab completes built-in commands, `$PATH` commands, bash completion, or paths based only on the text before the cursor and preserves the text after it; `!!` re-runs the previous shell command |
+| `E` / `ctrl+e` | Edit the value of the cursor line in an external editor (raw JSON/YAML/TOML; edits the whole document when not on a value line) / materialize YAML aliases and merged values |
+| `ctrl+s` / `w` | Save the current file and stay in the editor |
+| `W` | Save a copy to a specified path |
+| `s` | Open the file switcher when multiple files are open |
+| `S` | Open SchemaStore search to switch the current file's schema |
+| `ctrl+o` / `ctrl+i` (`tab`) | Navigate history backward / forward |
+| `?` | Full key-binding help |
 
-完整键位、界面元素与各 overlay 的按键见[界面与键位](docs/interface.md)。
+For the complete key bindings, interface elements, and the keys of each overlay, see [Interface and key bindings](docs/interface.md).
 
-## 文档
+## Documentation
 
-| 文档 | 内容 |
+| Document | Contents |
 |---|---|
-| [用户手册](docs/index.md) | 目录与阅读路径 |
-| [安装与构建](docs/install.md) | 预编译包、源码构建、运行依赖 |
-| [命令行](docs/cli.md) | 参数、多文件、环境变量、退出码 |
-| [Schema 来源与缓存](docs/schema-sources.md) | 解析顺序、SchemaStore、远端缓存、离线回退 |
-| [配置文件格式](docs/formats.md) | JSONC、YAML、TOML、注释/锚点/合并键、格式扩展 |
-| [界面与键位](docs/interface.md) | 布局、状态行、完整按键表、文件切换与导航历史 |
-| [编辑功能](docs/editing.md) | 字段编辑、剪贴板、多选、搜索替换、撤销、宏、外部编辑器 |
-| [校验与保存](docs/validation.md) | 表单关键字、降级规则、问题列表、原子写、退出码 |
-| [行式模式](docs/accessible.md) | `--accessible` 提示协议与脚本示例 |
-| [故障排查](docs/troubleshooting.md) | 常见错误、代理、剪贴板、字体、环境变量 |
-| [AGENTS.md](AGENTS.md) | 编码代理/贡献者的架构地图、约束与工作流 |
+| [User manual](docs/index.md) | Contents and reading paths |
+| [Installation and building](docs/install.md) | Prebuilt packages, building from source, runtime requirements |
+| [Command line](docs/cli.md) | Arguments, multiple files, environment variables, exit codes |
+| [Schema sources and caching](docs/schema-sources.md) | Resolution order, SchemaStore, remote cache, offline fallback |
+| [Configuration file formats](docs/formats.md) | JSONC, YAML, TOML, comments/anchors/merge keys, format extensions |
+| [Interface and key bindings](docs/interface.md) | Layout, status line, full key table, file switching and navigation history |
+| [Editing](docs/editing.md) | Field editing, clipboard, multi-select, search and replace, undo, macros, external editor |
+| [Validation and saving](docs/validation.md) | Form keywords, degradation rules, issue list, atomic write, exit codes |
+| [Line mode](docs/accessible.md) | The `--accessible` prompt protocol and script examples |
+| [Troubleshooting](docs/troubleshooting.md) | Common errors, proxies, clipboard, fonts, environment variables |
+| [AGENTS.md](AGENTS.md) | Architecture map, constraints, and workflow for coding agents/contributors |
 
-## 开发
+## Development
 
 ```sh
-cargo test                                        # 单测 + accessible/pty 黑盒 e2e
+cargo test                                        # unit tests + accessible/pty black-box e2e
 cargo run -- -s examples/server.schema.json examples/server.config.json
-cargo build --release --target x86_64-unknown-linux-musl   # 静态发布构建
+cargo build --release --target x86_64-unknown-linux-musl   # static release build
 ```
 
-代码结构、模块边界、测试约定与修改规则见 [AGENTS.md](AGENTS.md)。发布由 `.github/workflows/release.yml` 完成：推送 `v*` 标签即构建六个平台目标、创建 GitHub Release，并发布 crate 到 crates.io。
+For code structure, module boundaries, testing conventions, and change rules, see [AGENTS.md](AGENTS.md). Releases are handled by `.github/workflows/release.yml`: pushing a `v*` tag builds the six platform targets, creates a GitHub Release, and publishes the crate to crates.io.
 
-## 许可证
+## License
 
 [MIT](LICENSE)

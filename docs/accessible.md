@@ -1,27 +1,27 @@
-# 行式模式（`--accessible`）
+# Line mode (`--accessible`)
 
-`--accessible` 用顺序问答代替全屏 TUI：纯文本、无 ANSI 控制序列，从 stdin 读一行行答案，适合管道、脚本、CI 和屏幕阅读器。
+`--accessible` replaces the full-screen TUI with sequential question-and-answer: plain text, no ANSI control sequences; it reads answers line by line from stdin, which suits pipes, scripts, CI, and screen readers.
 
 ```sh
 jse --accessible -s examples/server.schema.json server.json
 ```
 
-非 `--accessible` 模式下 stdin 不是终端会直接报错；加上该参数后，stdin 可以是管道或文件。
+Without `--accessible`, non-terminal stdin fails immediately; with the flag, stdin may be a pipe or a file.
 
-## 提示协议
+## Prompt protocol
 
-### 文本 / 数字输入
+### Text / number input
 
 ```text
 Name webapp
 ```
 
-- 提示是 `标题 `（末尾一个空格），读取一行。
-- 行内校验失败会打印错误并重新提示；空行取绑定默认值。
-- required 字段且没有默认值时，**不能靠空行通过**，必须给出内容。
-- raw 字段（整份文档或不可表单化子树）也是一行文本，内容按文件格式（JSON/YAML/TOML）；空行表示删除该值/不修改。
+- The prompt is `title ` (a single trailing space), and one line is read.
+- Failed inline validation prints the error and re-prompts; an empty line takes the binding default.
+- A required field without a default **cannot be satisfied with an empty line**; you must provide content.
+- raw fields (a whole document, or a subtree that cannot be form-mapped) are also a single line of text, with content in the file's format (JSON/YAML/TOML); an empty line deletes the value / makes no change.
 
-### 单选
+### Single select
 
 ```text
 Mode 
@@ -32,13 +32,13 @@ Mode
 Enter a number between 1 and 4: 
 ```
 
-- 标题单独一行，然后编号选项。
-- 空行接受预选默认项。
-- 只有一个选项时提示 `There is only one option available; enter the number 1:`。
-- 可选枚举会多一个 `(none)` 选项；required 枚举没有。
-- 数字越界会打印 `Invalid: must be a number between 1 and N` 并重问。
+- The title is on its own line, followed by numbered options.
+- An empty line accepts the preselected default.
+- With a single option the prompt is `There is only one option available; enter the number 1:`.
+- Optional enums get an extra `(none)` option; required enums do not.
+- Out-of-range numbers print `Invalid: must be a number between 1 and N` and ask again.
 
-### 多选（枚举数组成员）
+### Multi-select (enum array members)
 
 ```text
 Levels 
@@ -51,29 +51,29 @@ Select up to 4 options.
 Enter a number between 0 and 4: 
 ```
 
-- 反复输入编号切换选中状态。
-- `0` 确认；不满足 `minItems`/required 时打印 `select at least N` 并继续。
-- 空行等效 `0`。
+- Entering a number repeatedly toggles its selected state.
+- `0` confirms; when `minItems`/required is not satisfied it prints `select at least N` and continues.
+- An empty line is equivalent to `0`.
 
-### 确认
+### Confirmation
 
 ```text
 Debug [y/N] 
 ```
 
-- `y`/`yes`/`n`/`no`，大小写不敏感。
-- 空行取默认；默认是 `y` 时显示 `[Y/n]`。
-- 非法输入打印 `invalid input. please try again` 并重问。
+- `y`/`yes`/`n`/`no`, case-insensitive.
+- An empty line takes the default; when the default is `y` it shows `[Y/n]`.
+- Invalid input prints `invalid input. please try again` and asks again.
 
-### 说明行
+### Info lines
 
-信息提示（schema 来源、缓存回退、schema 编译失败等）在根屏开头作为无输入说明打印，之后接一个空行。
+Informational prompts (schema source, cache fallback, schema compile failure, etc.) are printed at the top of the root screen as notes that take no input, followed by an empty line.
 
-## 菜单结构
+## Menu structure
 
-### 对象菜单
+### Object menu
 
-先按 schema 顺序逐字段提问，最后出现 `Navigate` 单选：
+Fields are asked one by one in schema order, and a `Navigate` single select appears at the end:
 
 ```text
 Name webapp
@@ -89,12 +89,12 @@ Navigate
 Enter a number between 1 and 4: 
 ```
 
-- 非根对象：第一项是 `Done (back)`，默认选中。
-- 根对象：导航项在前，然后是 `Save and exit` 与 `Edit raw JSON`（YAML/TOML 文件分别显示 `Edit raw YAML` / `Edit raw TOML`）；默认选中 `Save and exit`。
-- 数组/对象/oneOf 子节点显示为 `Edit ... ▸`；枚举数组直接作为多选字段，不进入子菜单。
-- 没有可编辑字段时打印 `Nothing to edit here`。
+- Non-root objects: the first item is `Done (back)`, selected by default.
+- Root objects: navigation items come first, then `Save and exit` and `Edit raw JSON` (YAML/TOML files show `Edit raw YAML` / `Edit raw TOML` instead); `Save and exit` is selected by default.
+- Array/object/oneOf children appear as `Edit ... ▸`; enum arrays act directly as multi-select fields and never enter a submenu.
+- With no editable fields it prints `Nothing to edit here`.
 
-### 数组菜单
+### Array menu
 
 ```text
 Tags items
@@ -108,55 +108,55 @@ Tags items
 Enter a number between 1 and 7: 
 ```
 
-- 默认选 `< Add item`；空行会进入新增流程，而不是保存。
-- 选择条目进入条目表单。
-- `Move item up…` / `Move item down…` 先选条目再移动；越界移动是静默 no-op。
-- `Remove item…` 先选条目，再确认 `Remove item N? [Y/n]`。
-- 根数组的保存项是 `Save and exit`；嵌套数组是 `Done (back)`。
+- `< Add item` is the default; an empty line enters the add flow rather than saving.
+- Selecting an entry opens the entry form.
+- `Move item up…` / `Move item down…` select an entry first, then move it; moving out of range is a silent no-op.
+- `Remove item…` selects an entry first, then confirms with `Remove item N? [Y/n]`.
+- The save item for a root array is `Save and exit`; for a nested array it is `Done (back)`.
 
 ### oneOf
 
-先选择变体（`1. 标题` …），再进入变体编辑器；根 oneOf 编辑完后自动进入保存校验，嵌套 oneOf 编辑完后返回。
+First choose a variant (`1. Title` …), then enter the variant editor; after editing a root oneOf it automatically proceeds to save-time validation, while a nested oneOf returns to its parent when done.
 
-### 标量根
+### Scalar roots
 
-直接提问该值，然后自动进入保存校验。
+The value is asked for directly, then save-time validation runs automatically.
 
-## 保存与校验
+## Saving and validation
 
-- 选择 `Save and exit` 后校验；有错误时只询问：
+- Validation runs after choosing `Save and exit`; on errors it only asks:
 
   ```text
   Save anyway? [y/N] 
   ```
 
-  错误明细**不会逐条打印**。只有启动时带 `--force` 且回答 `y` 才写入；否则返回菜单。
-- 写入成功后进程继续下一个文件（多文件），全部完成后退出。
-- 写入失败会在 stderr 报告并中止，exit 1。
-- 退出码与 stdout 结果行与 TUI 模式一致，见[命令行](cli.md#退出码与-stdout)。
+  Error details are **not printed one by one**. The file is written only when started with `--force` and you answer `y`; otherwise it returns to the menu.
+- After a successful write the process continues with the next file (multi-file runs) and exits once all are done.
+- Write failures are reported on stderr and abort with exit 1.
+- Exit codes and the stdout result line match TUI mode; see [Command line](cli.md#exit-codes-and-stdout).
 
-## EOF 与脚本
+## EOF and scripting
 
-- 提示处遇到 EOF 会结束当前提示并取默认值（不会在原提示上无限重问）。
-- 当前屏幕处理完后，下一次循环检测到 EOF：
-  - 根屏：中止会话；
-  - 子屏：返回上一级。
-- 但默认值可能先产生一个结果：根对象菜单的默认导航项是 `Save and exit`，因此“字段默认 + EOF”可能直接保存并 exit 0；根数组菜单的默认项是 `< Add item`，可能先新增再中止。
-- 因此脚本应覆盖实际会问到的所有字段与导航选择，不要依赖 EOF 的默认值。
-- 非根对象默认导航项是 `Done (back)`，所以空行回车可以接受默认路径。
-- 提示与结果都写在 stdout；错误写 stderr。
+- EOF at a prompt ends the current prompt and takes the default (it never re-asks the same prompt endlessly).
+- After the current screen finishes, EOF is detected on the next loop iteration:
+  - root screen: the session aborts;
+  - child screens: return one level up.
+- But a default may produce a result first: the root object menu's default navigation item is `Save and exit`, so "field defaults + EOF" may save directly and exit 0; the root array menu's default item is `< Add item`, which may add one item before aborting.
+- Scripts should therefore supply every field and navigation choice that will actually be asked, and must not rely on EOF defaults.
+- Non-root objects default to `Done (back)`, so an empty line + enter accepts the default path.
+- Prompts and results are written to stdout; errors go to stderr.
 
-最小脚本示例（schema 只有可选字段，直接保存）：
+Minimal script example (the schema only has optional fields, saved directly):
 
 ```sh
 printf '\n' | jse --accessible -s mini.schema.json out.json
 ```
 
-有必填字段时必须逐项给值，再在根菜单选择 `Save and exit`（或让空行选中它）。多文件按参数顺序依次完成。
+When required fields exist you must supply each value, then choose `Save and exit` in the root menu (or let an empty line select it). Multiple files are processed one after another in argument order.
 
-## SchemaStore 选择器
+## SchemaStore picker
 
-无 schema 时，`--accessible` 使用行式检索：
+Without a schema, `--accessible` uses line-based retrieval:
 
 ```text
 Select a schema for ci.yml
@@ -165,16 +165,16 @@ Select a schema for ci.yml
 ? Number (0 = new search, enter = abort): 1
 ```
 
-- 空行保留当前查询；`0` 重新搜索；直接回车中止（自动检索时进入无 schema 模式，`--pick` 时退出）。
-- 最多列 15 条，更多时提示细化查询；无结果显示 `no matches` 并回到搜索提示。
-- 非数字或越界打印 `! invalid number` 并重问。
-- EOF 中止。
+- An empty line keeps the current query; `0` searches again; bare enter aborts (during automatic resolution this enters schema-less mode; with `--pick` it exits).
+- At most 15 entries are listed; beyond that you are prompted to refine the query; no results print `no matches` and return to the search prompt.
+- Non-numeric or out-of-range input prints `! invalid number` and asks again.
+- EOF aborts.
 
-没有 schema 时，行式模式仍可编辑：对象根屏只剩 `Save and exit` 与 `Edit raw JSON/YAML/TOML`（raw 整份编辑，单行输入）；数组根仍可逐项增删和 raw 编辑条目；标量根直接编辑 raw 值。保存不做校验。
+Even without a schema, line mode can still edit: an object root screen offers only `Save and exit` and `Edit raw JSON/YAML/TOML` (raw editing of the whole document, entered on one line); array roots can still add and remove items one by one and raw-edit entries; scalar roots edit the raw value directly. Saving performs no validation.
 
-## 限制
+## Limitations
 
-- 没有实时问题列表、字段行标记、面包屑、多选/宏/撤销/搜索替换/文件切换器。
-- 文本输入都是单行；多行 YAML/JSON/TOML 内容需要写成一行（JSON/TOML 用 `\n` 转义，YAML 用流式或引号形式）。
-- 校验只在保存时进行；加载时的既有错误不会在行式流程里单独列出。
-- 多个文件顺序处理，不能在一个文件内跳到另一个文件。
+- No live issue list, field-row markers, breadcrumbs, multi-select/macros/undo/search-and-replace/file switcher.
+- Text input is always single-line; multi-line YAML/JSON/TOML content must be written on one line (JSON/TOML use `\n` escapes, YAML uses flow or quoted form).
+- Validation happens only at save time; pre-existing errors at load time are not listed separately in the line flow.
+- Multiple files are processed sequentially; you cannot switch to another file while editing one.

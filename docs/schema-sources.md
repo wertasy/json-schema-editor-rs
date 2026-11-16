@@ -1,61 +1,61 @@
-# Schema 来源与缓存
+# Schema sources and caching
 
-jse 按固定顺序寻找 JSON Schema 来生成表单，找到即用。全部失败时不会拒绝打开文件，而是进入**无 schema 模式**直接编辑 JSON/YAML/TOML。
+jse looks for a JSON Schema in a fixed order to generate the form and uses the first one it finds. When all sources fail it does not refuse to open the file; instead it enters **schema-less mode** and edits JSON/YAML/TOML directly.
 
-## 解析顺序
+## Resolution order
 
-### 1. 显式 `-s` / `--schema`
+### 1. Explicit `-s` / `--schema`
 
 ```sh
 jse -s ./schemas/server.json config.json
 jse -s https://example.com/schemas/server.json config.json
 ```
 
-- `http://` / `https://` 开头按远端抓取。
-- 其他值按本地路径（也接受 `file://`）。
-- `-s` 指定的位置会写进配置的 schema 指向，下次可省略。已有非空指向时保留原值，不覆盖；`--pick` 例外，它会覆盖。
+- Values starting with `http://` / `https://` are fetched remotely.
+- Other values are treated as local paths (`file://` is also accepted).
+- The location given via `-s` is written into the config's schema pointer, so it can be omitted next time. If a non-empty pointer already exists, the original value is kept, not overwritten; `--pick` is the exception and does overwrite.
 
-### 2. 配置自带的 schema 指向
+### 2. Schema pointer in the config itself
 
-没有 `-s` 时读取配置文件：
+Without `-s`, the config file itself is read:
 
-| 格式 | 指向写法 | 说明 |
+| Format | Pointer form | Notes |
 |---|---|---|
-| JSON / JSONC | 顶层 `"$schema": "<位置>"` | 必须是字符串；空字符串不算。 |
-| YAML | 文件头注释 `# yaml-language-server: $schema=<位置>` | 也可用顶层 `$schema` 键，显式键优先。 |
-| TOML | 文件头注释 `#:schema <位置>` | 也可用顶层 `"$schema"` 键，显式键优先。 |
+| JSON / JSONC | Top-level `"$schema": "<location>"` | Must be a string; an empty string does not count. |
+| YAML | Header comment `# yaml-language-server: $schema=<location>` | A top-level `$schema` key also works; the explicit key takes precedence. |
+| TOML | Header comment `#:schema <location>` | A top-level `"$schema"` key also works; the explicit key takes precedence. |
 
-- URL 直接使用。
-- 无 scheme 的相对路径先相对**配置文件所在目录**解析；该目录下不存在时，回退到**当前工作目录**。
-- 绝对路径直接使用。
-- `$schema` 键在 schema 里有定义时（如 sing-box），它也会作为普通字段出现在编辑器里，可以修改。
+- URLs are used directly.
+- Relative paths without a scheme are resolved first relative to the **directory containing the config file**; when not found there, they fall back to the **current working directory**.
+- Absolute paths are used directly.
+- When `$schema` is defined in the schema itself (e.g. sing-box), it also appears in the editor as an ordinary field and can be modified.
 
-### 3. SchemaStore 目录
+### 3. The SchemaStore catalog
 
-启动时前两步都没有结果，或会话中按 `S`，都会打开 [SchemaStore](https://www.schemastore.org/) 公共目录（`https://www.schemastore.org/api/json/catalog.json`）检索。启动解析按配置文件的绝对路径做 `fileMatch` 匹配：
+If the first two steps produce nothing at startup, or when you press `S` during a session, jse searches the public [SchemaStore](https://www.schemastore.org/) catalog (`https://www.schemastore.org/api/json/catalog.json`). Startup resolution matches the config file's absolute path against `fileMatch` patterns:
 
-- 不带 `/` 的模式只匹配**文件名**（大小写不敏感）：`package.json`、`tsconfig*.json`、`*.srv.json`。
-- 带 `/` 的模式从路径尾部按目录段匹配，`**` 跨任意多级目录，`*`/`?`/`[...]` 只在单段内生效。例如 `**/.cdf/config.yaml`、`.platform/applications.yml`。
-- 同一 URL 被多个条目列出时去重。
-- **唯一命中**：直接采用，不弹选择器。
-- **多个命中或没有命中**：打开检索选择器。
-- `--pick` 强制打开选择器，即使已有 `-s` 或配置指向。
+- Patterns without `/` match only the **file name** (case-insensitive): `package.json`, `tsconfig*.json`, `*.srv.json`.
+- Patterns containing `/` match from the tail of the path by directory segments; `**` crosses any number of directories, while `*`/`?`/`[...]` apply within a single segment. Examples: `**/.cdf/config.yaml`, `.platform/applications.yml`.
+- The same URL listed by multiple entries is deduplicated.
+- **Single hit**: used directly, no picker.
+- **Multiple hits or none**: the search picker opens.
+- `--pick` forces the picker open, even when `-s` or a config pointer already exists.
 
-目录的 HTTP 缓存采用 **stale-while-revalidate**：只要本地有缓存，即使超过 24 小时也立即返回，同时在后台做条件请求刷新；下拉/匹配/`S` 不会等待网络。后台拿到的新副本供本次后续读取（例如再按 `S`）或下次启动使用。只有**完全没有缓存**的第一次才同步请求。
+The catalog's HTTP cache is **stale-while-revalidate**: as long as a local cache exists it is returned immediately even past 24 hours, while a conditional refresh runs in the background; the dropdown / matching / `S` never wait on the network. The fresh copy obtained in the background serves later reads in this session (e.g. pressing `S` again) or the next start. Only the very first run with **no cache at all** makes a synchronous request.
 
-TUI 选择器：
+TUI picker:
 
-| 按键 | 作用 |
+| Key | Action |
 |---|---|
-| 输入 | 按名称或描述过滤（大小写不敏感） |
-| `↑`/`↓`、`ctrl+k`/`ctrl+j` | 上下移动 |
-| `tab` / `shift+tab` | 下 / 上移动 |
-| `enter` | 选定（结果为空时不动作） |
-| `esc` / `ctrl+c` | 中止（自动检索时转入无 schema 模式；`--pick` 时退出） |
+| Typing | Filters by name or description (case-insensitive) |
+| `↑`/`↓`, `ctrl+k`/`ctrl+j` | Move up / down |
+| `tab` / `shift+tab` | Move down / up |
+| `enter` | Select (no action when the result list is empty) |
+| `esc` / `ctrl+c` | Abort (falls back to schema-less mode during automatic resolution; exits under `--pick`) |
 
-初始查询词是文件名去掉扩展名；第一次输入文本会替换这个预置查询，而不是追加。
+The initial query is the file name without its extension; the first text typed replaces this preset query rather than appending to it.
 
-`--accessible` 选择器：
+`--accessible` picker:
 
 ```text
 Select a schema for ci.yml
@@ -64,61 +64,61 @@ Select a schema for ci.yml
 ? Number (0 = new search, enter = abort): 1
 ```
 
-空行保留当前查询；`0` 重新搜索；直接回车中止（自动检索时转入无 schema 模式，`--pick` 时退出）；最多显示 15 条，超出提示继续细化。输入越界会提示 `! invalid number` 并重问。EOF 视为中止。
+An empty line keeps the current query; `0` starts a new search; bare enter aborts (falls back to schema-less mode during automatic resolution, exits under `--pick`); at most 15 entries are shown, with a prompt to refine the search beyond that. Out-of-range input prints `! invalid number` and asks again. EOF counts as abort.
 
-选中的 URL 会按配置格式写回 schema 指向（JSON/JSONC 顶层 `$schema`；YAML 默认写文件头注释；TOML 默认写 `#:schema` 注释；后两者在 schema 定义了顶层 `$schema` 属性时写入文档字段），下次启动走第 2 步。
+The selected URL is written back as the schema pointer in the config's format (top-level `$schema` for JSON/JSONC; the header comment by default for YAML; the `#:schema` comment by default for TOML; the latter two write the document field when the schema defines a top-level `$schema` property), so the next start uses step 2.
 
-会话中按 `S` 搜索并切换当前文件的 schema：选中的 URL 会覆盖旧指向，表单、校验器和根菜单重建，文档内容保留；取消则保持原 schema。该键只存在于全屏 TUI，`--accessible` 行式模式没有。
+Pressing `S` during a session searches and switches the current file's schema: the selected URL overwrites the old pointer, the form, validator, and root menu are rebuilt, and the document content is preserved; cancelling keeps the original schema. This key exists only in the full-screen TUI; the `--accessible` line mode has none.
 
-### 4. 全部失败：无 schema 模式
+### 4. All sources fail: schema-less mode
 
-没有 `-s`、配置没有指向、SchemaStore 也没有选中任何条目时，文件仍会打开：
+When there is no `-s`, the config has no pointer, and SchemaStore selected nothing, the file still opens:
 
-- 根屏状态行提示 `no schema found: editing without schema guidance; save-time validation disabled`。
-- 对象按 **schema-less 键菜单**编辑：所有文档键都直接列出，`enter` 按运行时类型编辑，`a`/`A` 新增键并从内建类型选择。
-- 数组进入条目管理；标量/其他根值按运行时类型编辑。
-- `E` 在外部编辑器中编辑光标行的值；光标不在值行时编辑整份文档。
-- 不会写入 `$schema` 指向；保存时不做 schema 校验。无 schema 时文档键不再标记 `(not in schema)`，也不会产生未知键警告。
-- 目录不可用时只附加提示 `schema catalog unavailable: ...`，不阻止编辑。
-- 自动检索中中止选择器（`esc`、回车/EOF）等于「不要 schema」，继续进入无 schema 模式。
-- `--pick` 是显式请求：目录下载失败 exit 1；选择器被中止仍报 `no schema found: ...`，exit 2。
-- 需要选择器但 stdin 不是终端：提示 `schema selection needs a terminal; rerun with --accessible or provide -s`，exit 2。
+- The root screen status line shows `no schema found: editing without schema guidance; save-time validation disabled`.
+- Objects are edited through the **schema-less key menu**: every document key is listed directly, `enter` edits by runtime type, and `a`/`A` adds keys with a choice from built-in types.
+- Arrays enter item management; scalars/other root values are edited by runtime type.
+- `E` edits the value on the cursor line in an external editor; when the cursor is not on a value line, it edits the whole document.
+- No `$schema` pointer is written; no schema validation runs at save. Without a schema, document keys are no longer marked `(not in schema)` and no unknown-key warnings are produced.
+- When the catalog is unavailable, only an extra notice `schema catalog unavailable: ...` is appended; editing is not blocked.
+- Aborting the picker during automatic resolution (`esc`, enter/EOF) means "no schema wanted" and proceeds into schema-less mode.
+- `--pick` is an explicit request: a catalog download failure exits 1; an aborted picker still reports `no schema found: ...` and exits 2.
+- When the picker is needed but stdin is not a terminal: `schema selection needs a terminal; rerun with --accessible or provide -s`, exit 2.
 
-## schema 抓取失败
+## Schema fetch failures
 
-| 情况 | 行为 |
+| Situation | Behavior |
 |---|---|
-| 本地路径不存在 / 不可读 | exit 1 |
-| HTTP 404 等客户端错误 | exit 1，不会被缓存掩盖 |
-| 网络错误、超时、5xx，且无缓存 | exit 1 |
-| 网络错误、超时、5xx，且有缓存 | 用缓存启动，状态行提示 `<warn> using the cached schema: ...` |
-| HTTP 429（限流） | 优先用缓存并提示；无缓存则报错。限流窗口（`Retry-After`，缺省 60 秒）跨进程保存，避免每次启动都打源站 |
-| 响应体超过 32 MiB | exit 1（`response exceeds size limit`） |
+| Local path missing / unreadable | exit 1 |
+| HTTP 404 and other client errors | exit 1, never masked by the cache |
+| Network errors, timeouts, 5xx, with no cache | exit 1 |
+| Network errors, timeouts, 5xx, with a cache | Start from the cache; the status line shows `<warn> using the cached schema: ...` |
+| HTTP 429 (rate limited) | Prefer the cache with a notice; error if there is none. The rate-limit window (`Retry-After`, default 60 seconds) is persisted across processes so that every start does not hit the origin |
+| Response body over 32 MiB | exit 1 (`response exceeds size limit`) |
 
-远端 `$ref`（相对 base URI、`$id`）也会按同一套加载/缓存逻辑抓取。ref 不可达时该字段降级为原始文本编辑，不阻止其他字段编辑；保存期校验若因此无法编译会停用（见[校验与保存](validation.md#降级规则)）。
+Remote `$ref`s (relative to the base URI, `$id`) are fetched with the same load/cache logic. When a ref is unreachable, that field degrades to raw text editing without blocking the other fields; if save-time validation cannot compile because of it, it is disabled (see [Validation and saving](validation.md#degradation-rules)).
 
-## 远端 schema 缓存
+## Remote schema cache
 
-远端 schema 与 SchemaStore 目录共用缓存。
+Remote schemas and the SchemaStore catalog share one cache.
 
-- **位置**：`$JSE_CACHE_DIR`（显式覆盖）→ `$XDG_CACHE_HOME/jse` → 平台默认缓存目录下的 `jse`。Linux 通常是 `~/.cache/jse`。每个 URL 缓存为 `cache/fetch/<sha256>.body` 与同名 `.json` 元数据。
-- **有效期 24 小时**：从上次成功获取/续期起算。期内直接读缓存，**不发起任何请求**。
-- **过期后条件请求**：带 `If-None-Match` / `If-Modified-Since`。收到 `304` 继续用缓存并续期；`200` 才重写缓存。
-- **SchemaStore 目录例外**：目录过期后也先返回缓存，后台再条件刷新，因此受限网络/慢代理不会拖住启动；schema 本体仍按上面的 24 小时规则。
-- **离线回退**：网络错误或 5xx 用缓存启动；404 等客户端错误不掩盖。
-- **同一次运行只抓一次**：表单模型与校验器共用同一份字节；同一 URL 失败也记忆化，多文件启动不会为每个文件重试。目录的后台刷新也按 URL 去重，不会因多个文件或反复按 `S` 叠加请求。
-- **本地文件不缓存**：本地路径与 `file://` 每次读取。
-- **目录不可写**：静默降级为不缓存，功能不受影响。
+- **Location**: `$JSE_CACHE_DIR` (explicit override) → `$XDG_CACHE_HOME/jse` → `jse` under the platform default cache directory. On Linux this is usually `~/.cache/jse`. Each URL is cached as `cache/fetch/<sha256>.body` plus a same-named `.json` metadata file.
+- **Valid for 24 hours**: counted from the last successful fetch/renewal. Within that window the cache is read directly with **no requests at all**.
+- **Conditional requests after expiry**: with `If-None-Match` / `If-Modified-Since`. A `304` keeps using the cache and renews it; only a `200` rewrites the cache.
+- **SchemaStore catalog exception**: an expired catalog also returns the cached copy first and refreshes conditionally in the background, so restricted networks / slow proxies never hold up startup; schema bodies still follow the 24-hour rule above.
+- **Offline fallback**: network errors or 5xx start from the cache; 404 and other client errors are not masked.
+- **One fetch per run**: the form model and the validator share the same bytes; failures for the same URL are memoized too, so multi-file starts do not retry per file. The catalog's background refresh is also deduplicated by URL, so multiple files or repeated `S` presses do not stack requests.
+- **Local files are not cached**: local paths and `file://` are read every time.
+- **Unwritable cache directory**: silently degrades to no caching; functionality is unaffected.
 
-强制刷新：
+To force a refresh:
 
 ```sh
 rm -rf ~/.cache/jse
-# 或使用一次性缓存目录
+# or use a throwaway cache directory
 JSE_CACHE_DIR=$(mktemp -d) jse -s https://example.com/schema.json config.json
 ```
 
-## 内网 / 镜像
+## Intranet / mirrors
 
 ```sh
 JSE_CATALOG_URL=https://mirror.example.com/catalog.json \
@@ -126,4 +126,4 @@ JSE_CACHE_DIR=/var/cache/jse \
 jse config.json
 ```
 
-`JSE_CATALOG_URL` 接受任何 `fetch::load` 支持的位置（http(s) URL 或本地路径），并遵循同样的 24 小时缓存与离线回退。
+`JSE_CATALOG_URL` accepts any location `fetch::load` supports (an http(s) URL or a local path) and follows the same 24-hour caching and offline fallback.

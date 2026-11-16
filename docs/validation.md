@@ -1,90 +1,90 @@
-# 校验与保存
+# Validation and saving
 
-jse 把表单当作编辑辅助，把 **JSON Schema 校验**当作权威判定：表单没覆盖的关键字、跨字段约束、`additionalProperties: false` 等，全部在保存时由 `jsonschema` 库检查。
+jse treats the form as an editing aid and **JSON Schema validation** as the authoritative judgment: keywords the form does not cover, cross-field constraints, `additionalProperties: false` and the like are all checked at save time by the `jsonschema` library.
 
-## 支持的表单关键字
+## Supported form keywords
 
-| 类别 | 关键字 | 表单行为 |
+| Category | Keywords | Form behavior |
 |---|---|---|
-| 元信息 | `title` `description` `default` `examples[0]` | 标题、描述、预填值、占位符 |
-| 标量 | `type: string \| integer \| number \| boolean` | 文本输入；布尔切换 |
-| 枚举 | `enum` / `const` | 行内下拉（`enter` 就地编辑并键入关键词过滤，见[编辑功能：枚举下拉](editing.md#枚举下拉)）；全 const/单值 enum 变体合并为一个枚举 |
-| 数值约束 | `minimum` `maximum` `exclusiveMinimum` `exclusiveMaximum` `multipleOf` | 输入时即时校验 |
-| 字符串约束 | `minLength` `maxLength` `pattern` | 输入时即时校验 |
-| 对象 | `properties` `required` | 字段按 schema 顺序；required 空值拦截 |
-| 对象映射 | `additionalProperties` | 文档成员即键；`a` 添加、`d` 删除，值按子 schema 编辑 |
-| 模式映射 | `patternProperties`（单个模式 + `additionalProperties: false`） | 同映射，但 `a` 新增键必须匹配该正则 |
-| 数组 | `items` `minItems` `maxItems` | 枚举 items → 多选；标量 → 逐条输入；对象 → 逐条表单 |
-| 组合 | `oneOf` / `anyOf` | 变体选择后进入子编辑器；开放字符串 + 字符串枚举合并为文本输入并给补全 |
-| 组合 | `allOf` | 约束取交集：同名 `properties`/`items`/`additionalProperties`/`patternProperties` 递归合并（两侧 `$ref` 都生效），`required` 并集，数值、长度、数组/对象数量边界取更严者；其中 `oneOf`/`anyOf` 按分配律展开 |
-| 引用 | `$ref` | 本地指针与远端 ref；缓存 + 环保护，深度上限 32 |
+| Meta | `title` `description` `default` `examples[0]` | Title, description, pre-filled value, placeholder |
+| Scalar | `type: string \| integer \| number \| boolean` | Text input; boolean toggles |
+| Enum | `enum` / `const` | Inline dropdown (`enter` edits in place and typing filters by keyword — see [Editing features: Enum dropdown](editing.md#enum-dropdown)); all-const / single-value enum variants merge into one enum |
+| Numeric constraints | `minimum` `maximum` `exclusiveMinimum` `exclusiveMaximum` `multipleOf` | Validated immediately on input |
+| String constraints | `minLength` `maxLength` `pattern` | Validated immediately on input |
+| Object | `properties` `required` | Fields in schema order; required blocks empty values |
+| Object map | `additionalProperties` | Document members are the keys; `a` adds, `d` deletes, values are edited per the sub-schema |
+| Pattern map | `patternProperties` (single pattern + `additionalProperties: false`) | Same as map, but keys added by `a` must match the regex |
+| Array | `items` `minItems` `maxItems` | Enum items → multi-select; scalars → input entry by entry; objects → a form per entry |
+| Composition | `oneOf` / `anyOf` | Pick a variant, then into the sub-editor; open string + string enum merges into a text input with completion |
+| Composition | `allOf` | Constraints intersect: same-named `properties`/`items`/`additionalProperties`/`patternProperties` merge recursively (`$ref` on either side takes effect), `required` takes the union, numeric/length/array and object count bounds take the stricter one; `oneOf`/`anyOf` inside expand distributively |
+| Reference | `$ref` | Local pointers and remote refs; cache + cycle protection, depth cap 32 |
 
-其他关键字不参与表单生成，但保存时仍会校验。
+Other keywords do not participate in form generation but are still validated at save.
 
-## 降级规则
+## Degradation rules
 
-- 不可达 `$ref`、数组套数组、未知类型、schema 深度超过 32 层、递归 `$ref`：有值时按运行时类型直接编辑；无值/null 时使用类型选择器（String/Number/Boolean/Object/Array/Null、schema `$defs`/`definitions` 命名类型、JSON），选 `JSON` 时渲染为 raw 文本区，提交时只做语法校验，语义交给保存期校验。
-- schema 编译失败（非法 schema、远端 ref 不可达等）：**停用保存期校验**，根屏状态行提示 `<warn> schema compile failed, save-time validation disabled: ...`。此时保存不再有 schema 兜底。
-- 加载的配置已有校验问题：不阻止编辑，根菜单首行显示问题计数。加载时的错误只用于展示；每次文档修改后会重新校验并刷新。
-- 明确不做：`format` 的表单校验、数组重排序 UI、`if-then-else`/`not` 的表单化、多模式 `patternProperties` 的映射式编辑、远端配置路径。
-- 多模式 `patternProperties` 虽不生成映射表单，但匹配任一模式的键按 schema 已知处理：不标记 `(not in schema)`，也不产生未知键警告；键和值仍按运行时形状编辑，正则与值 schema 在保存时校验。
-- 表单无法表达的交集约束（多个 `pattern`、`not`、`if`/`then`/`else`、多个 `format`、多模式 `patternProperties` 等）不会丢弃：它们保留在原始 schema 中，编辑期间可能允许输入中间值，但保存时仍由 `jsonschema` 全部校验；`--force` 是唯一绕过方式。
+- Unreachable `$ref`, array-of-array, unknown types, schema depth over 32 levels, recursive `$ref`: with a value, edit directly by runtime type; with no value/null, use the type picker (String/Number/Boolean/Object/Array/Null, schema `$defs`/`definitions` named types, JSON); picking `JSON` renders a raw text area, with only a syntax check on submit — semantics are left to save-time validation.
+- Schema compile failure (invalid schema, unreachable remote ref, etc.): **save-time validation is disabled**, and the root screen status line shows `<warn> schema compile failed, save-time validation disabled: ...`. Saving then has no schema backstop.
+- Loaded config already has validation issues: editing is not blocked; the root menu's first line shows the issue count. Load-time errors are display only; after every document modification, validation re-runs and refreshes.
+- Explicit non-goals: form validation for `format`, an array reordering UI, forms for `if-then-else`/`not`, map-style editing for multi-pattern `patternProperties`, remote config paths.
+- Multi-pattern `patternProperties` generates no map form, but keys matching any pattern are treated as schema-known: no `(not in schema)` marker and no unknown-key warning; keys and values are still edited by runtime shape, with the regex and value schema validated at save.
+- Intersection constraints the form cannot express (multiple `pattern`, `not`, `if`/`then`/`else`, multiple `format`, multi-pattern `patternProperties`, etc.) are not dropped: they remain in the original schema; editing may allow intermediate values, but at save time `jsonschema` still validates all of them. `--force` is the only way around.
 
-## 问题列表
+## Issue list
 
-根菜单首行：
+First line of the root menu:
 
 ```text
 <err> 2 validation errors · <warn> 1 warning
 ```
 
-- `enter` 打开问题列表；`↑`/`↓`（或 `ctrl+j`/`ctrl+k`）选择，`enter` 跳到对应字段，`esc` 关闭。
-- 条目同时按严重度着色：错误红、警告黄；位置使用文档路径，如 `at '$.server.port':`、`at '$.items[0].tag':`。
-- **实时刷新**：每次修改后计数、字段行尾 `<err>`/`<warn>` 与条目立即更新；全部修完后状态行自动隐藏。
-- 从问题列表跳转后，在落点菜单按 `esc` 回到刷新过的问题列表（光标保留）；继续下钻则先逐级返回，再回列表。
-- 搜索跳转或重新打开列表会替换该返回点。
+- `enter` opens the issue list; `↑`/`↓` (or `ctrl+j`/`ctrl+k`) select, `enter` jumps to the corresponding field, `esc` closes.
+- Entries are also colored by severity: errors red, warnings yellow; locations use document paths, such as `at '$.server.port':`, `at '$.items[0].tag':`.
+- **Live refresh**: after every modification the counts, the `<err>`/`<warn>` at field line ends, and the entries update immediately; once everything is fixed, the status line hides automatically.
+- After jumping from the issue list, press `esc` in the landing menu to return to the refreshed issue list (cursor preserved); if you drill down further, you return level by level first, then back to the list.
+- Search jumps or reopening the list replaces that return point.
 
-## 保存
+## Saving
 
-### 触发方式
+### Triggers
 
-| 操作 | 行为 |
+| Action | Behavior |
 |---|---|
-| `ctrl+s` / `w` | 保存当前文件并留在编辑器；成功提示 `Write to <路径>`，变更标记清零。 |
-| 根屏 `esc`/`q` → `y` | 保存所有有改动的文件并退出。 |
-| `W` | 另存副本到指定路径，不改变会话保存目标。 |
-| `--accessible` | 在根屏选择 `Save and exit`。 |
+| `ctrl+s` / `w` | Saves the current file and stays in the editor; success hints `Write to <path>`, change markers reset. |
+| Root screen `esc`/`q` → `y` | Saves all changed files and exits. |
+| `W` | Saves a copy to a given path, leaving the session save target unchanged. |
+| `--accessible` | Choose `Save and exit` on the root screen. |
 
-### 校验门
+### Validation gate
 
-- 保存前校验当前文档；有错误则打开全屏错误列表，标题 `Cannot save: validation errors`。
-- `enter` 跳到出错字段；`n`/`esc` 返回继续编辑。
-- 只有启动时带 `--force`，错误列表才允许 `y` 强存；强存结果行是 `Saved with validation errors (--force): <path>`，退出码仍为 0。
-- `--accessible` 模式下校验错误**不逐条打印**，只询问 `Save anyway? [y/N]`；只有同时带 `--force` 且回答 `y` 才写入。回答 `n` 返回根屏。
+- The current document is validated before saving; with errors, a full-screen error list opens, titled `Cannot save: validation errors`.
+- `enter` jumps to the offending field; `n`/`esc` returns to keep editing.
+- Only when started with `--force` does the error list allow `y` to force-save; the force-save result line is `Saved with validation errors (--force): <path>`, and the exit code is still 0.
+- In `--accessible` mode validation errors are **not printed one by one**; it only asks `Save anyway? [y/N]`, and writes only when `--force` is also set and the answer is `y`. Answering `n` returns to the root screen.
 
-### 写入细节
+### Write details
 
-- **原子写**：同目录临时文件 + rename；保留已存在文件的权限位。
-- 键序、数字字面量（如 `1.0`）原样保留。
-- schema 之外的未知键、`$schema` 键都保留。
-- 输出格式由扩展名决定；raw 编辑和 `$EDITOR` 外编的修改同样按原格式写回。
-- YAML 的注释、锚点、别名、合并键按[配置文件格式](formats.md)的规则写回。
-- TOML 的注释、键序与未编辑的标量字面量按[配置文件格式](formats.md)的规则写回；语法要求标量成员排在子表头之前。
+- **Atomic write**: a temp file in the same directory + rename; permission bits of an existing file are preserved.
+- Key order and numeric literals (such as `1.0`) are preserved as-is.
+- Unknown keys outside the schema and the `$schema` key are preserved.
+- The output format is decided by the extension; changes from raw editing and `$EDITOR` external editing are written back in the original format as well.
+- YAML comments, anchors, aliases, and merge keys are written back following the rules in [Configuration file formats](formats.md).
+- TOML comments, key order, and unedited scalar literals are written back following the rules in [Configuration file formats](formats.md); the syntax requires scalar members to come before sub-table headers.
 
-### 多文件
+### Multiple files
 
-- `ctrl+s` 只保存当前文件。
-- 根屏退出时若有多个文件有改动，询问 `Save changes in N files? (y/n)`；`y` 逐个保存（当前文件优先），全部成功才退出。
-- 若某个文件校验失败，保存流程停在那个文件并打开错误列表；修复后重新退出，或带 `--force` 强存。
-- 保存失败（权限、磁盘错误等）会提示并留在会话，其他文件保持未保存状态。
+- `ctrl+s` saves only the current file.
+- On root screen exit with several changed files, it asks `Save changes in N files? (y/n)`; `y` saves them one by one (current file first), exiting only when all succeed.
+- If a file fails validation, the save flow stops at that file and opens the error list; fix it and exit again, or force-save with `--force`.
+- A save failure (permissions, disk errors, etc.) is hinted and the session stays open, with the other files left unsaved.
 
-## 退出码
+## Exit codes
 
-| 退出码 | 含义 |
+| Exit code | Meaning |
 |---|---|
-| 0 | 已保存；或无改动正常退出；或 `--force` 强存 |
-| 1 | 运行错误（读取/解析、schema 加载、TUI 错误、stdin 不是终端等） |
-| 2 | 用法错误（参数、缺少配置文件、`--pick` 中止） |
-| 130 | 用户中止（`n` 放弃、`ctrl+c`） |
+| 0 | Saved; or a normal exit with no changes; or `--force` force-save |
+| 1 | Runtime error (reading/parsing, schema loading, TUI errors, stdin not a terminal, etc.) |
+| 2 | Usage error (arguments, missing config file, `--pick` aborted) |
+| 130 | User abort (`n` give up, `ctrl+c`) |
 
-stdout 结果行的完整列表见[命令行：退出码与 stdout](cli.md#退出码与-stdout)。
+For the complete list of stdout result lines, see [Command line: Exit codes and stdout](cli.md#exit-codes-and-stdout).

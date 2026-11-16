@@ -1,312 +1,311 @@
-# 界面与键位
+# Interface and key bindings
 
-## 屏幕布局
+## Screen layout
 
-全屏 TUI 分成固定区域：
+The full-screen TUI is divided into fixed areas:
 
 ```
-标题行（菜单名 + 多文件 [1/3] / 子菜单 [1/3 a.json] + 未保存 ●）
-面包屑行（$.server）
-字段列表（可滚动；光标行反色）
+Title line (menu name + multi-file [1/3] / submenu [1/3 a.json] + unsaved ●)
+Breadcrumb line ($.server)
+Field list (scrollable; cursor row in reverse video)
   ...
-描述行（当前行的 schema 帮助 + 文档注释）
-variant: <变体类型名> <变体签名>  ← oneOf 选择器与变体编辑器；无类型名时只显示签名
-状态行（缓存回退 / schema 编译失败等警告）  ← 仅根屏
-瞬时提示（Saved、undone、pasted ...）
-底部帮助栏（固定最后一行；常用键 / 当前模式的专用提示）
+Description line (schema help + doc comment for the current row)
+variant: <variant type name> <variant signature>  ← oneOf picker and variant editor; signature only when there is no type name
+Status line (cache fallback / schema compile failure and other warnings)  ← root screen only
+Transient message (Saved, undone, pasted ...)
+Bottom help bar (fixed to the last line; common keys / hints specific to the current mode)
 ```
 
-- **标题行**：根菜单始终显示配置文件名（`Cargo.toml`、`config.yaml`、`rust-toolchain.toml` 等），不使用 schema 根标题；子菜单优先使用 schema `title`，没有标题时用文档键命名（map 成员键、数组条目 `key[N]`、oneOf 字段名）。该规则对 JSON/JSONC/YAML/TOML 一致。锚点/引用对象的菜单标题追加 `: &name` / `: *name`。当前文件有未保存改动时标题右侧有 `●`。多文件时根菜单在 `●` 前只追加 `[当前/总数]`（标题已是文件名，不重复）；子菜单追加 `[当前/总数 文件名]`。终端过窄放不下整个标题时，正文被截断并以 `…` 标记，`●` 始终保留在行尾（多文件位置标签先被截断）。
-- **面包屑**：文档路径，字段用 `.`、数组下标用 `[N]`，如 `$.mounts[0].src`。oneOf 拣选器/变体编辑器等不扩展路径的层级不占段。引用菜单合并显示引用路径与锚点路径（`$.a.steps → $.b.steps`）。过宽时保留尾部并加 `…`。
-- **字段列表**：每行 = 标题/键 + 右侧值摘要。标题列按当前菜单最宽项在 16–42 格间自适应；更宽的标题完整显示，其值不再强制对齐。
-- **描述行**：当前光标行的 schema `description` 与文档注释（JSONC `//`、YAML/TOML `#`）分开显示，自动换行并使用两种颜色（schema 帮助 / 文档注释，无文字前缀）。折叠时两者各自最多显示 2 行，超出部分在末行追加强调色的 `…`；按 `c` 展开完整描述，再按 `c` 折叠。展开状态下按任何其他键会先折叠描述再执行该键。描述一页放不下时，`c` 打开独立的可滚动注释页。详见[描述与注释页](#描述与注释页)。
-- **状态行**：只在根屏渲染，位于底部帮助栏上方、描述/瞬时提示之下。信息类提示（schema 来源、YAML 别名数）在**第一次按键后隐藏**；警告类（缓存回退、schema 编译失败）整个会话保留。
-- **瞬时提示**：`Saved`、`undone`、`Copied ...`、`empty fields hidden` 等，下一次操作后消失。
-- **W 输入行**：根菜单/列表模式按 `W` 时固定在底部帮助栏上方，显示无 `>` 前缀的 `Write to` 路径输入；tab 补全候选显示在输入行上方（同命令输入框）。
-- **`:` 输入行**：列表模式按 `:` 时固定在底部帮助栏上方，提示符就是 `:`，后面是反色光标；先输入的是内置命令（`w`/`wa`/`wq`/`waq`/`q`/`q!` 等），以 `!` 开头才是 shell 转义。打开输入框即自动在输入行上方显示深色候选窗口，随键入实时过滤（最多 8 行；已输入前缀 ≥8 字符时候选省略公共前缀、只显示差异部分，与输入完全相同的候选仍整行显示；宽度按差异部分自适应，最小 24 列、最大铺满终端可用宽度，超长项从左侧省略并以 `…` 开头，保留末尾差异部分；选中行整行反色高亮，其余变暗，随 `↑`/`↓` 移动；候选窗口左边缘：完整候选行与正在补全的词的起始列对齐（键入字符不移动，遇到空格/`!` 等分隔符开始匹配新的词时才重新对齐），省略前缀的差异行与光标列对齐，贴近终端右缘时整体左移）。
-- **搜索输入**：列表搜索（`/`/`r`）、oneOf/任意类型选择器、枚举数组成员、问题/错误/引用/文件列表与 SchemaStore 选择器都把 `search: `（及 `replace: `）行固定放在标题/面包屑下方、列表上方；底部帮助栏始终固定在终端最后一行。以 `/` 打开的搜索一律从空查询开始，光标保持当前行（选择器打开时即当前值所在行）；`esc` 取消后回到该行。替换模式下只有当前聚焦的输入框显示反色光标，另一个输入框整行变暗、不显示光标，`tab`/`shift+tab` 切换后光标随之移动。
+- **Title line**: the root menu always shows the config file name (`Cargo.toml`, `config.yaml`, `rust-toolchain.toml`, etc.), not the schema root title; submenus prefer the schema `title` and fall back to the document key when there is no title (map member keys, array entries `key[N]`, oneOf field names). This rule is the same for JSON/JSONC/YAML/TOML. Menus for anchor/reference objects append `: &name` / `: *name` to the menu title. When the current file has unsaved changes, a `●` appears to the right of the title. With multiple files, the root menu appends only `[current/total]` before `●` (the title is already the file name, so it is not repeated); submenus append `[current/total filename]`. When the terminal is too narrow for the whole title, the body is truncated and marked with `…`, and `●` is always kept at the end of the line (the multi-file position label is truncated first).
+- **Breadcrumb**: the document path, with fields as `.` and array indices as `[N]`, e.g. `$.mounts[0].src`. Levels that do not extend the path, such as oneOf pickers/variant editors, take no segment. Reference menus merge and show both the reference path and the anchor path (`$.a.steps → $.b.steps`). When too wide, the tail is kept and `…` is prepended.
+- **Field list**: each row = title/key + value summary on the right. The title column auto-fits between 16–42 cells based on the widest item in the current menu; wider titles are shown in full, and their values are no longer force-aligned.
+- **Description line**: the schema `description` of the cursor row and the doc comment (JSONC `//`, YAML/TOML `#`) are shown separately, wrapped automatically, in two colors (schema help / doc comment, with no text prefix). When collapsed, each shows at most 2 lines; anything beyond that is marked with an accent-colored `…` at the end of the last line. Press `c` to expand the full description, and `c` again to collapse. While expanded, pressing any other key first collapses the description and then executes that key. When the description does not fit on one page, `c` opens a separate scrollable comment page. See [Descriptions and the comment page](#descriptions-and-the-comment-page).
+- **Status line**: rendered only on the root screen, above the bottom help bar and below the description/transient messages. Informational messages (schema source, YAML alias count) are hidden **after the first key press**; warnings (cache fallback, schema compile failure) persist for the whole session.
+- **Transient messages**: `Saved`, `undone`, `Copied ...`, `empty fields hidden`, etc.; they disappear after the next action.
+- **`W` input line**: when `W` is pressed in the root menu/list mode, it is fixed above the bottom help bar and shows the `Write to` path input without a `>` prefix; tab completion candidates appear above the input line (same as the command input).
+- **`:` input line**: when `:` is pressed in list mode, it is fixed above the bottom help bar; the prompt is just `:` followed by a reverse-video cursor; what you type first is a built-in command (`w`/`wa`/`wq`/`waq`/`q`/`q!` etc.), and only input starting with `!` is a shell escape. Opening the input box automatically shows a dark candidate window above the input line, filtered in real time as you type (at most 8 rows; once the typed prefix is ≥8 characters, candidates omit the common prefix and show only the differing part, while candidates identical to the input are still shown in full; the width auto-fits the differing part — minimum 24 columns, at most filling the terminal's usable width — and over-long items are omitted from the left starting with `…`, keeping the trailing differing part; the selected row is highlighted in reverse video across its full width, the others dimmed, moving with `↑`/`↓`; the candidate window's left edge: full candidate rows align with the start column of the word being completed (typing characters does not move it; realignment happens only when a separator such as a space/`!` starts a new word), diff-only rows with the omitted prefix align with the cursor column, and the whole window shifts left when near the terminal's right edge).
+- **Search inputs**: list search (`/`/`r`), oneOf/any-type pickers, enum array members, the issue/error/reference/file lists, and the SchemaStore picker all pin the `search: ` (and `replace: `) line below the title/breadcrumb and above the list; the bottom help bar is always fixed to the terminal's last line. Search opened with `/` always starts from an empty query with the cursor kept on the current row (for pickers, the row of the current value when opened); `esc` cancels back to that row. In replace mode, only the currently focused input shows a reverse-video cursor; the other input is dimmed across its full width with no cursor, and `tab`/`shift+tab` moves the cursor accordingly.
 
-## 行的类型与标记
+## Row types and markers
 
-| 元素 | 含义 |
+| Element | Meaning |
 |---|---|
-| `*`（红色） | schema 的 required 字段；与是否已填无关。 |
-| `●`（粉色，行尾） | 该值相对加载时/上次保存有变化；对象/数组行在子树含变化时也标记。标题行的 `●` 表示整个文件有未保存改动。行在窄终端被截断时以 `…` 标记截断处，行尾的 `●` 与 `<err>`/`<warn>` 图标始终保留（`(not in schema)`、`--->` 等说明文字先被截断）。 |
-| `●`（oneOf 行） | 当前匹配/选中的变体。 |
-| `<err>`（红） | 该字段有校验错误；父级对象/数组行也标记。 |
-| `<warn>`（黄） | 只有警告（如未知键）；无错误时显示。同一行同时有错误与警告只显示 `<err>`。 |
-| `(not in schema)` | 文档里有、schema 未定义的键；黄色行，作为警告处理。 |
-| `--->` | 该行可以进入子菜单。 |
-| `—` | 未设值且没有可预览的默认值。 |
-| `>`（红色行首） | 多选/连选标记的行。 |
-| `[empty hidden]` | `z` 过滤开启时，列表正下方的灰色提示。 |
-| `● REC n` | 宏录制中，底栏右侧红色计数。 |
-| `&name` / `*name` | YAML 锚点定义 / 别名引用徽标。 |
-| `<<: *a *b` | 映射菜单标题上的合并键来源。 |
+| `*` (red) | A required field per the schema; independent of whether it is filled. |
+| `●` (pink, end of row) | The value changed relative to load time / last save; object/array rows are also marked when their subtree contains changes. `●` on the title line means the whole file has unsaved changes. When a row is truncated on a narrow terminal, the cut point is marked with `…`; the trailing `●` and the `<err>`/`<warn>` icons are always kept (`(not in schema)`, `--->` and other annotations are truncated first). |
+| `●` (oneOf row) | The currently matched/selected variant. |
+| `<err>` (red) | The field has a validation error; parent object/array rows are also marked. |
+| `<warn>` (yellow) | Warnings only (e.g. unknown keys); shown when there are no errors. When a row has both an error and a warning, only `<err>` is shown. |
+| `(not in schema)` | A key present in the document but not defined by the schema; yellow row, treated as a warning. |
+| `--->` | The row can enter a submenu. |
+| `—` | No value set and no default value to preview. |
+| `>` (red, start of row) | Rows marked by multi-select / range select. |
+| `[empty hidden]` | The gray hint right below the list when the `z` filter is on. |
+| `● REC n` | While a macro is being recorded, the red counter at the right of the bottom bar. |
+| `&name` / `*name` | Badge for a YAML anchor definition / alias reference. |
+| `<<: *a *b` | Merge key sources shown on the mapping menu title. |
 
-### 值摘要
+### Value summary
 
-- 字符串绿色、数字青色、布尔洋红、枚举琥珀、对象/数组加粗。
-- 未设或显式 null 时，若有 schema 默认值则用较暗灰色预览；没有默认值显示 `—`。显式填写的值即使等于默认值，也按类型着色。
-- 对象：按 **schema 声明顺序**显示前 2 个成员 `k=v`，超出显示 `+N`；schema 未定义的键排在后面，保持文档顺序。
-- 数组：纯对象数组显示 `N items`；其他数组显示 `[总数] 前 3 个值 +N`（对象记 `{…}`、嵌套数组记 `[N]`）。
-- oneOf：按当前匹配的叶子变体给摘要；标量变体直接显示值，枚举显示选项，对象变体有标题时显示 `变体标题 {…}`。
-- 多行字符串（脚本块等）的换行与制表符折叠为空格，摘要始终单行。
+- Strings green, numbers cyan, booleans magenta, enums amber, objects/arrays bold.
+- When unset or explicitly null, the schema default is previewed in a dimmer gray if one exists; with no default, `—` is shown. Explicitly set values are colored by type even when they equal the default.
+- Objects: shows the first 2 members as `k=v` in **schema declaration order**, with `+N` beyond that; keys not defined by the schema come after, in document order.
+- Arrays: arrays of plain objects show `N items`; other arrays show `[total] first 3 values +N` (objects as `{…}`, nested arrays as `[N]`).
+- oneOf: summarized by the currently matched leaf variant; scalar variants show the value directly, enums show the option, and object variants show `variant title {…}` when they have a title.
+- In multi-line strings (script blocks etc.), newlines and tabs are folded into spaces; the summary is always a single line.
 
-## 列表模式键位
+## List mode key bindings
 
-以下按键在普通菜单列表生效；输入框打开时按键行为不同（见下一节）。
+The following keys take effect in normal menu lists; behavior differs while an input box is open (see the next section).
 
-### 鼠标
+### Mouse
 
-启动时会开启终端鼠标捕获（退出时关闭）：
+Mouse capture is enabled at startup (and released on exit):
 
-| 操作 | 作用 |
+| Action | Effect |
 |---|---|
-| 左键点击列表行 | 光标移动到点击行并按 `enter`（点击字段行即打开就地编辑；枚举数组成员行即切换勾选）。点击列表行以外的区域（标题、帮助栏、空白行）无效果；写路径/`:` 命令输入打开时忽略点击。空数组的 `< Add item >` 行与 `a` 行为一致 |
-| 鼠标悬停 | 无弹层、无选区时，光标随鼠标移动到悬停行（不触发 `enter`）；编辑/弹层打开时不跟随 |
-| 左键点击下拉候选 | 就地编辑的下拉（枚举选项、补全候选）与 `&`/`*` 引用候选：点击即选中并应用该候选 |
-| 左键点击列表弹层行 | 问题列表、保存错误列表、引用选择器、文件切换器与搜索结果：点击选中该行并 `enter`（跳转/切换/选取） |
-| 右键点击 | 等同 `esc`：返回上一级或关闭当前弹层/输入框 |
-| 滚轮上/下 | 就地编辑数字时把输入框中的数字加 1 / 减 1（空输入按 schema 默认值加减）；键盘帮助页、注释页与命令输出页用滚轮逐行滚动；其他界面不响应 |
+| Left click on a list row | Move the cursor to the clicked row and press `enter` (clicking a field row opens its in-place edit; an enum-array option row toggles it). Clicks outside the list rows (title, help bar, blank lines) do nothing; clicks are ignored while the write-to or `:` command input is open. An empty array's `< Add item >` row behaves exactly like `a` |
+| Mouse hover | With no overlay and no live selection, the cursor follows the mouse across the rows (no `enter` is fired); while an edit or overlay is open the cursor stays put |
+| Left click on a dropdown candidate | Candidates of the inline edit (enum options, completions) and of the `&`/`*` reference input: clicking selects and applies that candidate |
+| Left click on an overlay list row | Issues list, save-error list, reference picker, file switcher, and search results: clicking selects the row and presses `enter` (jump / switch / pick) |
+| Right click | Same as `esc`: go back one level or close the current overlay/input |
+| Wheel up/down | On an enum dropdown, walk the candidates (up = previous, down = next); while a number is being edited inline, increment / decrement the number in the input (an empty input seeds from the schema default first); the keyboard-help, comment, and command-output pages scroll line by line; other surfaces ignore the wheel |
 
-### 移动与跳转
+### Movement and jumping
 
-| 按键 | 作用 |
+| Key | Action |
 |---|---|
-| `↑` / `k`、`↓` / `j` | 上/下移动，首尾循环。 |
-| `ctrl+f` / `PgDn`、`ctrl+b` / `PgUp` | 向下/向上翻一页（步长为当前可见行数，到列表首尾即停，不循环）。 |
-| `←` / `h` | 返回上一级；根菜单无动作（退出用 `esc`/`q`）。 |
-| `→` / `l` / `enter` | 编辑字段或进入子菜单；枚举行 `←`/`→` 循环选项。 |
-| `gg` | 跳到列表第一行。第一个 `g` 进入命令缓冲，**无超时**；下一个键若不是 `g`/`a`/`r` 则照常执行并清空缓冲。 |
-| `Ngg`（数组条目菜单） | 跳到下标为 N 的条目；多位数字累积，越界钳到最后一条，`0gg` 是第一条。 |
-| `G` / `End` | 跳到列表最后一行。 |
-| `Home` | 跳到列表第一行。 |
-| `n` / `N` | 跳到下一个/上一个**文档值非 null** 的条目；跳过操作行、oneOf 变体行、枚举 toggle 行；首尾循环。全菜单都没有非 null 条目时光标不动。 |
-| `ctrl+j` / `ctrl+k` | 自适应跳到下一个/上一个关注条目（首尾循环），按优先级取候选：replace/undo/redo 产生的变更 key（全部替换或 `u`/`ctrl+r` 完成时自动落到第一处，再次 `ctrl+j`/`ctrl+k` 循环其余变更）→ 有校验问题（错误或警告）的 key → 从搜索结果跳转后的搜索命中 → 自加载/上次保存以来有改动（行尾 `●` 标记）的 key（按文档顺序循环；删除类改动落到其所在容器）。光标在候选行上时从该处继续循环；不在候选行上时 `ctrl+j` 取光标之后的第一处、`ctrl+k` 取光标之前的最后一处（越界则首尾回绕；未展开的嵌套字段按其容器行参与排序）。四个场景都不满足（文档没有任何改动）时提示 `no changes since load/save` 且光标不动。任何新的文档编辑会清空 replace/undo/redo 变更列表。 |
-| `f` / `F` | Fast move：等待输入一个字符，向下/向上跳到下一个以该字符开头的 key（大小写敏感、首尾循环、跳过操作行与数组条目）。等待期间 `u`、`q`、`@`、`.` 都按目标字符处理，不触发撤销/退出/宏；`esc` 取消。 |
-| `ctrl+o` | 导航历史后退。 |
-| `ctrl+i` / `tab` | 导航历史前进（终端把 ctrl+i 报告为 tab）。 |
-| `s` | 多文件时打开文件切换器；单文件时提示 `only one file is open`。 |
-| `S` | 打开 SchemaStore 搜索并切换**当前文件**的 schema：文档内容保留，表单、校验器和根菜单按新 schema 重建；选中结果按格式写回 schema 指向（YAML/TOML 若新 schema 定义 `$schema` 字段则写字段），`esc` 取消。 |
+| `↑` / `k`, `↓` / `j` | Move up/down, wrapping at both ends. |
+| `ctrl+f` / `PgDn`, `ctrl+b` / `PgUp` | Page down/up (the step is the current number of visible rows; stops at the start/end of the list, no wrapping). |
+| `←` / `h` | Go up one level; no action in the root menu (use `esc`/`q` to exit). |
+| `→` / `l` / `enter` | Edit the field or enter the submenu; on enum rows, `←`/`→` cycles options. |
+| `gg` | Jump to the first row of the list. The first `g` enters the command buffer with **no timeout**; if the next key is not `g`/`a`/`r`, it executes normally and clears the buffer. |
+| `Ngg` (array-entry menu) | Jump to the entry with index N; multiple digits accumulate, out-of-range counts are clamped to the last entry, and `0gg` is the first. |
+| `G` / `End` | Jump to the last row of the list. |
+| `Home` | Jump to the first row of the list. |
+| `n` / `N` | Jump to the next/previous entry whose **document value is not null**; skips action rows, oneOf variant rows, and enum toggle rows; wraps at both ends. If the whole menu has no non-null entries, the cursor does not move. |
+| `ctrl+j` / `ctrl+k` | Adaptively jump to the next/previous entry of interest (wrapping at both ends), picking candidates by priority: keys changed by replace/undo/redo (after replace-all or finishing `u`/`ctrl+r`, the cursor lands on the first one automatically; further `ctrl+j`/`ctrl+k` cycles the remaining changes) → keys with validation issues (errors or warnings) → search hits from a jump made from search results → keys changed since load/last save (rows carrying the `●` marker, cycled in document order; deletions land on their surviving container). From a candidate row the walk continues from there; from any other row `ctrl+j` takes the first candidate below the cursor and `ctrl+k` the last one above it (wrapping at the ends; entries in unexpanded submenus rank right after their container row). When none of the four cases applies (the document has no changes), it shows `no changes since load/save` and the cursor stays put. Any new document edit clears the replace/undo/redo change list. |
+| `f` / `F` | Fast move: waits for one character, then jumps down/up to the next key starting with that character (case-sensitive, wraps at both ends, skips action rows and array entries). While waiting, `u`, `q`, `@`, and `.` are all treated as the target character and do not trigger undo/exit/macro; `esc` cancels. |
+| `ctrl+o` | Navigate back in history. |
+| `ctrl+i` / `tab` | Navigate forward in history (terminals report ctrl+i as tab). |
+| `s` | With multiple files, opens the file switcher; with a single file, shows `only one file is open`. |
+| `S` | Opens SchemaStore search and switches the schema of the **current file**: the document content is kept, and the forms, validators, and root menu are rebuilt from the new schema; the selected result is written back as the schema pointer according to the format (for YAML/TOML the `$schema` field is written if the new schema defines one); `esc` cancels. |
 
-`esc`/`q` 在有待消费的 `g` 缓冲时只清空缓冲；任意菜单层级的活的选区（`m` 标记或连选）都会先被清空并留在当前菜单（提示 `selection cleared`），此后的 `esc`/`q` 才返回上一级；根屏再进入退出流程。
+`esc`/`q` with a pending `g` buffer only clears the buffer; an active selection at any menu level (`m` marks or range select) is cleared first and you stay in the current menu (message `selection cleared`); only the next `esc`/`q` goes up one level; on the root screen, it then enters the exit flow.
 
-### 编辑与结构
+### Editing and structure
 
-| 按键 | 作用 |
+| Key | Action |
 |---|---|
-| `space` | 切换布尔值或枚举数组成员；其他行等同 `enter`。 |
-| `-` / `=` / `+` | 数字类型字段快速减 1 / 加 1；字段无值时以 schema 数字 `default` 为起点加减（无数字默认值时分别写入 `-1` / `1`）。schema 未定义但运行时值为数字的键（未知键、数组元素、schema-less 文档、raw 字段）同样按当前值加减；无值且无 schema 类型的键不猜测类型。整数按十进制精确计算（不受 f64 精度影响），小数与科学计数法按最短浮点形式写回；一次按键一步撤销。 |
-| `enter` | 标量就地输入；容器进入子菜单；schema 未定义的键与无 `type` 字段按运行时类型直接编辑，仅无值/null 时先选类型（JSON 内建类型或 schema `$defs` 命名类型）。 |
-| `d` / `delete` | 删除当前键值对/数组条目；required 合并键等受保护行会拒绝并提示。 |
-| `D` | 删除当前数组条目（条目列表或条目表单内），确认后删除；表单内删除后回到条目列表。 |
-| `a` / `A` | 对象/映射菜单：在光标成员**前/后**添加 schema 未定义的键。数组菜单：在光标条目**后/前**插入条目。 |
-| `J` / `K` | 数组条目下移/上移；一次按键一步撤销。 |
-| `e` | 用外部 `$EDITOR` 编辑当前行的值；含换行的字符串总是走这里。字符串值打开时无引号，应用时按原文写回。 |
-| `E` | 用外部 `$EDITOR` 以 raw JSON/YAML/TOML 编辑光标行的值（字符串值同样是原文）；光标不在值行时编辑整份文档。 |
-| `ctrl+e` | 物化 YAML 别名；映射菜单中展开合并值；光标在引用行时直接物化该引用。 |
-| `&` / `*` | 设置/修改 YAML 锚点 / 引用。 |
-| `<` | 编辑当前映射的 `<<` 合并键。 |
-| `ga` / `gr` | 跳到当前行的锚点 / 该锚点的其他使用处。 |
-| `t` | 光标在 oneOf 变体 key 上时打开变体选择器（标量/对象都无需先进入编辑）；schema 未定义/无 `type` 的值显式打开类型选择器。 |
-| `z` | 显示/隐藏文档中没有值的对象键（默认值不算）。过滤开启时列表下方显示 `[empty hidden]`；从搜索或问题列表跳转到被隐藏的键会自动关闭过滤。 |
-| `c` | 展开/折叠当前行的描述（折叠时每个来源最多 2 行）；一页放不下时打开独立的注释页。 |
-| `C` | 编辑当前键的文档注释：多行编辑，`ctrl+s` 应用、`esc` 取消；仅文档中已有的键可编辑，无注释时可新增，空文本删除。 |
-| `m` | 开/关光标行的选中标记。 |
-| `v` | 开/关连选；`j`/`k`、方向键、`gg`/`G` 扩展选区。 |
-| `y` / `Y` | 复制 `"key": value` / 只复制值；数组菜单两者都复制元素值。 |
-| `x` / `X` | 剪切键值对 / 剪切值；数组菜单两者都剪切元素值。 |
-| `p` / `P` | 智能粘贴到当前菜单 / 光标所指容器；单个值在 `P` 下替换行的值。 |
-| `u` / `ctrl+r` | 撤销 / 重做；光标自动落到该步变更的第一处：撤销时若已进入变更 key 自己的子菜单，则保持该子菜单、光标停在原行；撤销后值被清空/删除的 key，只要所在菜单仍列出该行（schema 菜单会渲染未赋值成员）就落回该 key 上，所在菜单保持打开；菜单不再列出该行时落到其所在容器行。其余变更可用 `ctrl+j`/`ctrl+k` 循环跳转（见上）。 |
-| `:` | 在底部打开命令输入：`w`/`wa`/`wq`/`waq` 等内置命令，`!<命令>` 执行 shell；见下节。 |
-| `@` / `.` | 开始/停止宏录制 / 回放最后一次宏。 |
+| `space` | Toggle a boolean or an enum array member; on other rows, same as `enter`. |
+| `-` / `=` / `+` | Quickly decrement / increment numeric fields by 1; when the field has no value, it starts from the numeric schema `default` and applies the step (writing `-1` / `1` respectively when there is no numeric default). Keys not defined by the schema but holding a numeric runtime value (unknown keys, array elements, schema-less documents, raw fields) are likewise incremented/decremented from the current value; keys with no value and no schema type do not guess a type. Integers are computed exactly in decimal (unaffected by f64 precision), while decimals and scientific notation are written back in the shortest float form; one key press is one undo step. |
+| `enter` | In-place input for scalars; containers enter the submenu; keys not defined by the schema and values without a `type` are edited directly by runtime type, and only when there is no value/null is a type chosen first (JSON built-in types or schema `$defs` named types). |
+| `d` / `delete` | Delete the current key-value pair / array entry; protected rows such as required merge keys refuse with a message. |
+| `D` | Delete the current array entry (in the entry list or the entry form) after confirmation; deleting inside the form returns to the entry list. |
+| `a` / `A` | Object/mapping menus: add a key not defined by the schema **before/after** the cursor member. Array menus: insert an entry **after/before** the cursor entry. |
+| `J` / `K` | Move the array entry down/up; one key press is one undo step. |
+| `e` | Edit the current row's value with the external `$EDITOR`; strings containing newlines always go through this. String values open unquoted and apply verbatim. |
+| `E` | Edit the cursor row's value as raw JSON/YAML/TOML with the external `$EDITOR` (string values as their own text); when the cursor is not on a value row, edits the whole document. |
+| `ctrl+e` | Materialize YAML aliases; in mapping menus, expands merged values; when the cursor is on a reference row, materializes that reference directly. |
+| `&` / `*` | Set/modify a YAML anchor / reference. |
+| `<` | Edit the current mapping's `<<` merge key. |
+| `ga` / `gr` | Jump to the current row's anchor / to other usages of that anchor. |
+| `t` | When the cursor is on a oneOf variant key, opens the variant picker (scalars/objects need no prior editing); for values not defined by the schema / without a `type`, explicitly opens the type picker. |
+| `z` | Show/hide object keys that have no value in the document (defaults do not count). When the filter is on, `[empty hidden]` appears below the list; jumping from search or the issue list to a hidden key turns the filter off automatically. |
+| `c` | Expand/collapse the current row's description (at most 2 lines per source when collapsed); when it does not fit on one page, opens the separate comment page. |
+| `C` | Edit the current key's doc comment: multi-line editing, `ctrl+s` applies, `esc` cancels; only keys already present in the document can be edited; a comment can be added when absent, and empty text removes it. |
+| `m` | Toggle the selection mark on the cursor row. |
+| `v` | Toggle range select; `j`/`k`, arrow keys, and `gg`/`G` extend the selection. |
+| `y` / `Y` | Copy `"key": value` / copy only the value; in array menus, both copy the element value. |
+| `x` / `X` | Cut the key-value pair / cut the value; in array menus, both cut the element value. |
+| `p` / `P` | Smart paste into the current menu / the container under the cursor; a single value under `P` replaces the row's value. |
+| `u` / `ctrl+r` | Undo / redo; the cursor automatically lands on the first location changed by that step: when the undo happens inside the changed key's own submenu, that submenu stays open with the cursor on its row; a key whose value the step emptied or removed lands back on its own row whenever the containing menu still lists it (schema menus render unassigned members), keeping that menu open; when the menu no longer lists the row, the landing falls back to the container row. The remaining changes can be cycled with `ctrl+j`/`ctrl+k` (see above). |
+| `:` | Opens the command input at the bottom: built-in commands such as `w`/`wa`/`wq`/`waq`, and `!<command>` runs a shell escape; see the next section. |
+| `@` / `.` | Start/stop macro recording / replay the last macro. |
 
-批量操作、剪贴板格式、数组/映射/oneOf 的细节见[编辑功能](editing.md)。
+For details on bulk operations, clipboard formats, and arrays/mappings/oneOf, see [Editing](editing.md).
 
-### 描述与注释页
+### Descriptions and the comment page
 
-- 描述行折叠时 schema 帮助与文档注释各自最多 2 行，仍超出的部分在该块末行以强调色的 `…` 标示；两者使用不同颜色，不再添加 `schema:`/`comment:` 前缀。文档注释按成员路径读取，编辑成员时保留，删除成员时一并删除，新增成员没有注释。
-- `c` 展开完整描述；再次 `c` 折叠。描述展开期间按任何其他键（移动、编辑、保存……）都会先自动折叠，再执行该键。
-- `C` 直接打开当前键的注释编辑器（仅文档中已有值的键）：多行文本，`ctrl+s` 应用、`esc` 取消。注释写入文件格式的注释表，保存时按原格式（`//` 或 `#`）写回；空文本移除注释；`# yaml-language-server:` / `#:schema` 这类 schema 定位指令不会被当成用户注释显示或覆盖。
-- 完整描述一屏放不下时，`c` 不展开到菜单，而是打开独立注释页：标题显示字段名，正文按窗口宽度换行。该页只用于查看，编辑注释请按 `C`。
-- 注释页内 `↑`/`↓` 或 `j`/`k` 逐行滚动，`ctrl+f`/`PgDn`、`ctrl+b`/`PgUp` 整页滚动；`c`、`q`、`esc` 关闭。注释页打开时其他菜单键不生效。
+- When the description line is collapsed, the schema help and the doc comment each show at most 2 lines; anything beyond that is marked with an accent-colored `…` at the end of that block's last line. The two use different colors and no longer get `schema:`/`comment:` prefixes. Doc comments are read by member path, kept when a member is edited, removed together with the member on deletion, and absent for new members.
+- `c` expands the full description; `c` again collapses it. While the description is expanded, pressing any other key (movement, editing, saving, ...) first collapses it automatically and then executes that key.
+- `C` opens the comment editor for the current key directly (only keys that already have a value in the document): multi-line text, `ctrl+s` applies, `esc` cancels. Comments are stored in the file format's comment table and written back in the original style (`//` or `#`) on save; empty text removes the comment; schema-directive markers such as `# yaml-language-server:` / `#:schema` are not shown or overwritten as user comments.
+- When the full description does not fit on one screen, `c` does not expand it into the menu but opens the separate comment page: the title shows the field name, and the body wraps to the window width. This page is for viewing only; press `C` to edit comments.
+- Inside the comment page, `↑`/`↓` or `j`/`k` scroll line by line, `ctrl+f`/`PgDn`, `ctrl+b`/`PgUp` scroll by page; `c`, `q`, `esc` close it. While the comment page is open, other menu keys have no effect.
 
-### 搜索、保存与退出
+### Search, saving, and exit
 
-| 按键 | 作用 |
+| Key | Action |
 |---|---|
-| `/` | 从当前面包屑路径向下搜索；oneOf/类型选择器内改为搜索模式，枚举数组成员列表改为过滤 toggle 行（标题下方 `search: ...`，键入即过滤选项）。 |
-| `r` | 搜索替换字符串值。 |
-| `ctrl+s` / `w` | 保存当前文件并留在编辑器；底部提示 `Write to <路径>`。输入框内 `w` 是普通字符。 |
-| `W` | 另存副本到指定路径；`enter` 写副本，`esc` 取消。 |
-| `?` | 打开/关闭完整键位帮助。 |
-| `ctrl+c` | 立即退出，不写文件（exit 130）；已保存的内容保留。 |
-| `esc` / `q`（根屏） | 无改动直接退出；有改动询问保存；见下。 |
+| `/` | Search downward from the current breadcrumb path; inside oneOf/type pickers it becomes search mode, and the enum array member list becomes a filter over toggle rows (`search: ...` below the title; typing filters the options). |
+| `r` | Search and replace string values. |
+| `ctrl+s` / `w` | Save the current file and stay in the editor; the bottom shows the `Write to <path>` prompt. Inside input boxes, `w` is a plain character. |
+| `W` | Save a copy to the given path; `enter` writes the copy, `esc` cancels. |
+| `?` | Open/close the full key bindings help. |
+| `ctrl+c` | Exit immediately without writing files (exit 130); already saved content is kept. |
+| `esc` / `q` (root screen) | Exit directly when there are no changes; ask about saving when there are changes; see below. |
 
-输入框内 `q` 是普通字符，取消一律用 `esc`。
+Inside input boxes, `q` is a plain character; always use `esc` to cancel.
 
-## 输入与 overlay 键位
+## Input and overlay key bindings
 
-### 就地输入 / raw 文本区
+### In-place input / raw text areas
 
-| 按键 | 作用 |
+| Key | Action |
 |---|---|
-| `enter` | 应用（raw 文本区与注释编辑器是 `ctrl+s`）。 |
-| `esc` | 取消。 |
-| `tab` / `ctrl+n` / `ctrl+j` | 下一个补全候选。 |
-| `shift+tab` / `ctrl+p` / `ctrl+k` | 上一个补全候选。 |
-| `↑` / `↓` | Tab 补全已激活时上一个 / 下一个候选（循环，共用同一份候选列表）；未激活时无动作。raw 文本区仍用 `↑`/`↓` 跨行。 |
-| `←`/`→`/`Home`/`End` | 行内移动。 |
-| `alt+f` / `alt+b` | 下一词尾 / 上一词首；空白及 `,.+-=_/\:?!$#@*` 为分词符。 |
-| `ctrl+a` / `ctrl+e` | 行首 / 行尾（替换模式中 `ctrl+r` 为全部替换）。 |
-| `ctrl+k` / `ctrl+u` / `ctrl+w` | 删到行尾 / 删到行首 / 删除前一个词；被删文本进入 kill 缓冲（raw 文本区与注释编辑器中 `ctrl+w` 仍为删除词；应用是 `ctrl+s`）。候选窗口打开时 `ctrl+k` 改为上一个补全候选（`ctrl+j` 为下一个）。 |
-| `ctrl+y` | 粘贴最近一次 `ctrl+k`/`ctrl+u`/`ctrl+w` 删除的文本（kill 缓冲）；空删除不覆盖缓冲，可重复粘贴。 |
-| `backspace` / `delete` | 删除字符。 |
+| `enter` | Apply (in raw text areas and the comment editor, `ctrl+s`). |
+| `esc` | Cancel. |
+| `tab` / `ctrl+n` / `ctrl+j` | Next completion candidate. |
+| `shift+tab` / `ctrl+p` / `ctrl+k` | Previous completion candidate. |
+| `↑` / `↓` | With tab completion active, previous / next candidate (cyclic, sharing the same candidate list); no action when inactive. Raw text areas still use `↑`/`↓` to move across lines. |
+| `←`/`→`/`Home`/`End` | Move within the line. |
+| `alt+f` / `alt+b` | End of the next word / start of the previous word; whitespace and `,.+-=_/\:?!$#@*` are word separators. |
+| `ctrl+a` / `ctrl+e` | Start / end of line (in replace mode, `ctrl+r` is replace all). |
+| `ctrl+k` / `ctrl+u` / `ctrl+w` | Kill to end of line / kill to start of line / delete the previous word; deleted text goes to the kill buffer (in raw text areas and the comment editor, `ctrl+w` still deletes a word; applying is `ctrl+s`). When the candidate window is open, `ctrl+k` becomes the previous completion candidate (`ctrl+j` the next). |
+| `ctrl+y` | Paste the text most recently deleted by `ctrl+k`/`ctrl+u`/`ctrl+w` (the kill buffer); an empty deletion does not overwrite the buffer, so pasting can be repeated. |
+| `backspace` / `delete` | Delete characters. |
 
-进入输入框即自动显示候选窗口，键入时实时过滤，无需先按 `tab`；`tab`/`ctrl+n`、`shift+tab`/`ctrl+p`、`ctrl+j`/`ctrl+k` 或 `↑`/`↓` 选择候选。候选窗口不加 `>` 标记，选中行整行反色高亮；已输入内容长度达到 8 个字符且候选都以它开头时，候选行省略这段公共前缀、只显示差异部分（大小写不敏感，不加 `…` 标记；与输入完全相同的候选仍整行显示），避免长 URL/路径把差异挤到截断处。窗口宽度按差异部分自适应，最小 24 列，最大铺满终端可用宽度；超长候选从左侧省略（以 `…` 开头），末尾差异部分永不省略，每行补齐到该宽度形成深色背景矩形；就地编辑的候选窗口左边缘与输入文本起始列对齐，键入字符不移动；其他输入框（锚点/引用等）同样与输入文本起始列对齐；`:` 命令行的候选窗口与正在补全的词的起始列对齐，同一词内键入不移动，分隔符开始新词时重新对齐；候选行省略公共前缀时窗口改为与光标列对齐（就地编辑随键入跟随光标，`:` 行停在当前候选的末尾）；矩形贴近终端右缘放不下时整体左移、右缘停在终端可用宽度内，候选始终完整可见；矩形左侧原有的行内容（标题、选择标记等）保持可见，只有矩形自身覆盖右侧区域。选中行整行反色显示，其余候选变暗。就地编辑的候选窗口优先覆盖游标行下方的菜单行，不插入新行、不推动列表；下方没有足够空间时（例如光标在终端底部）改为覆盖光标上方的菜单行，保证候选始终可见。锚点/引用输入的候选同样覆盖其输入行下方的行。`W` 写路径与 `:` 命令输入位于底部，候选窗口显示在输入行上方。
+Opening an input box automatically shows the candidate window, filtered in real time as you type — there is no need to press `tab` first; `tab`/`ctrl+n`, `shift+tab`/`ctrl+p`, `ctrl+j`/`ctrl+k`, or `↑`/`↓` select a candidate. The candidate window has no `>` marker; the selected row is highlighted in reverse video across its full width. When the typed content reaches 8 characters and all candidates start with it, candidate rows omit that common prefix and show only the differing part (case-insensitive, without a `…` marker; candidates identical to the input are still shown in full), so that long URLs/paths do not squeeze the difference to the truncation point. The window width auto-fits the differing part, minimum 24 columns, at most filling the terminal's usable width; over-long candidates are omitted from the left (starting with `…`), the trailing differing part is never omitted, and each row is padded to that width, forming a dark-background rectangle. For in-place editing, the candidate window's left edge aligns with the start column of the input text, and typing characters does not move it; other inputs (anchor/reference etc.) likewise align with the start column of the input text; the `:` command line's candidate window aligns with the start column of the word being completed — typing within the same word does not move it, and it realigns when a separator starts a new word; when candidate rows omit the common prefix, the window instead aligns with the cursor column (for in-place editing it follows the cursor as you type, while the `:` line stays at the end of the current candidate). When the rectangle does not fit near the terminal's right edge, the whole block shifts left with its right edge staying within the terminal's usable width, and candidates always remain fully visible; row content originally to the left of the rectangle (titles, selection marks, etc.) remains visible — only the rectangle itself covers the right-hand area. The selected row is shown in reverse video across its full width, and the other candidates are dimmed. For in-place editing, the candidate window preferentially covers the menu rows below the cursor row, without inserting new lines or pushing the list; when there is not enough space below (e.g. the cursor is at the terminal bottom), it covers the menu rows above the cursor instead, keeping the candidates always visible. Candidates for anchor/reference input likewise cover the rows below their input line. The `W` write path and the `:` command input sit at the bottom, so the candidate window appears above the input line.
 
-raw 文本区（整份文档、不可表单化字段，或任意类型选择器的 `JSON` 变体）还支持 `↑`/`↓` 跨行、`enter` 换行、`backspace` 合并行、`ctrl+k` 删到行尾等编辑操作；`ctrl+s` 应用，`esc` 取消。
+Raw text areas (the whole document, fields that cannot be represented as a form, or the `JSON` variant of the any-type picker) also support `↑`/`↓` across lines, `enter` for a newline, `backspace` to join lines, `ctrl+k` to kill to end of line, and similar editing; `ctrl+s` applies, `esc` cancels.
 
-### 命令模式 `:`
+### Command mode `:`
 
-列表模式按 `:` 在底部打开命令输入行（提示符 `:`）。输入行是普通单行文本：`←`/`→`、`Home`/`End`、`ctrl+a`/`ctrl+e`、`ctrl+k`/`ctrl+u`/`ctrl+w`/`ctrl+y` 都可编辑。`tab` 补全**只依据光标前的内容**，并且只替换光标前的当前词——光标后的文本原样保留（例如输入 `:!cat /tmp/alZZ` 后把光标移到 `ZZ` 前再按 `tab`，得到 `:!cat /tmp/alpha.txtZZ`）。
+Pressing `:` in list mode opens the command input line at the bottom (prompt `:`). The input line is ordinary single-line text: `←`/`→`, `Home`/`End`, `ctrl+a`/`ctrl+e`, and `ctrl+k`/`ctrl+u`/`ctrl+w`/`ctrl+y` all edit it. `tab` completion is **based only on the content before the cursor** and replaces only the current word before the cursor — text after the cursor is kept as is (e.g. after typing `:!cat /tmp/alZZ`, move the cursor before `ZZ` and press `tab` to get `:!cat /tmp/alpha.txtZZ`).
 
-内置命令：
+Built-in commands:
 
-| 输入 | 作用 |
+| Input | Action |
 |---|---|
-| `w` | 保存当前文件并留在编辑器（等同 `ctrl+s`）。 |
-| `w <路径>` | 另存到指定路径（等同 `W`；参数不以 `!` 开头）。 |
-| `wa` | 保存所有有改动的文件，保留当前文件（`Saved N files`）。 |
-| `wq` | 保存当前文件并退出。 |
-| `waq` | 保存所有有改动的文件并退出。 |
-| `q` | 无未保存改动时退出；有改动时提示改用 `:wq` 或 `:q!`。 |
-| `q!` | 放弃未保存改动并退出（不写盘）。 |
-| `w!`、`wa!`、`wq!`、`waq!` | 同上，但跳过保存时校验，强制写盘。 |
+| `w` | Save the current file and stay in the editor (same as `ctrl+s`). |
+| `w <path>` | Save to the given path (same as `W`; the argument does not start with `!`). |
+| `wa` | Save all files with changes and keep the current file (`Saved N files`). |
+| `wq` | Save the current file and quit. |
+| `waq` | Save all files with changes and quit. |
+| `q` | Quit when there are no unsaved changes; with changes, suggests `:wq` or `:q!` instead. |
+| `q!` | Discard unsaved changes and quit (nothing written to disk). |
+| `w!`, `wa!`, `wq!`, `waq!` | Same as above, but skip validation on save and force writing to disk. |
 
-`w`/`wq`/`waq` 的校验错误仍会打开错误列表：`y` 强制保存，`n`/`esc` 取消保存（`wq`/`waq` 因此不退出）。
+Validation errors from `w`/`wq`/`waq` still open the error list: `y` force-saves, `n`/`esc` cancels the save (so `wq`/`waq` do not quit).
 
-shell 转义（命令模式中以 `!` 开头，语法参照 vi）：
+Shell escapes (starting with `!` in command mode; syntax modeled on vi):
 
-| 输入 | 作用 |
+| Input | Action |
 |---|---|
-| `!<命令>` | 仅执行命令并显示输出（vi 的 `:!cmd`），不改文档；单行 stdout 显示在底部提示，多行 stdout 在底部空白行放得下时直接按多行提示显示，放不下才打开整屏滚动页。 |
-| `r !<命令>` | 读取命令 stdout（vi 的 `:r !cmd`）：字符串值直接替换，`array[string]` 追加为一个条目。 |
-| `a !<命令>` | 把 stdout **按行分割**，每行作为一个新条目追加到 `array[string]`。 |
-| `w !<命令>` | 把整份当前文档（含注释，按文件自身 JSON/JSONC/YAML/TOML 语法）写入命令 stdin（vi 的 `:w !cmd`）；文档本身不修改，命令输出显示在底部提示。 |
-| `%` | 在 shell 命令中作为独立词出现时代表当前文件；执行前展开为带 shell 引号的绝对路径。`tab` 也可把光标前的 `%` 直接展开为该路径。 |
-| `!!` | 重跑最近一条 shell 转义（`!`/`r !`/`a !`/`w !`，不重复加入历史）；没有时提示 `: no previous shell command`。 |
+| `!<command>` | Runs the command only and shows its output (vi's `:!cmd`), without changing the document; single-line stdout is shown as the bottom message, and multi-line stdout is shown directly as a multi-line message when it fits in the blank rows above the bottom bar — only when it does not fit is a full-screen scroll page opened. |
+| `r !<command>` | Reads the command's stdout (vi's `:r !cmd`): replaces a string value directly, and appends one entry to `array[string]`. |
+| `a !<command>` | Splits stdout **by lines**, appending each line as a new entry to `array[string]`. |
+| `w !<command>` | Writes the entire current document (including comments, in the file's own JSON/JSONC/YAML/TOML syntax) to the command's stdin (vi's `:w !cmd`); the document itself is not modified, and the command's output is shown as the bottom message. |
+| `%` | When it appears as a standalone word in a shell command, stands for the current file; it is expanded to a shell-quoted absolute path before execution. `tab` can also expand a `%` before the cursor directly into that path. |
+| `!!` | Re-runs the most recent shell escape (`!`/`r !`/`a !`/`w !`, not recorded in history again); when there is none, shows `: no previous shell command`. |
 
-`r`/`a`/`w` 后必须写 `!<命令>` 才是 shell 转义；`w` 后跟普通参数是另存路径（`w /tmp/a.json`）。
+After `r`/`a`/`w`, `!<command>` is required for a shell escape; `w` followed by a plain argument is a save-to path (`w /tmp/a.json`).
 
-| 按键 | 作用 |
+| Key | Action |
 |---|---|
-| `:`（列表模式） | 在底部帮助栏上方打开命令输入；内置命令候选立即出现，并随键入实时过滤，无需先按 `tab`。 |
-| `enter` | 用系统 shell（Unix `sh -c`，Windows `cmd /C`）执行当前命令。 |
-| `tab` / `ctrl+n`、`shift+tab` / `ctrl+p`；补全已选中时 `ctrl+j` / `ctrl+k` | 补全光标前的当前词，只替换该词并保留光标后的文本。没有 `!` 时补全内置命令名；命令以 `!` 开头（或 `r !`、`a !`、`w !` 之后）时，首个命令词从 `$PATH` 补全可执行文件，后续参数先询问 bash 可编程补全——bash-completion 已为该命令注册规则时按其结果补全（子命令、分支名、服务动作等），没有规则、未安装 bash 或 bash-completion 时回落到文件系统路径补全；`w <路径>` 的参数按路径补全；`%` 补全为当前文件的完整路径。重复按键循环候选。候选窗口在输入行上方，最多 8 行；已输入词达到 8 个字符时候选省略公共前缀、只显示差异部分（与输入完全相同的候选仍整行显示）；宽度按差异部分自适应、最小 24 列、最大铺满终端可用宽度，超长项从左侧省略并以 `…` 开头，保留末尾差异部分，整块窗口带深色背景，选中行整行反色高亮（其余变暗）。 |
-| `↑` / `↓` | 补全已选中时在候选窗口中前后移动选中项（循环，效果同 `shift+tab`/`tab`）；补全未选中时前后移动命令历史。`↓` 越过最新一条时恢复打开历史前正在输入的内容。 |
-| `esc` | 取消命令输入，不改文档。 |
-| `↑`/`↓` 或 `j`/`k`、`ctrl+f`/`PgDn`、`ctrl+b`/`PgUp`（多行输出页） | 输出超过一屏时逐行/整页滚动；未超过一屏时按键不移动。 |
-| `q` / `esc`（多行输出页） | 关闭输出页。 |
+| `:` (list mode) | Opens the command input above the bottom help bar; built-in command candidates appear immediately and are filtered in real time as you type, with no need to press `tab` first. |
+| `enter` | Executes the current command with the system shell (Unix `sh -c`, Windows `cmd /C`). |
+| `tab` / `ctrl+n`, `shift+tab` / `ctrl+p`; with a completion selected, `ctrl+j` / `ctrl+k` | Completes the current word before the cursor, replacing only that word and keeping the text after the cursor. Without `!`, completes built-in command names; when the command starts with `!` (or after `r !`, `a !`, `w !`), the first command word completes executables from `$PATH` and subsequent arguments first ask bash's programmable completion — when bash-completion has a registered rule for the command, its results complete the word (subcommands, branch names, service actions, ...); without a rule, without bash or without bash-completion, the filesystem path scan stays; the argument of `w <path>` completes as a path; `%` completes to the current file's full path. Repeated presses cycle candidates. The candidate window sits above the input line, at most 8 rows; once the typed word reaches 8 characters, candidates omit the common prefix and show only the differing part (candidates identical to the input are still shown in full); the width auto-fits the differing part, minimum 24 columns, at most filling the terminal's usable width; over-long items are omitted from the left starting with `…` with the trailing differing part kept; the whole window has a dark background, and the selected row is highlighted in reverse video across its full width (the others dimmed). |
+| `↑` / `↓` | With a completion selected, moves the selection back/forward in the candidate window (cyclic, same effect as `shift+tab`/`tab`); with no completion selected, moves through the command history. When `↓` goes past the newest entry, it restores what was being typed before the history was opened. |
+| `esc` | Cancels the command input without changing the document. |
+| `↑`/`↓` or `j`/`k`, `ctrl+f`/`PgDn`, `ctrl+b`/`PgUp` (multi-line output page) | Scrolls line by line / page by page when the output exceeds one screen; the keys do not move when it does not. |
+| `q` / `esc` (multi-line output page) | Closes the output page. |
 
-shell 参数的 bash 补全在光标进入一个新的参数词时自动运行一次（通常是键入空格后，无需按 `tab`），同一词内继续键入只对已取回的结果做本地前缀过滤，不重复运行脚本；显式按 `tab` 则对该词重新询问一次。jse 启动 `bash -c` 子进程加载 bash-completion 并执行该命令注册的补全规则（`complete -F`/`-C`），补全期间同步等待脚本运行结束（重补全脚本可能调用命令自身的二进制，因此每个参数词只运行一次）。核心脚本按 `JSE_BASH_COMPLETION`（见[命令行](cli.md#环境变量)）→ `/usr/share/bash-completion/bash_completion` → `/etc/bash_completion` → `/usr/local/etc/bash_completion` → `/opt/homebrew` 下的 `share`/`etc/bash_completion` 顺序查找；一个都找不到，或该命令没有补全规则时，保持文件系统路径补全。
+Bash completion for shell arguments runs once automatically when the caret enters a fresh argument word (usually right after a space, with no `tab` press); further keystrokes inside the word only filter the fetched words locally, and an explicit `tab` re-asks for the word. jse spawns a `bash -c` child that loads bash-completion and runs the command's registered completion rule (`complete -F`/`-C`), waiting synchronously for the script to finish (heavy completion scripts may run the command's own binary, hence one run per argument word). The core script is looked up in the order `JSE_BASH_COMPLETION` (see [Command line](cli.md#environment-variables)) → `/usr/share/bash-completion/bash_completion` → `/etc/bash_completion` → `/usr/local/etc/bash_completion` → `share`/`etc/bash_completion` under `/opt/homebrew`; when none exists, or the command has no completion rule, the filesystem path scan stays.
 
-命令历史**跨会话保留**：每条执行的命令（`!!` 不会重复记入）立即写入缓存目录下的 `cmd-history` 文件（默认 `$XDG_CACHE_HOME/jse`，`JSE_CACHE_DIR` 可改变位置，见[命令行](cli.md#环境变量)），按行存放、旧的先丢，最多 100 条；新会话打开命令输入后 `↑`/`↓` 即可翻到上一会话的命令。文件缺失或不可读时历史从空开始，写入失败只影响持久化、不影响本会话使用。
+Command history **persists across sessions**: every executed command (`!!` is not recorded again) is written immediately to the `cmd-history` file in the cache directory (default `$XDG_CACHE_HOME/jse`; `JSE_CACHE_DIR` changes the location, see [Command line](cli.md#environment-variables)), stored one command per line with the oldest dropped first, at most 100 entries; in a new session, `↑`/`↓` in the command input reaches the previous session's commands. When the file is missing or unreadable, history starts empty; write failures affect only persistence, not use within the session.
 
-`r !<命令>` 的输出写入规则：
+Rules for writing the output of `r !<command>`:
 
-- 光标行的值（含数组条目的值）是字符串时，用输出直接替换该值。
-- 光标行的值是 `array[string]` 时，把整个输出作为一个条目追加到数组末尾；空数组菜单停在 `< Add item >` 行时同样追加。
-- oneOf 变体同时允许 `string` 与 `array[string]` 时按字符串处理（替换）；只允许 `array[string]` 时追加。
-- schema 未定义类型（schema-less、raw、未知键）按运行时值判断：字符串替换，纯字符串数组追加。
-- 其他类型不写入，底部提示失败。命令退出码非 0 时同样不写入，底部提示 stderr 首行与退出码；stdout 末尾的换行会被去掉，其余内容（含中间换行）原样写入。
+- When the cursor row's value (including array-entry values) is a string, the output replaces that value directly.
+- When the cursor row's value is `array[string]`, the entire output is appended as one entry at the end of the array; the same append happens when an empty array menu is stopped on the `< Add item >` row.
+- When a oneOf variant allows both `string` and `array[string]`, it is treated as a string (replace); when only `array[string]` is allowed, it appends.
+- For types not defined by the schema (schema-less, raw, unknown keys), the runtime value decides: strings are replaced, and arrays of pure strings are appended to.
+- Other types are not written and the bottom message reports the failure. The same applies when the command's exit code is non-zero: nothing is written, and the bottom message shows the first stderr line and the exit code; the trailing newline of stdout is stripped, and the rest (including inner newlines) is written as is.
 
-`a !<命令>` 只接受 `array[string]` 目标：输出按 `\n` 分割（CRLF 的 `\r` 一并去掉），包括中间空行在内的每一行都成为一个字符串条目；末尾换行不产生空条目。光标在数组条目菜单时，停在某个标量条目上也可直接追加到所在数组；字符串等其他目标提示失败。
+`a !<command>` accepts only `array[string]` targets: the output is split on `\n` (with the CRLF `\r` removed as well), and every line — including blank lines in the middle — becomes a string entry; the trailing newline produces no empty entry. With the cursor in an array-entry menu, stopping on a scalar entry also appends directly to that array; other targets such as strings report failure.
 
-`w !<命令>` 与 `!<命令>` 的单行 stdout 成功时，输出压缩成一行显示在底部提示。`!<命令>` 的多行 stdout 优先内联：当按终端宽度换行后的行数不超过菜单最后一行与底部帮助栏之间的空白行数时，直接把提示扩展为多行（菜单不移动）；放不下时才打开滚动页，输出块紧贴底部帮助栏（内容不足一屏时从底部向上排列），保留空行并按终端宽度换行，`q`/`esc` 关闭。其他带换行的提示信息同样内联渲染。`w !<命令>` 没有输出时提示送入的字节数。
+When the single-line stdout of `w !<command>` and `!<command>` succeeds, the output is compressed to one line and shown as the bottom message. Multi-line stdout of `!<command>` is inlined first: when the number of lines after wrapping to the terminal width does not exceed the blank rows between the menu's last row and the bottom help bar, the message is expanded to multiple lines directly (the menu does not move); only when it does not fit is the scroll page opened, with the output block flush against the bottom help bar (when the content is shorter than a screen, it is laid out from the bottom up), blank lines kept and wrapped to the terminal width; `q`/`esc` close it. Other messages containing newlines are rendered inline the same way. When `w !<command>` has no output, the number of bytes fed in is shown.
 
-命令是同步执行的——运行期间界面不刷新、不响应按键，且没有超时；慢命令或读取 stdin 的命令会让界面停顿，这与 vi `:!` 的语义一致，请避免在编辑时运行交互式或长时间命令。
+Commands run synchronously — while one runs, the UI does not refresh or respond to keys, and there is no timeout; slow commands or commands reading stdin will stall the UI. This matches the semantics of vi's `:!`; avoid running interactive or long-running commands while editing.
 
-### 问题列表 / 错误列表 / 引用选择器
+### Issue list / error list / reference picker
 
-| 按键 | 作用 |
+| Key | Action |
 |---|---|
-| `↑` / `k` / `ctrl+k`、`↓` / `j` / `ctrl+j` | 移动（循环）。 |
-| `ctrl+f` / `PgDn`、`ctrl+b` / `PgUp` | 下/上一页（到首尾即停）。 |
-| `gg` / `Home`、`G` / `End` | 首项 / 末项。 |
-| `enter` | 选择 / 跳转到对应字段。 |
-| `/` | 进入过滤。输入框为空，光标保持当前行；键入即按消息、路径或值摘要过滤（不区分大小写）。搜索输入中 `↑`/`↓`、`tab`/`shift+tab`、`ctrl+j`/`ctrl+k` 移动匹配项，`j`/`k` 等普通字符用于输入。`enter` 选定 / 跳转；无匹配时留在搜索中，可用 `backspace` 修正。 |
-| `esc` | 关闭。搜索中先退出搜索并恢复完整列表，再按一次关闭。 |
-| `y`（保存错误列表，仅 `--force`） | 强制写入。 |
-| `n`（保存错误列表） | 取消保存。 |
+| `↑` / `k` / `ctrl+k`, `↓` / `j` / `ctrl+j` | Move (cyclic). |
+| `ctrl+f` / `PgDn`, `ctrl+b` / `PgUp` | Next/previous page (stops at the start/end). |
+| `gg` / `Home`, `G` / `End` | First item / last item. |
+| `enter` | Select / jump to the corresponding field. |
+| `/` | Enter filtering. The input starts empty with the cursor kept on the current row; typing filters by message, path, or value summary (case-insensitive). In the search input, `↑`/`↓`, `tab`/`shift+tab`, and `ctrl+j`/`ctrl+k` move among matches, while ordinary characters such as `j`/`k` are typed. `enter` selects / jumps; with no matches you stay in search and can correct with `backspace`. |
+| `esc` | Close. While searching, first exits search and restores the full list; press again to close. |
+| `y` (save error list, `--force` only) | Force-write. |
+| `n` (save error list) | Cancel the save. |
 
-标量枚举不再使用独立的选择页：`enter` 在字段行打开就地输入框，选项以自动补全式下拉列出，输入框内直接键入关键词过滤（见「编辑功能」的「枚举下拉」）。列表类页面的 `/` 搜索与 oneOf/类型选择器共用同一套输入规则；标题下方显示 `search: <查询>`，无匹配时列表位置给出 `(no matches)`。`esc` 取消搜索并把光标恢复到打开搜索时的行，再按一次关闭页面。
+Scalar enums no longer use a separate picker page: `enter` opens an in-place input box on the field row, the options are listed in an autocomplete-style dropdown, and typing keywords inside the input filters them directly (see "Enum dropdown" under Editing). The `/` search of list-style pages shares the same input rules as the oneOf/type pickers; `search: <query>` is shown below the title, and `(no matches)` appears in the list area when nothing matches. `esc` cancels the search and restores the cursor to the row where search was opened; press again to close the page.
 
-问题列表从字段跳转后，在落点菜单按 `esc` 会回到刷新过的问题列表；继续下钻则先逐级返回，再回列表。
+After jumping from the issue list to a field, pressing `esc` in the landing menu returns to the refreshed issue list; drilling down further first walks back level by level, then returns to the list.
 
-### 搜索 / 替换
+### Search / replace
 
-| 按键 | 作用 |
+| Key | Action |
 |---|---|
-| 输入 | 实时过滤；默认按正则匹配。 |
-| `↑` / `ctrl+k`、`↓` / `ctrl+j` | 移动结果（循环）。 |
-| `ctrl+f` / `PgDn`、`ctrl+b` / `PgUp` | 下/上一页结果（到首尾即停）。 |
-| `tab` / `shift+tab` | 挂出/切换替换输入框焦点。 |
-| `alt+i` | 切换大小写敏感。 |
-| `alt+x` | 切换正则 / 字面量子串。 |
-| `enter`（搜索框） | 跳转到当前结果；落点 `esc` 回到搜索列表。 |
-| `enter`（替换框） | 替换当前高亮值并移到下一命中。 |
-| `ctrl+r` | 替换全部。 |
-| `esc` | 替换模式下先退回普通搜索列表，再按一次关闭。 |
+| Input | Filters in real time; regex matching by default. |
+| `↑` / `ctrl+k`, `↓` / `ctrl+j` | Move among results (cyclic). |
+| `ctrl+f` / `PgDn`, `ctrl+b` / `PgUp` | Next/previous page of results (stops at the start/end). |
+| `tab` / `shift+tab` | Bring up / switch focus of the replace input box. |
+| `alt+i` | Toggle case sensitivity. |
+| `alt+x` | Toggle regex / literal substring. |
+| `enter` (search box) | Jump to the current result; `esc` at the destination returns to the search list. |
+| `enter` (replace box) | Replace the currently highlighted value and move to the next match. |
+| `ctrl+r` | Replace all. |
+| `esc` | In replace mode, first returns to the normal search list; press again to close. |
 
-搜索范围是当前菜单的 schema 子树。当前对象的值即使是 `null`（例如刚创建、成员还没填写的对象），搜索也仍会列出该对象在菜单中的 schema 字段。
+The search scope is the schema subtree of the current menu. Even when the current object's value is `null` (e.g. an object just created whose members are not yet filled in), search still lists that object's schema fields in the menu.
 
-### 确认框、帮助、文件与 schema 选择器
+### Confirmation dialogs, help, file and schema pickers
 
-| 场景 | 按键 |
+| Scenario | Keys |
 |---|---|
-| `Save changes?` / `Remove this item?` / `Replace current value?` | `y`/`enter`/`space` = 是，`n` = 否，`esc` = 取消。 |
-| 键盘帮助 `?` | `↑`/`↓`、`j`/`k`、`ctrl+f`/`PgDn`、`ctrl+b`/`PgUp` 滚动；`esc` / `q` / `?` 关闭。 |
-| 文件切换器 `s` | `↑`/`↓`、`j`/`k`、`ctrl+j`/`ctrl+k`、`ctrl+f`/`PgDn`、`ctrl+b`/`PgUp`、`gg`/`G`/`Home`/`End` 移动；`/` 按路径过滤；`enter` 切换；`esc` 先取消搜索，再按关闭。 |
-| SchemaStore 选择器 | 输入过滤；`↑`/`↓`、`ctrl+j`/`ctrl+k`、`tab`/`shift+tab` 移动；`enter` 选定；`esc`/`ctrl+c` 中止。 |
-| 写路径 `W` | 输入路径；`tab`/`ctrl+n` 与 `shift+tab`/`ctrl+p` 循环补全；`enter` 写入；`esc` 取消。 |
-| 锚点/引用 `&`/`*` | 输入名称；`tab`/`ctrl+n`、`shift+tab`/`ctrl+p` 补全；`enter` 提交；`esc` 取消。 |
-| 合并键 `<` | 输入以空格/逗号分隔的 anchor 名；`tab` 补全当前 token；`enter` 提交；`esc` 取消。 |
-| Fast move `f`/`F` | 输入一个字符（`u` 等也是普通字符）；`esc` 取消。 |
+| `Save changes?` / `Remove this item?` / `Replace current value?` | `y`/`enter`/`space` = yes, `n` = no, `esc` = cancel. |
+| Key help `?` | `↑`/`↓`, `j`/`k`, `ctrl+f`/`PgDn`, `ctrl+b`/`PgUp` scroll; `esc` / `q` / `?` closes. |
+| File switcher `s` | `↑`/`↓`, `j`/`k`, `ctrl+j`/`ctrl+k`, `ctrl+f`/`PgDn`, `ctrl+b`/`PgUp`, `gg`/`G`/`Home`/`End` move; `/` filters by path; `enter` switches; `esc` cancels search first, then closes on the next press. |
+| SchemaStore picker | Type to filter; `↑`/`↓`, `ctrl+j`/`ctrl+k`, `tab`/`shift+tab` move; `enter` selects; `esc`/`ctrl+c` aborts. |
+| Write path `W` | Type a path; `tab`/`ctrl+n` and `shift+tab`/`ctrl+p` cycle completions; `enter` writes; `esc` cancels. |
+| Anchor/reference `&`/`*` | Type a name; `tab`/`ctrl+n`, `shift+tab`/`ctrl+p` complete; `enter` submits; `esc` cancels. |
+| Merge key `<` | Type space/comma-separated anchor names; `tab` completes the current token; `enter` submits; `esc` cancels. |
+| Fast move `f`/`F` | Type one character (`u` etc. are plain characters too); `esc` cancels. |
 
-## 导航历史
+## Navigation history
 
-`ctrl+o` / `ctrl+i` 走的是**位置历史**，记录：
+`ctrl+o` / `ctrl+i` walk a **position history**, recording:
 
-- 进入子菜单、返回上级；
-- `gg`/`G`、搜索跳转、问题列表跳转、`ga`/`gr` 跳转；
-- 文件切换。
+- entering submenus and going back up;
+- `gg`/`G`, search jumps, issue-list jumps, and `ga`/`gr` jumps;
+- file switches.
 
-新的前进导航会丢弃尚未访问的前进分支（类似浏览器）。历史每方向最多 100 条。
+A new forward navigation discards forward branches that have not been visited (like a browser). History holds at most 100 entries per direction.
 
-## 根屏退出流程
+## Root screen exit flow
 
-在面包屑为 `$` 的根菜单按 `esc`/`q`：
+Pressing `esc`/`q` in the root menu whose breadcrumb is `$`:
 
-1. 有待消费的 `g` 组合 → 只清空缓冲。
-2. 有连选/多选标记 → 只清空选区，留在编辑器。
-3. 没有未保存改动 → 直接退出，stdout `No changes, nothing written`，exit 0。
-4. 有未保存改动 → 询问 `Save changes? (y/n)`（多文件且有多个改动时是 `Save changes in N files? (y/n)`）：
-   - `y`/`enter`/`space`：保存并退出；校验失败进入错误列表，`--force` 下可强存。
-   - `n`：放弃修改退出，exit 130，stdout `Aborted, no changes written`。
-   - `esc`：取消询问，留在编辑器。
+1. A pending `g` combination → only clears the buffer.
+2. Range-select / multi-select marks → only clears the selection and stays in the editor.
+3. No unsaved changes → exits directly, stdout `No changes, nothing written`, exit 0.
+4. Unsaved changes → asks `Save changes? (y/n)` (with multiple files and multiple changes, `Save changes in N files? (y/n)`):
+   - `y`/`enter`/`space`: saves and quits; on validation failure, enters the error list, where `--force` allows force-saving.
+   - `n`: discards the changes and quits, exit 130, stdout `Aborted, no changes written`.
+   - `esc`: cancels the prompt and stays in the editor.
 
-`esc`/`q` 在子菜单先取消活的选区，没有选区时返回上一级，不会退出程序。
+In submenus, `esc`/`q` first cancels any active selection; with no selection, it goes up one level and never quits the program.
 
-## 磁盘文件变更检测
+## On-disk file change detection
 
-编辑器空闲时（输入轮询的间隙，约 250ms 一次）会核对**当前活动文件**在磁盘上的修改时间与大小，多文件会话只监视活动文件：
+When the editor is idle (in the gaps between input polls, about once per 250ms), it checks the on-disk modification time and size of the **currently active file**; multi-file sessions watch only the active file:
 
-- 磁盘内容与记录不一致且没有 overlay 打开时，弹出确认框 `<路径> changed on disk. Reload? (y/n)`：
-  - `y`/`enter`/`space`：从磁盘重新加载。schema 保持不变，无 schema 的文件按新内容重建根菜单；光标回到根层，修改基线重置为磁盘内容（修改标记清零；撤销栈保留，`u` 可撤销这次重载）。解析失败则保留内存版本并提示 `Reload failed: …`。
-  - `n`/`esc`：继续编辑内存中的版本；这份磁盘内容不再重复询问，下次外部变更时才会再次询问。
-- 自己的保存（`ctrl+s`/`w`/`wa` 等）会刷新记录，不触发询问。
-- 文件被删除时不询问：内存中的内容仍可编辑，保存会重建文件。
-- 任何 overlay（输入、选择器、确认框等）打开期间暂停检测，询问不会抢占正在使用的界面。
-
+- When the disk content differs from the record and no overlay is open, a confirmation dialog pops up: `<path> changed on disk. Reload? (y/n)`:
+  - `y`/`enter`/`space`: reloads from disk. The schema stays the same; for schema-less files, the root menu is rebuilt from the new content; the cursor returns to the root level and the modification baseline resets to the disk content (modification marks are cleared; the undo stack is kept, and `u` can undo this reload). If parsing fails, the in-memory version is kept and `Reload failed: …` is shown.
+  - `n`/`esc`: keeps editing the in-memory version; that disk content is not asked about again — the prompt reappears only on the next external change.
+- The editor's own saves (`ctrl+s`/`w`/`wa` etc.) refresh the record and do not trigger the prompt.
+- When the file is deleted, there is no prompt: the in-memory content remains editable, and saving recreates the file.
+- Detection is paused while any overlay (inputs, pickers, confirmation dialogs, etc.) is open; the prompt never preempts an interface that is in use.

@@ -3328,6 +3328,55 @@ fn pty_mouse_err_list_row_click_jumps() {
     assert_eq!(read_json(&cfg)["srv"]["port"], json!("x"));
 }
 
+/// After reloading a file from disk, undo/redo keep working: `u` first
+/// undoes the post-reload edit, then reverts the reload itself back to the
+/// pre-reload content.
+#[test]
+fn pty_reload_keeps_undo_redo_usable() {
+    let dir = mktemp();
+    let cfg = dir.path().join("reload.json");
+    write_file(&cfg, r#"{"name":"old"}"#);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(
+        &[cfg_arg.as_str()],
+        &[("JSE_CATALOG_URL", "http://127.0.0.1:1/catalog.json")],
+        &cache,
+    ) else {
+        return;
+    };
+    let (_, off) = pty.wait_frame("root", 0, &["name", "old", "↑/↓ move"]);
+    pty.pause(Duration::from_millis(200));
+
+    // external change + reload
+    write_file(&cfg, r#"{"name":"fresh"}"#);
+    pty.wait_frame("reload question", off, &["changed on disk"]);
+    pty.send(b"y");
+    pty.wait_frame("reloaded", off, &["fresh"]);
+    pty.pause(Duration::from_millis(200));
+
+    // edit the reloaded value: enter, type, commit
+    pty.send(b"\r");
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"zzz\r");
+    pty.wait_frame("edited", off, &["zzz"]);
+
+    // undo 1: back to the reloaded content
+    pty.send(b"u");
+    pty.wait_frame("undo edit", off, &["fresh"]);
+    // undo 2: back to the pre-reload content
+    pty.send(b"u");
+    pty.wait_frame("undo reload", off, &["old"]);
+    // redo re-applies the reload
+    pty.send(b"\x12");
+    pty.wait_frame("redo reload", off, &["fresh"]);
+    pty.send(b"\x13"); // ctrl+s
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+    assert_eq!(read_json(&cfg), json!({"name": "fresh"}));
+}
+
 /// Fuzzy autocomplete: typing a subsequence ("outp") lists and applies the
 /// "out-proxy" suggestion.
 #[test]
@@ -3361,6 +3410,43 @@ fn pty_mouse_fuzzy_completion_applies_subsequence_match() {
     pty.send(b"\x03");
     pty.wait_exit(130);
     assert_eq!(read_json(&cfg)["proxy"], json!("out-proxy"));
+}
+
+/// Wheel over an enum dropdown walks the candidates: down = next option,
+/// up = previous (the edit opens prefilled on the current value).
+#[test]
+fn pty_mouse_enum_wheel_cycles_candidates() {
+    let dir = mktemp();
+    let schema = dir.path().join("wheel.schema.json");
+    let cfg = dir.path().join("wheel.json");
+    write_file(
+        &schema,
+        r#"{"type":"object","properties":{"color":{"enum":["red","green","blue"]}}}"#,
+    );
+    write_file(&cfg, r#"{"color": "green"}"#);
+    let schema_arg = arg(&schema);
+    let cfg_arg = arg(&cfg);
+    let cache = mktemp();
+    let Some(mut pty) = pty_or_skip(&["-s", &schema_arg, &cfg_arg], &[], &cache) else {
+        return;
+    };
+    let (_, off) = pty.wait_frame("root", 0, &["color", "green", "↑/↓ move"]);
+    pty.pause(Duration::from_millis(200));
+
+    pty.send(b"\r"); // open the enum dropdown prefilled on green
+    pty.wait_frame("dropdown open", off, &["red"]); // options are listed
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\x1b[<65;10;5M"); // wheel down: blue
+    pty.pause(Duration::from_millis(300));
+    pty.send(b"\x1b[<64;10;5M"); // wheel up: back to green
+    pty.pause(Duration::from_millis(300));
+    pty.send(b"\x1b[<64;10;5M"); // wheel up: red
+    pty.pause(Duration::from_millis(300));
+    pty.send(b"\r\x13"); // commit + save
+    pty.pause(Duration::from_millis(200));
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+    assert_eq!(read_json(&cfg)["color"], json!("red"));
 }
 
 /// Hovering the mouse over menu rows moves the selection cursor with it
