@@ -80,38 +80,20 @@ impl App {
             None => Vec::new(),
         };
         // Removed array elements have no row of their own (the doc-length
-        // generated menu drops them): paint their kind onto every current
-        // row from the removed slot to the end of the array — those are the
-        // positions the deletion touched. Other kinds propagate to the path
-        // and its ancestors only (container rows aggregate their subtree;
-        // sibling element rows match by their own exact paths).
+        // generated menu drops them): their mark lands on the row that now
+        // occupies the removed slot, when the array still has a row there.
+        // Other kinds propagate to the path and its ancestors only
+        // (container rows aggregate their subtree).
         let mut entries: Vec<(Vec<PathSeg>, u8)> = Vec::new();
         {
-            let doc = &self.fs().doc;
             for (path, kind) in &marks {
                 let bit = match kind {
                     DiffKind::Added => DIFF_ADDED,
                     DiffKind::Removed => DIFF_REMOVED,
                     DiffKind::Modified => DIFF_MODIFIED,
                 };
-                match (kind, path.last()) {
-                    (DiffKind::Removed, Some(PathSeg::Idx(i))) => {
-                        let prefix = &path[..path.len() - 1];
-                        let len = doc.array_len(prefix);
-                        for j in *i as usize..len {
-                            let mut p = prefix.to_vec();
-                            p.push(PathSeg::Idx(j));
-                            entries.push((p, bit));
-                        }
-                        for k in 0..prefix.len() {
-                            entries.push((path[..k].to_vec(), bit));
-                        }
-                    }
-                    _ => {
-                        for k in 0..=path.len() {
-                            entries.push((path[..k].to_vec(), bit));
-                        }
-                    }
+                for k in 0..=path.len() {
+                    entries.push((path[..k].to_vec(), bit));
                 }
             }
         }

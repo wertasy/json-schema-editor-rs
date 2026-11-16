@@ -87,7 +87,7 @@ static AGENTS: LazyLock<parking_lot::Mutex<HashMap<String, ureq::Agent>>> =
 // The progress state lives in crate::progress (updated here, read by the
 // UI); see crate::progress::progress.
 
-use crate::progress::{ProgressGuard, progress_begin, progress_end, progress_tick, progress_total};
+use crate::progress::{ProgressGuard, progress_begin, progress_tick, progress_total};
 
 /// hostOf returns the host part of an absolute http(s) URL.
 #[doc(hidden)]
