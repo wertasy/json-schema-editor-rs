@@ -647,3 +647,55 @@ pub(crate) fn pinned_one_of_menu_id(
     synth.insert(SynthKey::Pinned(node, variant), id);
     id
 }
+
+/// variantContains reports whether target is one of the oneOf node's
+/// variants (nested groups included).
+pub(crate) fn variant_contains(schema: &Schema, node: FormNodeId, target: FormNodeId) -> bool {
+    if schema.nodes[node as usize].kind != Kind::OneOf {
+        return false;
+    }
+    schema.nodes[node as usize].variants.iter().any(|&v| {
+        v == target
+            || (schema.nodes[v as usize].kind == Kind::OneOf && variant_contains(schema, v, target))
+    })
+}
+
+/// variantLabel renders a variant for the picker's bottom information line:
+/// its type name (when it has one) plus the structural signature.
+pub(crate) fn variant_label(schema: &Schema, v: FormNodeId) -> String {
+    let f = &schema.nodes[v as usize];
+    let sig = variant_signature(schema, Some(v));
+    if f.title.is_empty() {
+        sig
+    } else if f.title.eq_ignore_ascii_case(&sig) {
+        f.title.clone()
+    } else {
+        format!("{} {}", f.title, sig)
+    }
+}
+
+/// schema_accepts_string reports whether a schema node can hold an arbitrary
+/// string: a text scalar (typed or unconstrained), an enum, an unconstrained
+/// raw/any-JSON field, or a oneOf group with such a leaf. `seen` breaks
+/// recursive schema references.
+pub(crate) fn schema_accepts_string(
+    schema: &Schema,
+    node: FormNodeId,
+    seen: &mut HashSet<FormNodeId>,
+) -> bool {
+    if !seen.insert(node) {
+        return false;
+    }
+    let n = &schema.nodes[node as usize];
+    match n.kind {
+        Kind::Scalar => n.json_type.is_empty() || n.json_type == "string",
+        Kind::Enum => true,
+        // A raw field takes any JSON value; null-only raw does not.
+        Kind::Raw => !n.null_only,
+        Kind::OneOf => n
+            .variants
+            .iter()
+            .any(|&v| schema_accepts_string(schema, v, seen)),
+        _ => false,
+    }
+}

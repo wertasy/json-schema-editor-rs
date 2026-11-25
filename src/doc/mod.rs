@@ -1,5 +1,6 @@
 //! Document layer: format-agnostic tree model (jsondoc), JSONC comments
-//! (jsoncdoc), YAML (yamldoc), and the codec registry (docfmt).
+//! (jsoncdoc), YAML (yamldoc), clipboard paste classification (paste), and
+//! the codec registry (docfmt).
 //!
 //! The codec layer is the trait-ified version of Go's docfmt.Register /
 //! docfmt.ForFormat: adding a format is one `impl Codec` plus one entry in
@@ -11,8 +12,15 @@ use crate::paths::file_ext;
 
 pub mod jsoncdoc;
 pub mod jsondoc;
+pub mod paste;
 pub mod tomldoc;
 pub mod yamldoc;
+
+/// jsondoc's fixture tests parse through jsoncdoc's strict entry; keeping
+/// them in a sibling module (not inside jsondoc.rs) preserves the
+/// one-directional jsoncdoc → jsondoc arena dependency.
+#[cfg(test)]
+mod jsondoc_tests;
 
 pub use jsondoc::{
     CopyMode, Doc, DocError, Member, NodeData, NodeId, PathSeg, Value, append_idx, append_key,
@@ -379,7 +387,7 @@ impl Codec for JsoncCodec {
     }
 
     fn parse_value(&self, text: &str) -> Result<Doc, DocError> {
-        jsondoc::parse(text)
+        jsoncdoc::parse_strict(text)
     }
 
     fn write_value(&self, doc: &Doc, id: NodeId) -> Result<String, DocError> {

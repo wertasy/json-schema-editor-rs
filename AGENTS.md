@@ -39,6 +39,8 @@ src/doc/             leaf layer (may only use crate::doc and crate::paths)
   jsondoc.rs         arena document tree; order-preserving; exact numeric literals
                      (CopyMode, append_key/idx, encode_value, scalar_text)
   jsoncdoc.rs        JSONC parse + comment capture/write
+  paste.rs           clipboard-text paste classification (members/items/single
+                     value) for P and plain-text pastes
   yamldoc/           YAML parse (comments, anchors, merge keys) + block emitter
   tomldoc/           TOML parse (tables, dotted keys, table arrays, comments) + emitter
   mod.rs             Codec trait (label/raw_ext/parse_value/write_value + defaults), FORMATS, Meta
@@ -47,15 +49,22 @@ src/catalog.rs       SchemaStore catalog load + fileMatch glob matching
 src/smodel.rs        JSON Schema -> form tree (FormNode arena); degradation to raw
 src/validate.rs      save-time validation via jsonschema; document-path error rendering
 src/ui/
-  mod.rs             FileSession/Options/Outcome, FileState types, MenuState, ValidateFn
-  menu.rs            App state, event loop, overlay enum/routing, styles, help text
+  mod.rs             FileSession/Options/Outcome, MenuState/MenuCtx, ValidateFn
+  state.rs           shared UI state: App, FileState, the Overlay enum and all
+                     overlay states, the Msg key protocol, and the pure
+                     helpers (anchors/merges, cursor/stack repair, diff
+                     badges) that menu/keys/files operate on
+  menu.rs            App construction, event loop, render entry, status/help
+                     text, clipboard/external-tool plumbing
   keys/              key dispatcher split by feature:
-    mod.rs           input bursts, schema switching, list mode, motions, selection
+    mod.rs           event entry (update/dispatch_key/route_key), input
+                     bursts, save flow, schema switching, list mode, motions,
+                     selection
     edit.rs          field editing, arrays, oneOf, value completion
-    clipboard.rs     copy/cut + paste
+    clipboard.rs     copy/cut + paste, system clipboard IO
     search.rs        jumps, document search, anchors, merge keys
-    overlays.rs      overlay handlers, macros, external $EDITOR
-    render.rs        list/overlay rendering
+    overlays.rs      overlay handlers, macros
+    render.rs        list/overlay rendering, ANSI style layer (`style`)
   rows/              pure row model split by feature:
     mod.rs           kinds, row construction, merge hooks
     summary.rs       value summaries
@@ -65,21 +74,22 @@ src/ui/
     issues.rs        unknown-key issues
     filter.rs        search filtering
     issue_parse.rs   validator-message parsing
-  util.rs            wrap_cursor/page_cursor shared by every list
-  files.rs           per-file state, multi-file switching, batch save
+  util.rs            wrap_cursor/page_cursor and terminal-cell text measuring
+                     shared by every list
+  files.rs           file switching, reload/save wiring, batch save
   history.rs         undo/redo snapshots (100 steps)
   nav.rs             back/forward location history (100 steps)
   widgets.rs         TextInput/TextArea and schema value apply/validate helpers
-  accessible.rs      --accessible line protocol
-  lineio.rs          one-line-per-read stdin reader
+  accessible.rs      --accessible line protocol + one-line-per-read stdin
+                     reader (former lineio.rs)
   schema_picker.rs   SchemaStore picker (TUI + accessible)
   command.rs         vi-style `:` grammar: builtins (w/wa/wq/waq, q/q!), shell
-                     escapes, cursor-aware completion (bash-completion for
-                     `!` arguments), `%` expansion
+                     escapes and their execution (former shell.rs: `r !`
+                     stdout insert, `a !` line append, `w !`
+                     document-to-stdin, `!` execute), cursor-aware completion
+                     (bash-completion for `!` arguments), `%` expansion
   cmd_history.rs     persistent `:` command history file (load/store;
                      path arrives via Options)
-  shell.rs           shell execution: `r !` stdout insert, `a !` line append,
-                     `w !` document-to-stdin, `!` execute
 tests/
   arch.rs            A1–A7 architecture invariants (source scan)
   common/mod.rs      pty + run helpers
@@ -104,7 +114,7 @@ tests/
 ## UI invariants
 
 - Editing is **write-through** to the live document; there is no form submit. Saving only serializes the current document.
-- Exactly one overlay can be open: `App.overlay: Option<Overlay>`. Opening a surface must close/replace the previous one. Overlay routing order is in `menu.rs::route_key`; update history `Inputs`/`list_mode` predicates when adding a surface.
+- Exactly one overlay can be open: `App.overlay: Option<Overlay>`. Opening a surface must close/replace the previous one. Overlay routing order is in `keys::route_key`; update history `Inputs`/`list_mode` predicates when adding a surface.
 - The focused description preview merges the schema `description` with the document comment (format meta, read through `Options::comment_at`) and is rendered as separate colored blocks (`DescSource::Schema`/`Comment`); when collapsed, each block is capped at `menu::DESC_BLOCK_PREVIEW_LINES` with an emphasized trailing `…`. `c` expands it transiently (`desc_expanded`; any other key folds it first) or opens `Overlay::Comment` when it cannot fit one screen; that page consumes keys (j/k scrolling, c/q/esc close) and must stay out of `list_mode`. `C` opens `Overlay::CommentEdit` for the focused row (only keys present in the document; empty buffer adds a comment, empty result removes it); applying with ctrl+s writes through `Options::set_comment` into the session meta (format directives preserved), and the next save emits it.
 - Per-file state lives in `FileState` (`files[cur]`): menu stack, cursor, selection, undo/redo, baseline, live issues, parked search/issues returns, navigation origin. Switching files is an index switch; do not add global fields that should be per-file.
 - Undo is snapshot-per-key: the dispatcher snapshots before a key and pushes only when the document changed. Any new mutating key must go through that path; do not mutate the document outside the dispatcher without ensuring history/issue refresh.

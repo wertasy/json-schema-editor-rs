@@ -13,19 +13,21 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::doc::jsondoc::path_string;
 use crate::doc::{Doc, PathSeg};
-use crate::smodel::Schema;
+use crate::smodel::{FormNodeId, Schema};
 use crate::ui::history::History;
 use crate::ui::menu::{
-    App, ConfirmState, FilePickState, FilterAction, IssuesState, Msg, Overlay, SearchState,
+    App, ConfirmAction, ConfirmState, ErrsState, FilePickState, Overlay, nodes_equal,
+    remap_state_cursor,
 };
-use crate::ui::rows::{SynthKey, menu_kind_for, seed_variant_cursor};
-use crate::ui::util::wrap_cursor;
-use crate::ui::{FileSession, Issue, MenuState};
-
-/// diskStat is the coarse file identity the idle loop watches: modification
-/// time plus length (the length guards filesystems with coarse timestamps).
-pub type DiskStat = (std::time::SystemTime, u64);
+use crate::ui::nav::{Nav, NavGo};
+use crate::ui::rows::{
+    dynamic_variants, match_variant_list, menu_kind_for, parse_issue, pinned_one_of_menu,
+    seed_variant_cursor, unknown_key_issues,
+};
+use crate::ui::state::{DiskStat, FileState, SynthKey};
+use crate::ui::{FileSession, Issue, MenuKind, MenuState, Options, Row};
 
 /// diskStatOf stats one session file; None when it cannot be stat'ed
 /// (missing file, empty path).
@@ -53,66 +55,6 @@ pub fn root_stack(schema: &Schema, doc: &Doc) -> Vec<MenuState> {
     };
     seed_variant_cursor(schema, &mut st, doc);
     vec![st]
-}
-
-/// fileState is the per-file half of the Go listModel: everything that
-/// belongs to one document.
-pub struct FileState {
-    /// the form tree of this file (arena; Go: `model *smodel.FormNode`)
-    pub schema: Schema,
-    pub doc: crate::doc::Doc,
-    /// Format state for a faithful save: comments/directives and the YAML
-    /// alias count. Owned here so one file's state never leaks to another.
-    pub meta: crate::doc::Meta,
-    /// The file's format codec (save, raw editors, schema directive).
-    pub codec: &'static dyn crate::doc::Codec,
-    pub opts: crate::ui::Options,
-    pub stack: Vec<MenuState>,
-    /// at least one successful write this session
-    pub saved: bool,
-    /// the last successful write skipped validation errors (--force)
-    pub with_errors: bool,
-    /// memoized synthesized schema nodes (Go: `menuCache`); keyed by the
-    /// rows::SynthKey identity that replaces Go's pointer memo
-    pub menu_cache: HashMap<SynthKey, crate::smodel::FormNodeId>,
-    /// undo/redo stacks (Go: `undoStack`/`redoStack`)
-    pub history: History,
-    /// loaded/last-saved snapshot for change marks
-    pub baseline: Option<crate::doc::Doc>,
-    /// a document comment was edited since the last save; comments live in
-    /// the format metadata, not the Doc baseline, so they need their own
-    /// dirty bit (the quit prompt and title marker consult it).
-    pub comments_dirty: bool,
-    /// live validation problems (refreshed after writes)
-    pub issues_now: Vec<Issue>,
-    /// validation error locations, marked on their rows
-    pub err_paths: Vec<Vec<PathSeg>>,
-    /// unknown-key warning locations (yellow marks)
-    pub warn_paths: Vec<Vec<PathSeg>>,
-    /// parked issues overlay: esc at the jump target returns here
-    pub issues_parked: Option<IssuesState>,
-    /// stack depth of the issue jump target
-    pub issues_return: usize,
-    /// stack captured when the issue jump parked the list
-    pub issues_origin: Option<Vec<MenuState>>,
-    /// stack captured when ga/gr jumped; None when inactive
-    pub jump_origin: Option<Vec<MenuState>>,
-    /// stack depth of the ga/gr landing
-    pub jump_return: usize,
-    /// parked search overlay state (jump landed, esc at return_depth reopens)
-    pub search_parked: Option<SearchState>,
-    /// adaptive ctrl+j/k ring: the changed paths from the last
-    /// replace/undo/redo, auto-landing on the first entry; any unrelated
-    /// document edit clears it
-    pub change_jump: Option<Vec<Vec<PathSeg>>>,
-    /// session info notices (aliases kept, schema source), dropped on the
-    /// first key press
-    pub startup: String,
-    /// the file's disk stat recorded at load and refreshed after each save,
-    /// reload or declined reload prompt; the idle loop re-stats the file and
-    /// opens the reload confirm when it drifted. None while the file does
-    /// not exist on disk (started empty) or cannot be stat'ed.
-    pub disk_stat: Option<DiskStat>,
 }
 
 impl FileState {
@@ -174,14 +116,7 @@ impl FileState {
 /// marks), and the first becomes the active one.
 pub fn new_app(files: Vec<FileSession>) -> App {
     let mut app = App::bare(files.into_iter().map(FileState::new).collect());
-    let n = app.files.len();
-    for i in 0..n {
-        app.cur = i;
-        let msgs = app.files[i].opts.load_errors.clone();
-        let items = app.live_issues(msgs);
-        app.set_issues(items);
-    }
-    app.cur = 0;
+    app.seed_file_issues();
     app
 }
 
@@ -208,16 +143,20 @@ impl SaveMode {
     }
 }
 
+/// issuesFrom parses validator messages into jumpable issues.
+pub fn issues_from(msgs: &[String]) -> Vec<Issue> {
+    msgs.iter()
+        .map(|s| Issue {
+            msg: s.clone(),
+            path: parse_issue(s),
+            flagged: crate::ui::rows::issue_flag_paths(s),
+            marks: Vec::new(),
+            warn: false,
+        })
+        .collect()
+}
+
 impl App {
-    /// The active file's state (Go: the listModel fields themselves).
-    pub fn fs(&self) -> &FileState {
-        &self.files[self.cur]
-    }
-
-    pub fn fs_mut(&mut self) -> &mut FileState {
-        &mut self.files[self.cur]
-    }
-
     /// switchFileState swaps the active file: an index change plus a
     /// defensive stack repair (documents never change while inactive, so
     /// the repair is a no-op).
@@ -227,6 +166,20 @@ impl App {
         }
         self.cur = i;
         self.repair_stack();
+    }
+
+    /// seedFileIssues computes every file's live issue list up front, so the
+    /// row marks are right the moment a file becomes active (new_app visits
+    /// each file by switching to it, then lands back on the first).
+    pub(crate) fn seed_file_issues(&mut self) {
+        let n = self.files.len();
+        for i in 0..n {
+            self.cur = i;
+            let msgs = self.files[i].opts.load_errors.clone();
+            let items = self.live_issues(msgs);
+            self.set_issues(items);
+        }
+        self.cur = 0;
     }
 
     /// switchToFile is the picker's enter: a jump in navigation terms — the
@@ -267,7 +220,7 @@ impl App {
         self.overlay = Some(Overlay::Confirm(ConfirmState {
             title: format!("{} changed on disk. Reload? (y/n)", path),
             hint: "y/enter/space reload from disk · n/esc keep editing".to_string(),
-            on_yes: Some(Box::new(move |m| m.reload_file(idx))),
+            on_yes: Some(ConfirmAction::ReloadFile(idx)),
             on_no: None,
         }));
         true
@@ -332,61 +285,6 @@ impl App {
             self.set_issues(items);
         }
         self.notice = format!("Reloaded {}", path);
-    }
-
-    /// keyFilePick drives the s-key file switcher: enter switches to the
-    /// highlighted file, esc closes without moving.
-    pub fn key_file_pick(&mut self, msg: &Msg, mut s: FilePickState) -> Option<Overlay> {
-        if s.filter.active {
-            return self.key_file_pick_search(msg, s);
-        }
-        let n = self.files.len();
-        if self.jump_keys(msg, &mut s.cursor, n) {
-            return Some(Overlay::FilePick(s));
-        }
-        match msg.key_str().as_str() {
-            "/" => s.filter.open(s.cursor),
-            "up" | "k" | "ctrl+k" => {
-                s.cursor = wrap_cursor(s.cursor, -1, n);
-            }
-            "down" | "j" | "ctrl+j" => {
-                s.cursor = wrap_cursor(s.cursor, 1, n);
-            }
-            "pgdown" | "ctrl+f" => {
-                let page = self.overlay_page_size(0, false);
-                s.cursor = (s.cursor + page).min(n.saturating_sub(1));
-            }
-            "pgup" | "ctrl+b" => {
-                let page = self.overlay_page_size(0, false);
-                s.cursor = s.cursor.saturating_sub(page);
-            }
-            "enter" => {
-                self.switch_to_file(s.cursor);
-                return None;
-            }
-            "esc" => return None,
-            _ => {}
-        }
-        Some(Overlay::FilePick(s))
-    }
-
-    /// keyFilePickSearch consumes keys while the file-picker filter is
-    /// active.
-    fn key_file_pick_search(&mut self, msg: &Msg, mut s: FilePickState) -> Option<Overlay> {
-        let n = self.file_pick_indices(&s).count();
-        let total = self.files.len();
-        let page = self.overlay_page_size(0, true);
-        if matches!(
-            s.filter.key(msg, &mut s.cursor, n, total, page),
-            FilterAction::Commit
-        ) {
-            let idx = self.file_pick_indices(&s).nth(s.cursor);
-            if let Some(i) = idx {
-                self.switch_to_file(i);
-                return None;
-            }
-        }
-        Some(Overlay::FilePick(s))
     }
 
     /// filePickIndices lists the files matching the picker query.
@@ -515,5 +413,480 @@ impl App {
             }
         }
         (saved, forced, paths)
+    }
+
+    /// bare builds the shell other constructors fill in (files already
+    /// converted to FileState). The `:` command history is seeded from the
+    /// first file's Options::cmd_history_file, so up/down recall the
+    /// previous sessions' commands.
+    pub fn bare(files: Vec<FileState>) -> App {
+        let cmd_history = files
+            .first()
+            .and_then(|f| f.opts.cmd_history_file.as_deref())
+            .map(crate::ui::cmd_history::load)
+            .unwrap_or_default();
+        App {
+            files,
+            cur: 0,
+            width: 80,
+            height: 24,
+            overlay: None,
+            fast_move: None,
+            hide_empty: false,
+            desc_expanded: false,
+            notice: String::new(),
+            cmd_buf: Vec::new(),
+            recording: false,
+            rec_buf: Vec::new(),
+            macro_buf: Vec::new(),
+            nav: Nav::default(),
+            aborted: false,
+            exiting: false,
+            ring_keep: false,
+            exec_editor: false,
+            pending_edit: None,
+            cmd_history,
+            builtin_clipboard: None,
+            mouse_targets: Vec::new(),
+            diff_agg: std::collections::HashMap::new(),
+            diff_added: Vec::new(),
+            pending_catalog: None,
+            pending_schema: None,
+        }
+    }
+
+    pub fn doc(&self) -> &Doc {
+        &self.fs().doc
+    }
+
+    pub fn opts(&self) -> &Options {
+        &self.fs().opts
+    }
+
+    /// typing reports whether a text input has focus.
+    pub fn typing(&self) -> bool {
+        if self.overlay.as_ref().is_some_and(Overlay::typing) {
+            return true;
+        }
+        if self.fast_move.is_some() {
+            return true;
+        }
+        self.top().is_some_and(|st| st.filter.active)
+    }
+
+    /// listMode reports whether the plain menu key table owns the keyboard.
+    pub fn list_mode(&self) -> bool {
+        self.overlay.is_none() && !self.typing()
+    }
+
+    /// dirty reports whether anything in the document differs from the
+    /// baseline.
+    pub fn dirty(&self) -> bool {
+        let f = self.fs();
+        if f.comments_dirty {
+            return true;
+        }
+        match &f.baseline {
+            Some(base) => !nodes_equal(&f.doc, Some(f.doc.root), base, Some(base.root)),
+            None => false,
+        }
+    }
+
+    /// setIssues replaces the live validation problem list and its row marks.
+    pub fn set_issues(&mut self, items: Vec<Issue>) {
+        let mut err_paths = Vec::new();
+        let mut warn_paths = Vec::new();
+        for it in &items {
+            let mut marks: Vec<Vec<PathSeg>> = it.marks.clone();
+            if marks.is_empty() {
+                if let Some(p) = &it.path {
+                    marks = vec![p.clone()];
+                }
+            }
+            for p in marks {
+                if p.is_empty() && it.path.is_none() {
+                    // document root: the status row carries the count
+                    continue;
+                }
+                if p.is_empty() {
+                    continue;
+                }
+                if it.warn {
+                    warn_paths.push(p);
+                } else {
+                    err_paths.push(p);
+                }
+            }
+        }
+        let f = self.fs_mut();
+        f.issues_now = items;
+        f.err_paths = err_paths;
+        f.warn_paths = warn_paths;
+    }
+
+    /// liveIssues combines validator messages with the editor's unknown-key
+    /// warnings for the live issue list. A key the validator already flags
+    /// (e.g. additionalProperties) is not warned about twice.
+    pub fn live_issues(&mut self, msgs: Vec<String>) -> Vec<Issue> {
+        let mut items = issues_from(&msgs);
+        let warnings = {
+            let f = self.fs();
+            unknown_key_issues(&f.schema, &f.doc)
+        };
+
+        // An additionalProperties message names keys in map iteration order,
+        // and a failed oneOf branch also names fields that are valid in the
+        // matched variant. Mark only the names that really are schema-unknown
+        // keys in the edited value; when none are, mark the object itself.
+        for it in items.iter_mut() {
+            if it.warn || !it.msg.contains("additional properties ") {
+                continue;
+            }
+            let Some((loc, _)) = crate::ui::rows::split_issue(&it.msg) else {
+                continue;
+            };
+            let listed: std::collections::HashSet<String> =
+                it.flagged.iter().map(|p| path_string(p)).collect();
+            let mut actual: Vec<Vec<PathSeg>> = Vec::new();
+            for w in &warnings {
+                if let Some(wp) = &w.path {
+                    if listed.contains(&path_string(wp)) {
+                        actual.push(wp.clone());
+                    }
+                }
+            }
+            if actual.is_empty() {
+                it.path = Some(loc.clone());
+                it.flagged = vec![loc.clone()];
+                it.marks = vec![loc];
+            } else {
+                it.path = Some(actual[0].clone());
+                it.flagged = actual.clone();
+                it.marks = actual;
+            }
+        }
+
+        let mut flagged: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for it in &items {
+            for p in &it.flagged {
+                flagged.insert(path_string(p));
+            }
+            if let Some(p) = &it.path {
+                flagged.insert(path_string(p));
+            }
+        }
+        for w in warnings {
+            if let Some(wp) = &w.path {
+                if !flagged.contains(&path_string(wp)) {
+                    items.push(w);
+                }
+            }
+        }
+        items
+    }
+
+    /// refreshIssues re-validates the document after a write so fixed
+    /// problems leave the list, the counts and the row marks — and new
+    /// problems appear immediately. Callers invoke it only when the document
+    /// changed. Without a validator the load-time list stays as loaded.
+    pub fn refresh_issues(&mut self) {
+        let validate = match &self.opts().validate {
+            Some(v) => v.clone(),
+            None => return,
+        };
+        // The root menu gains or loses its issue status row with the problem
+        // count; keep the cursor on the row it was on while the list shifts.
+        let root = self.fs().stack.first().cloned();
+        let before = root
+            .clone()
+            .map(|r| self.menu_rows_state(&r))
+            .unwrap_or_default();
+        let msgs = validate(&self.doc());
+        let items = self.live_issues(msgs);
+        self.set_issues(items);
+        let Some(root) = root else { return };
+        let after = self.menu_rows_state(&root);
+        if after.len() != before.len() {
+            remap_state_cursor(&mut self.files[self.cur].stack[0], &before, &after);
+        }
+    }
+
+    pub fn repair_stack(&mut self) {
+        loop {
+            let top = match self.top() {
+                Some(t) => t,
+                None => return,
+            };
+            if self.fs().stack.len() <= 1 {
+                break;
+            }
+            let p = top.path.clone();
+            if p.is_empty() || self.doc().get(&p).is_some() {
+                break;
+            }
+            self.fs_mut().stack.pop();
+        }
+        let rows = self.menu_rows();
+        self.clamp_cursor(&rows);
+    }
+
+    /// clampStateCursor on the top state.
+    pub fn clamp_cursor(&mut self, rows: &[Row]) {
+        let max = rows.len().saturating_sub(1);
+        if let Some(st) = self.top_mut() {
+            st.cursor = st.cursor.min(max);
+        }
+    }
+
+    pub fn nav_snapshot(&self) -> crate::ui::nav::NavMark {
+        crate::ui::nav::nav_snapshot(&self.fs().stack, self.cur)
+    }
+
+    /// navForward records the location left behind by a forward relocation.
+    pub fn nav_forward(&mut self) {
+        let leaving = self.nav_snapshot();
+        self.nav.forward(leaving);
+    }
+
+    /// navBackStep records the location a back motion leaves behind.
+    pub fn nav_back_step(&mut self, leaving: crate::ui::nav::NavMark) {
+        let landing = self.nav_snapshot();
+        self.nav.back_step(leaving, &landing);
+    }
+
+    /// writeTo persists through opts.Save (target "") or opts.WriteTo (a W
+    /// path). A failed write surfaces as a notice and the session continues;
+    /// a successful session-file write refreshes the change-mark baseline.
+    pub fn write_to(&mut self, exit: bool, forced: bool, target: &str) {
+        if target.is_empty() {
+            let save = match &self.opts().save {
+                Some(s) => s.clone(),
+                None => {
+                    self.notice = "Write failed: no save target".to_string();
+                    return;
+                }
+            };
+            if let Err(e) = save(&self.doc(), &self.fs().meta) {
+                self.notice = format!("Write failed: {}", e);
+                return;
+            }
+            let f = self.fs_mut();
+            f.saved = true;
+            f.with_errors = forced;
+            f.baseline = Some(f.doc.clone()); // markers clear once saved
+            f.comments_dirty = false;
+            // our own write is not an external change: re-record the stat
+            f.disk_stat = disk_stat_of(&f.opts.path);
+            if exit {
+                self.exiting = true;
+                return;
+            }
+            if !self.opts().path.is_empty() {
+                self.notice = format!("Write to {}", self.opts().path);
+                return;
+            }
+            self.notice = "Saved".to_string();
+            return;
+        }
+        let write_to = match &self.opts().write_to {
+            Some(w) => w.clone(),
+            None => {
+                self.notice = "Write failed: no write-to target".to_string();
+                return;
+            }
+        };
+        if let Err(e) = write_to(target, &self.doc(), &self.fs().meta) {
+            self.notice = format!("Write failed: {}", e);
+            return;
+        }
+        self.notice = format!("Wrote to {}", target);
+    }
+
+    /// rebuildSchemaLessRoot re-derives the runtime root after a whole-document
+    /// raw edit swapped the root type (object ↔ array ↔ scalar): the
+    /// schema-less model is a snapshot of the loaded shape, so a stale root
+    /// would offer the wrong menu. Synth nodes and the stack are rebuilt
+    /// against the new model.
+    pub(crate) fn rebuild_schema_less_root(&mut self) {
+        let f = self.fs_mut();
+        f.schema = crate::smodel::untyped(&f.doc);
+        let root = f.schema.root;
+        let kind = crate::ui::rows::menu_kind_for(&f.schema, root);
+        f.menu_cache.clear();
+        f.stack.truncate(1);
+        if let Some(st) = f.stack.first_mut() {
+            st.kind = kind;
+            st.node = root;
+            st.path.clear();
+            st.cursor = 0;
+            st.offset = 0;
+            st.variant_of = None;
+            st.one_of = None;
+            st.sel.clear();
+            st.visual = false;
+            st.vanchor = 0;
+            st.filter.ti = Default::default();
+            st.filter.active = false;
+            st.filter.restore = 0;
+        }
+    }
+
+    /// openErrsOverlay shows validation errors (at most 15 lines, each
+    /// jumpable when it parses to a path); exit arms the --force y path to
+    /// end the session after the write.
+    pub fn open_errs_overlay(&mut self, errs: Vec<String>, exit: bool, target: &str) {
+        const MAX_SHOWN: usize = 15;
+        let mut lines = Vec::new();
+        let mut paths = Vec::new();
+        for (i, e) in errs.iter().enumerate() {
+            if i == MAX_SHOWN {
+                lines.push(format!("… and {} more", errs.len() - MAX_SHOWN));
+                paths.push(None);
+                break;
+            }
+            lines.push(e.clone());
+            paths.push(parse_issue(e));
+        }
+        self.overlay = Some(Overlay::Errs(ErrsState {
+            lines,
+            paths,
+            cursor: 0,
+            exit,
+            target: target.to_string(),
+            filter: Default::default(),
+        }));
+    }
+
+    /// navGo moves one step along the navigation trail.
+    pub fn nav_go(&mut self, back: bool) {
+        let current = self.nav_snapshot();
+        match self.nav.go(back, &current) {
+            NavGo::Stay(notice) => self.notice = notice.to_string(),
+            NavGo::Jump(mk) => self.nav_restore(mk),
+        }
+    }
+
+    /// navRestore swaps in a frozen stack (nav.rs contract: switch file,
+    /// drop parked returns, repair).
+    pub fn nav_restore(&mut self, mk: crate::ui::nav::NavMark) {
+        if self.files.len() > 1 && mk.file != self.cur {
+            self.switch_file_state(mk.file); // plain swap: navGo already moved the trails
+        }
+        self.fs_mut().stack = mk.stack;
+        let f = self.fs_mut();
+        f.jump_origin = None;
+        f.jump_return = 0;
+        f.search_parked = None;
+        f.issues_parked = None;
+        self.repair_stack();
+    }
+
+    /// dynamicMenu builds the item menu of an all-object oneOf: the merged
+    /// union menu while the value is unset or ambiguous, the matched
+    /// variant's menu once exactly one candidate remains.
+    pub fn dynamic_menu(&mut self, node: FormNodeId, path: Vec<PathSeg>) -> MenuState {
+        let mut st = MenuState {
+            kind: MenuKind::Object,
+            node,
+            path,
+            cursor: 0,
+            offset: 0,
+            variant_of: Some(node),
+            one_of: None,
+            sel: std::collections::HashSet::new(),
+            visual: false,
+            vanchor: 0,
+            filter: Default::default(),
+        };
+        let val = self.doc().get(&st.path);
+        let cands = {
+            let schema = &self.fs().schema;
+            let variants = dynamic_variants(schema, node).unwrap_or_default();
+            match_variant_list(schema, &variants, &self.doc(), val)
+        };
+        st.node = if cands.len() == 1 {
+            let v = cands[0];
+            self.cached_menu_pinned(node, v)
+        } else {
+            self.cached_menu_merged(node)
+        };
+        st
+    }
+
+    /// refreshVariantMenu re-runs variant inference on every dynamic item
+    /// menu in the stack after each key press: the node flips between merged
+    /// and pinned as the value disambiguates. The cursor follows the field
+    /// it was on (matched by schema key), so flipping via the discriminator
+    /// keeps it selected.
+    pub fn refresh_variant_menu(&mut self) {
+        for i in 0..self.fs().stack.len() {
+            let (variant_of, path, node) = {
+                let st = &self.fs().stack[i];
+                match st.variant_of {
+                    Some(v) => (v, st.path.clone(), st.node),
+                    None => continue,
+                }
+            };
+            let want = self.dynamic_menu(variant_of, path).node;
+            if want == node {
+                continue;
+            }
+            let key = self.cursor_key(i);
+            self.fs_mut().stack[i].node = want;
+            if !key.is_empty() {
+                if let Some(pos) = self.row_index_by_key(i, &key) {
+                    self.fs_mut().stack[i].cursor = pos;
+                }
+            }
+        }
+    }
+
+    /// cachedMenu pins the merged union menu for a oneOf node.
+    fn cached_menu_merged(&mut self, node: FormNodeId) -> FormNodeId {
+        if let Some(&id) = self.fs().menu_cache.get(&SynthKey::Merged(node)) {
+            return id;
+        }
+        let variants = dynamic_variants(&self.fs().schema, node).unwrap_or_default();
+        let id = crate::ui::rows::merged_one_of_menu(&mut self.fs_mut().schema, node, &variants);
+        self.fs_mut().menu_cache.insert(SynthKey::Merged(node), id);
+        id
+    }
+
+    /// cachedMenu pins one variant's menu with unionized discriminators.
+    fn cached_menu_pinned(&mut self, node: FormNodeId, variant: FormNodeId) -> FormNodeId {
+        if let Some(&id) = self.fs().menu_cache.get(&SynthKey::Pinned(node, variant)) {
+            return id;
+        }
+        let variants = dynamic_variants(&self.fs().schema, node)
+            .unwrap_or_else(|| self.fs().schema.nodes[node as usize].variants.clone());
+        let id = pinned_one_of_menu(&mut self.fs_mut().schema, &variants, variant);
+        self.fs_mut()
+            .menu_cache
+            .insert(SynthKey::Pinned(node, variant), id);
+        id
+    }
+
+    /// cursorKey returns the schema key of the row under the state's cursor.
+    fn cursor_key(&mut self, i: usize) -> String {
+        let st = self.fs().stack[i].clone();
+        let rows = self.menu_rows_state(&st);
+        let st = &self.fs().stack[i];
+        if st.cursor >= rows.len() {
+            return String::new();
+        }
+        rows[st.cursor]
+            .fn_
+            .map(|f| self.fs().schema.nodes[f as usize].key.clone())
+            .unwrap_or_default()
+    }
+
+    /// rowIndexByKey finds the first row of the state backed by the given key.
+    fn row_index_by_key(&mut self, i: usize, key: &str) -> Option<usize> {
+        let st = self.fs().stack[i].clone();
+        let rows = self.menu_rows_state(&st);
+        rows.iter().position(|r| {
+            r.fn_
+                .map_or(false, |f| self.fs().schema.nodes[f as usize].key == key)
+        })
     }
 }

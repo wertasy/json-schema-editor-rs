@@ -16,10 +16,6 @@ mod validate;
 mod version;
 
 #[cfg(test)]
-mod catalog_tests;
-#[cfg(test)]
-mod fetch_tests;
-#[cfg(test)]
 mod validate_tests;
 // Build-time-only helper (included by build.rs); tests live in the file.
 #[cfg(test)]

@@ -10,8 +10,7 @@
 use std::io::Write as _;
 
 use crate::catalog::Entry;
-use crate::ui::keys::{char_width, clip_display, display_width};
-use crate::ui::util::wrap_cursor;
+use crate::ui::util::{char_width, clip_display, display_width, wrap_cursor};
 use crate::ui::widgets::{Key, TextInput};
 
 /// PickOptions configures pick.
@@ -170,6 +169,13 @@ impl PickerModel {
         self.filtered = filter_entries(&self.entries, self.ti.value());
         self.cursor = 0;
         self.offset = 0;
+    }
+
+    /// set_viewport adopts the pty size. A pty can report a degenerate size
+    /// (0×0 while tearing down); the floor keeps the frame layout meaningful.
+    fn set_viewport(&mut self, w: u16, h: u16) {
+        self.width = (w as usize).max(1);
+        self.height = (h as usize).max(1);
     }
 
     fn view(&self) -> String {
@@ -341,8 +347,7 @@ fn pick_tui(entries: Vec<Entry>, filename: String, query: &str) -> Option<Entry>
         // bubbletea delivers an initial WindowSizeMsg; crossterm does not, so
         // query the pty size once before the first frame.
         if let Ok((w, h)) = crossterm::terminal::size() {
-            m.width = w as usize;
-            m.height = h as usize;
+            m.set_viewport(w, h);
         }
         loop {
             let mut out = std::io::stdout();
@@ -364,8 +369,7 @@ fn pick_tui(entries: Vec<Entry>, filename: String, query: &str) -> Option<Entry>
                             }
                         }
                         Ok(crossterm::event::Event::Resize(w, h)) => {
-                            m.width = w as usize;
-                            m.height = h as usize;
+                            m.set_viewport(w, h);
                         }
                         _ => {}
                     }
@@ -381,8 +385,7 @@ fn pick_tui(entries: Vec<Entry>, filename: String, query: &str) -> Option<Entry>
                         }
                     }
                     Ok(crossterm::event::Event::Resize(w, h)) => {
-                        m.width = w as usize;
-                        m.height = h as usize;
+                        m.set_viewport(w, h);
                     }
                     _ => {}
                 }
@@ -468,7 +471,7 @@ fn to_key(k: &crossterm::event::KeyEvent) -> PickerKey {
 /// cannot spin.
 pub fn pick_accessible(entries: &[Entry], opts: &PickOptions) -> Option<Entry> {
     let stdin = std::io::stdin();
-    let mut reader = crate::ui::lineio::LineReader::new(stdin.lock());
+    let mut reader = crate::ui::accessible::LineReader::new(stdin.lock());
     let mut out = std::io::stdout();
     let mut query = opts.query.clone();
     let _ = writeln!(out, "Select a schema for {}", opts.filename);

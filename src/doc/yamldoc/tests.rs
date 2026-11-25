@@ -3,10 +3,11 @@
 
 use super::*;
 use crate::doc::codec_for;
+use crate::doc::jsoncdoc;
 use crate::doc::jsondoc::{self, PathSeg};
 
 fn must_json(s: &str) -> Doc {
-    jsondoc::parse(s).expect("reference JSON must parse")
+    jsoncdoc::parse_strict(s).expect("reference JSON must parse")
 }
 
 fn write_string(doc: &Doc, meta: Option<&Meta>) -> String {

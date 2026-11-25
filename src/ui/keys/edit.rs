@@ -426,10 +426,7 @@ impl App {
     /// openRawAt arms the built-in raw textarea overlay.
     pub(super) fn open_raw_at(&mut self, fn_: Option<FormNodeId>, path: Option<Vec<PathSeg>>) {
         let mut ta = TextArea::new();
-        let w = self.width.saturating_sub(4).clamp(20, 100);
-        let h = self.height.saturating_sub(6).clamp(3, 24);
-        ta.set_width(w as u16);
-        ta.set_height(h as u16);
+        ta.set_viewport_within(self.width as u16, self.height as u16);
         let codec = self.fs().codec;
         let mut verbatim_str = false;
         match &path {
@@ -438,7 +435,7 @@ impl App {
                 // turned multiline strings into "|" blocks whose alignment
                 // spaces landed in the editor and quoted values into quotes.
                 if let Some(cur) = self.doc().get(p) {
-                    if !is_null_val(self.doc(), cur) {
+                    if !is_null(self.doc(), cur) {
                         match self.doc().value(cur) {
                             Value::Str(text) => {
                                 ta.set_value(text);
@@ -720,12 +717,7 @@ impl App {
         self.overlay = Some(Overlay::Confirm(ConfirmState {
             title: "Remove this item? (y/n)".to_string(),
             hint: String::new(),
-            on_yes: Some(Box::new(move |m| {
-                let _ = m.fs_mut().doc.remove(&path);
-                if pop {
-                    m.fs_mut().stack.pop(); // back to the items menu
-                }
-            })),
+            on_yes: Some(ConfirmAction::RemoveItem { path, pop }),
             on_no: None,
         }));
     }
@@ -895,7 +887,7 @@ impl App {
             return false;
         }
         let items = f.schema.nodes[variant as usize].items;
-        if !schema_accepts_value_(&f.schema, items, &f.doc, Some(old)) {
+        if !schema_accepts_value(&f.schema, items, &f.doc, Some(old)) {
             return false;
         }
         let f = self.fs_mut();
@@ -943,45 +935,60 @@ impl App {
             self.overlay = Some(Overlay::Confirm(ConfirmState {
                 title: "Replace current value? (y/n)".to_string(),
                 hint: String::new(),
-                on_yes: Some(Box::new(move |m| {
-                    // a scalar that fits the target array's items becomes
-                    // element 0 (string → array[string], integer/number
-                    // likewise) instead of being dropped; it beats the
-                    // schema default, which would discard the typed value
-                    if let Some(vv) = variant {
-                        if m.wrap_scalar_element(vv, &path, old) {
-                            m.enter_variant_editor(vv, path, Some(one_of));
-                            return;
-                        }
-                    }
-                    let has_default = variant
-                        .map(|vv| m.fs().schema.nodes[vv as usize].default_)
-                        .flatten();
-                    match has_default {
-                        Some(d) if !is_null_val(&m.fs().schema.doc, d) => {
-                            let fi = m.cur;
-                            let f = &mut m.files[fi];
-                            let n = f.doc.copy_into(&f.schema.doc, d, CopyMode::Preserve);
-                            let _ = f.doc.set(&path, n);
-                        }
-                        _ if keep_slot || matches!(path.last(), Some(PathSeg::Idx(_))) => {
-                            // keep the slot while the new type's editor
-                            // fills it in
-                            let n = m.fs_mut().doc.new_null();
-                            let _ = m.fs_mut().doc.set(&path, n);
-                        }
-                        _ => {
-                            m.fs_mut().doc.remove(&path);
-                        }
-                    }
-                    m.enter_variant_editor(variant.expect("variant row"), path, Some(one_of));
-                })),
+                on_yes: Some(ConfirmAction::ReplaceValue {
+                    variant,
+                    path,
+                    one_of,
+                    old,
+                    keep_slot,
+                }),
                 on_no: None,
             }));
             return;
         }
         let variant = r.variant.expect("variant row without node");
         self.enter_variant_editor(variant, r.path.clone(), Some(st.node));
+    }
+
+    /// applyReplaceValue runs the ReplaceValue confirm: replace the value at
+    /// `path` with `variant`'s editor. A scalar that fits the target array's
+    /// items becomes element 0 (string → array[string], integer/number
+    /// likewise) instead of being dropped; it beats the schema default,
+    /// which would discard the typed value.
+    pub(super) fn apply_replace_value(
+        &mut self,
+        variant: Option<FormNodeId>,
+        path: Vec<PathSeg>,
+        one_of: FormNodeId,
+        old: Option<NodeId>,
+        keep_slot: bool,
+    ) {
+        if let Some(vv) = variant {
+            if self.wrap_scalar_element(vv, &path, old) {
+                self.enter_variant_editor(vv, path, Some(one_of));
+                return;
+            }
+        }
+        let has_default = variant
+            .map(|vv| self.fs().schema.nodes[vv as usize].default_)
+            .flatten();
+        match has_default {
+            Some(d) if !is_null(&self.fs().schema.doc, d) => {
+                let fi = self.cur;
+                let f = &mut self.files[fi];
+                let n = f.doc.copy_into(&f.schema.doc, d, CopyMode::Preserve);
+                let _ = f.doc.set(&path, n);
+            }
+            _ if keep_slot || matches!(path.last(), Some(PathSeg::Idx(_))) => {
+                // keep the slot while the new type's editor fills it in
+                let n = self.fs_mut().doc.new_null();
+                let _ = self.fs_mut().doc.set(&path, n);
+            }
+            _ => {
+                self.fs_mut().doc.remove(&path);
+            }
+        }
+        self.enter_variant_editor(variant.expect("variant row"), path, Some(one_of));
     }
 
     pub(super) fn enter_variant_editor(
@@ -1275,5 +1282,78 @@ impl App {
         e.sug_hl = matched.iter().map(|(_, h)| h.clone()).collect();
         e.sugs = matched.into_iter().map(|(d, _)| d).collect();
         e.sug_idx = -1;
+    }
+
+    /// editRawExternal writes the whole document to a temp file and arms
+    /// $EDITOR (Go editRawExternal). Used by E at the root.
+    pub(super) fn edit_raw_external(&mut self) {
+        let codec = self.fs().codec;
+        match codec.write(self.doc(), &self.fs().meta) {
+            Err(e) => self.notice = format!("editor: {e}"),
+            Ok(data) => {
+                self.launch_external_edit(data, None, true, -1, false);
+            }
+        }
+    }
+
+    /// editValueExternal edits one value in $EDITOR (Go editValueExternal).
+    /// A string value is text, not a document: it opens without quotes or
+    /// format escaping and the edited text applies verbatim (the built-in
+    /// raw textarea's rule); every other value opens in the file's format.
+    pub(super) fn edit_value_external(&mut self, path: Vec<PathSeg>, insert_idx: i64) {
+        let mut buf = String::new();
+        let mut verbatim = false;
+        if let Some(cur) = self.doc().get(&path) {
+            if !is_null(self.doc(), cur) {
+                if let Value::Str(text) = self.doc().value(cur) {
+                    buf = text.clone();
+                    verbatim = true;
+                } else {
+                    let codec = self.fs().codec;
+                    match codec.write_value(self.doc(), cur) {
+                        Err(e) => {
+                            self.notice = format!("editor: {e}");
+                            return;
+                        }
+                        Ok(s) => buf = s,
+                    }
+                }
+            }
+        }
+        self.launch_external_edit(buf, Some(path), false, insert_idx, verbatim);
+    }
+
+    /// editExternalJSON writes data to a temp file and arms the editor.
+    pub(super) fn launch_external_edit(
+        &mut self,
+        data: String,
+        target: Option<Vec<PathSeg>>,
+        whole_doc: bool,
+        insert_idx: i64,
+        verbatim_str: bool,
+    ) {
+        let ext = self.fs().codec.raw_ext();
+        // uniquify: pid + a counter would race across processes; use nanos
+        let path = std::env::temp_dir().join(format!(
+            "jse-{}-{}{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+            ext
+        ));
+        if let Err(e) = std::fs::write(&path, data) {
+            self.notice = format!("editor: {e}");
+            return;
+        }
+        let edit = ExternalEdit {
+            target: target.unwrap_or_default(),
+            insert_idx,
+            path: path.to_string_lossy().to_string(),
+            whole_doc,
+            verbatim_str,
+        };
+        self.pending_edit = Some(edit);
     }
 }

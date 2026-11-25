@@ -2,7 +2,7 @@
 //!
 //! Rust port of `internal/jsoncdoc/jsoncdoc.go`. The same scanner serves
 //! both parsers: `parse` (lenient — comments and trailing commas accepted,
-//! exactly the Go jsoncdoc behavior) and `jsondoc::parse` (strict — comments
+//! exactly the Go jsoncdoc behavior) and `parse_strict` (strict — comments
 //! rejected, trailing commas rejected, matching Go's encoding/json).
 //!
 //! Comments follow the key or value they belong to: an edited member keeps
@@ -22,6 +22,13 @@ fn err<T>(msg: impl Into<String>) -> Result<T, DocError> {
 /// Parse reads one JSONC document into a document tree and captures comments.
 pub fn parse(text: &str) -> Result<(Doc, Meta), DocError> {
     parse_impl(text, true)
+}
+
+/// Parse one strict JSON document: comments and trailing commas are rejected
+/// (the JSONC parser is the same scanner in lenient mode) and trailing data
+/// is an error.
+pub fn parse_strict(text: &str) -> Result<Doc, DocError> {
+    parse_impl(text, false).map(|(doc, _)| doc)
 }
 
 /// Shared entry: lenient mode accepts comments and trailing commas (JSONC);
@@ -786,10 +793,9 @@ fn write_value(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doc::jsondoc::parse;
 
     fn must_json(s: &str) -> Doc {
-        parse(s).expect("test document must parse")
+        parse_strict(s).expect("test document must parse")
     }
 
     fn write_string(doc: &Doc, meta: &Meta) -> String {

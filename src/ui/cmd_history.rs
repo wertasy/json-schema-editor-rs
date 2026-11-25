@@ -11,7 +11,9 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::ui::keys::MAX_CMD_HISTORY;
+/// MAX_CMD_HISTORY caps the `:` command history ring; the oldest entry
+/// drops first.
+pub const MAX_CMD_HISTORY: usize = 100;
 
 /// load reads the history file, oldest first. Blank lines are skipped and
 /// only the newest [`MAX_CMD_HISTORY`] entries survive; any read problem

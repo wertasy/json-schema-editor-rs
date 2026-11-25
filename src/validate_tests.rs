@@ -3,7 +3,7 @@
 //! behavior assertions mirror the Go tests.
 
 use crate::doc::Doc;
-use crate::doc::jsondoc;
+use crate::doc::jsoncdoc;
 use crate::validate::new;
 use std::sync::atomic::Ordering;
 
@@ -35,7 +35,7 @@ fn write_schema() -> String {
 }
 
 fn cfg(src: &str) -> Doc {
-    jsondoc::parse(src).expect("config must parse")
+    jsoncdoc::parse_strict(src).expect("config must parse")
 }
 
 /// Serializes tests that touch JSE_CACHE_DIR / the fetch memo.

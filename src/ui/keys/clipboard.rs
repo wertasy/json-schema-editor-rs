@@ -303,12 +303,6 @@ impl App {
             .collect()
     }
 
-    /// menuRows for the current (top) state (read-only flows reuse the same
-    /// warm cache path as menu_rows).
-    pub(super) fn menu_rows_snapshot(&mut self) -> Vec<Row> {
-        self.menu_rows()
-    }
-
     /// copyRowOrSelection is the y handler (Go copyRowOrSelection).
     pub(super) fn copy_row_or_selection(&mut self, r: &Row) {
         let has_sel = self.top().map(|st| !st.sel.is_empty()).unwrap_or(false);
@@ -489,7 +483,7 @@ impl App {
     /// lineValue parses one clipboard unit as JSON, falling back to its
     /// literal text as a string.
     fn line_value(doc: &mut Doc, line: &str) -> NodeId {
-        match jsondoc::parse(line) {
+        match crate::doc::jsoncdoc::parse_strict(line) {
             Ok(parsed) => {
                 let root = parsed.root;
                 doc.copy_into(&parsed, root, CopyMode::Detached)
@@ -614,7 +608,7 @@ impl App {
                 // also classifies as a single YAML/TOML scalar. An array
                 // target must take the units back as items — but text JSON
                 // itself parses keeps its single-value semantics.
-                let bare = jsondoc::parse(text.trim()).is_err();
+                let bare = crate::doc::jsoncdoc::parse_strict(text.trim()).is_err();
                 if bare
                     && members.is_none()
                     && items.is_none()
@@ -981,4 +975,97 @@ impl App {
         }
         obj
     }
+}
+
+// --- system clipboard IO (the Go clipboard.WriteAll/ReadAll fallbacks) -------
+
+fn tool_in_path(tool: &str) -> bool {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(tool))
+        .any(|p| p.is_file())
+}
+
+fn feed_tool(tool: &str, args: &[&str], text: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(tool)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|e| e.to_string())?;
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{} exited with {}", tool, status))
+    }
+}
+
+fn read_tool(tool: &str, args: &[&str]) -> Result<String, String> {
+    use std::process::Command;
+    let out = Command::new(tool)
+        .args(args)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!("{} exited with {}", tool, out.status));
+    }
+    String::from_utf8(out.stdout).map_err(|e| e.to_string())
+}
+
+/// write_clipboard is the Go `clipboard.WriteAll` fallback used when
+/// opts.Copy is unset: shell out to the first present helper (Linux
+/// wl-copy → xclip → xsel; macOS pbcopy; Windows clip).
+pub(crate) fn write_clipboard(text: &str) -> Result<(), String> {
+    if cfg!(target_os = "macos") {
+        if tool_in_path("pbcopy") {
+            return feed_tool("pbcopy", &[], text);
+        }
+    } else if cfg!(target_os = "windows") {
+        if tool_in_path("clip") {
+            return feed_tool("clip", &[], text);
+        }
+    } else {
+        if tool_in_path("wl-copy") {
+            return feed_tool("wl-copy", &[], text);
+        }
+        if tool_in_path("xclip") {
+            return feed_tool("xclip", &["-selection", "clipboard"], text);
+        }
+        if tool_in_path("xsel") {
+            return feed_tool("xsel", &["--clipboard", "--input"], text);
+        }
+    }
+    Err("clipboard: no clipboard tool found".to_string())
+}
+
+/// read_clipboard is the Go `clipboard.ReadAll` fallback (opts.Paste
+/// unset). Windows has no paste helper in the atotto set.
+pub(crate) fn read_clipboard() -> Result<String, String> {
+    if cfg!(target_os = "macos") {
+        if tool_in_path("pbpaste") {
+            return read_tool("pbpaste", &[]);
+        }
+    } else if cfg!(target_os = "windows") {
+        return Err("clipboard: cannot read without paste support".to_string());
+    } else {
+        if tool_in_path("wl-paste") {
+            return read_tool("wl-paste", &["--no-newline"]);
+        }
+        if tool_in_path("xclip") {
+            return read_tool("xclip", &["-selection", "clipboard", "-o"]);
+        }
+        if tool_in_path("xsel") {
+            return read_tool("xsel", &["--clipboard", "--output"]);
+        }
+    }
+    Err("clipboard: no clipboard tool found".to_string())
 }

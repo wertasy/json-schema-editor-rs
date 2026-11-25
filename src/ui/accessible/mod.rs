@@ -28,7 +28,10 @@ use crate::doc::jsondoc::{CopyMode, Doc, PathSeg, Value};
 use crate::doc::{append_idx, append_key};
 use crate::smodel::{FormNodeId, Kind, Schema};
 
-use crate::ui::lineio::LineReader;
+mod line_reader;
+
+pub use line_reader::LineReader;
+
 use crate::ui::rows::display_title;
 use crate::ui::widgets::{apply_scalar, omit_or_set, validate_input};
 use crate::ui::{FileSession, Options, Outcome, Res};
@@ -1279,7 +1282,6 @@ fn simple_root<R: BufRead, W: Write>(
         }
     }
 }
-
 // --- e2e script mirrors (Go e2e/e2e_test.go) ---------------------------------------
 
 #[cfg(test)]
@@ -1386,7 +1388,7 @@ mod tests {
 
     fn top_level_keys(saved: &Arc<Mutex<Option<String>>>) -> String {
         let text = saved.lock().clone().expect("saved");
-        let doc = crate::doc::jsondoc::parse(&text).expect("parse saved");
+        let doc = crate::doc::jsoncdoc::parse_strict(&text).expect("parse saved");
         let mut keys = Vec::new();
         if let Value::Object(members) = doc.value(doc.root) {
             for m in members {

@@ -5,6 +5,7 @@
 //! WORDING intentionally differs from Go's jsonschema v6; the error
 //! structure (leaf aggregation, `at '$.path'` document paths) is identical.
 
+use crate::doc::jsoncdoc;
 use crate::doc::jsondoc::{self, Doc, PathSeg};
 use crate::fetch;
 use jsonschema::Retrieve;
@@ -38,8 +39,8 @@ pub fn new(loc: &str) -> Result<V, String> {
     let data = fetch::load(&canon)?;
     // Local schemas parse through the document tree like Go's AddResource
     // path (encoding/json-compatible semantics, "%s: %w" error wrapping).
-    let doc =
-        jsondoc::parse(&String::from_utf8_lossy(&data)).map_err(|e| format!("{canon}: {e}"))?;
+    let doc = jsoncdoc::parse_strict(&String::from_utf8_lossy(&data))
+        .map_err(|e| format!("{canon}: {e}"))?;
     let schema = doc.to_value(doc.root);
 
     let validator = jsonschema::options()

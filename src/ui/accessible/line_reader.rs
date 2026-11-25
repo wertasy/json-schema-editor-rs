@@ -1,12 +1,16 @@
-//! One line per read: Rust port of Go `internal/ui/lineio.go`.
+//! One-line-per-read stdin reader: Rust port of Go `internal/ui/lineio.go`.
 //!
-//! huh's accessible prompts each read the form input greedily; with a pipe
-//! feeding a whole answer script, the first prompt would swallow every
-//! remaining line, leaving later prompts at EOF. Serving one line per
-//! [`LineReader::read_line`] call keeps sequential prompts in lockstep with
-//! the script (and behaves identically to a tty's line buffering).
 
 use std::io::BufRead;
+
+// --- one-line-per-read stdin (keeps piped scripts in lockstep with prompts) ---
+// One line per read: Rust port of Go `internal/ui/lineio.go`.
+//
+// huh's accessible prompts each read the form input greedily; with a pipe
+// feeding a whole answer script, the first prompt would swallow every
+// remaining line, leaving later prompts at EOF. Serving one line per
+// [`LineReader::read_line`] call keeps sequential prompts in lockstep with
+// the script (and behaves identically to a tty's line buffering).
 
 /// LineReader delivers at most one line (up to and including '\n') per
 /// [`read_line`](Self::read_line) call; the trailing newline is stripped.

@@ -18,12 +18,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use regex::Regex;
-
 use crate::doc::jsondoc::{parse_path, path_string};
 use crate::doc::{Doc, NodeId, PathSeg, Value, append_idx, append_key};
 use crate::icons::{ERR, WARN};
 use crate::smodel::{FormNode, FormNodeId, Kind, Schema};
+use crate::ui::state::{App, FileState, SynthKey, alias_at, anchor_holder_path, same_state};
 use crate::ui::util::wrap_cursor;
 use crate::ui::{Issue, MenuCtx, MenuKind, MenuState, Row, RowKind};
 
@@ -80,19 +79,6 @@ impl Default for RowsEnv<'_> {
     }
 }
 
-/// Identity of a synthesized schema node.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum SynthKey {
-    /// map/array value schema unknown: raw-editing fallback for node
-    Fallback(FormNodeId),
-    /// union menu over node's (dynamic) variant list
-    Merged(FormNodeId),
-    /// variant's menu with discriminator keys unionized
-    Pinned(FormNodeId, FormNodeId),
-    /// arbitrary JSON type picker (unknown keys, untyped schema fields)
-    AnyType,
-}
-
 // --- helpers usually found on listModel ------------------------------------
 
 fn path_eq(a: &[PathSeg], b: &[PathSeg]) -> bool {
@@ -114,8 +100,101 @@ fn variant_search_match(schema: &Schema, v: FormNodeId, q: &str) -> bool {
             .contains(&q)
 }
 
-fn is_null(doc: &Doc, id: NodeId) -> bool {
+pub(crate) fn is_null(doc: &Doc, id: NodeId) -> bool {
     matches!(doc.value(id), Value::Null)
+}
+
+/// is_null_opt is is_null over an optional node: no value counts as null.
+pub(crate) fn is_null_opt(doc: &Doc, v: Option<NodeId>) -> bool {
+    v.map_or(true, |v| is_null(doc, v))
+}
+
+/// selKey renders a path as the selection map key; the s:/i: tags keep
+/// string keys and array indexes distinct.
+pub(crate) fn sel_key(path: &[PathSeg]) -> String {
+    let mut b = String::new();
+    for seg in path {
+        match seg {
+            PathSeg::Key(s) => {
+                b.push_str("s:");
+                b.push_str(s);
+            }
+            PathSeg::Idx(i) => {
+                b.push_str("i:");
+                b.push_str(&i.to_string());
+            }
+        }
+        b.push('\0');
+    }
+    b
+}
+
+/// selectableRow reports whether a row can carry a selection mark: object
+/// menu key-value rows (fields, container rows, schema-less keys) and array
+/// item rows (their label is "key[N]", as the item has no object key) — no
+/// action or status rows.
+pub(crate) fn selectable_row(r: &Row) -> bool {
+    matches!(r.kind, RowKind::Field | RowKind::Drill | RowKind::Unknown) && !r.path.is_empty()
+}
+
+/// findRowKey returns the key a row matches by: the schema key, or the
+/// document key (last path segment) for schema-less rows. Only key-value
+/// rows match — array items and action rows are skipped.
+pub(crate) fn find_row_key(schema: &Schema, r: &Row) -> Option<String> {
+    if !selectable_row(r) {
+        return None;
+    }
+    if let Some(f) = r.fn_ {
+        let key = &schema.nodes[f as usize].key;
+        if !key.is_empty() {
+            return Some(key.clone());
+        }
+    }
+    match r.path.last() {
+        Some(PathSeg::Key(k)) if !k.is_empty() => Some(k.clone()),
+        _ => None,
+    }
+}
+
+/// copyRowKey returns the row's object key: the last path segment when it is
+/// a string. Array indexes and the root path have no object key.
+pub(crate) fn copy_row_key(path: &[PathSeg]) -> Option<String> {
+    match path.last() {
+        Some(PathSeg::Key(k)) => Some(k.clone()),
+        _ => None,
+    }
+}
+
+/// docKeyAt renders the document position of a menu path as a key label.
+pub(crate) fn doc_key_at(path: &[PathSeg]) -> String {
+    match path.last() {
+        Some(PathSeg::Key(s)) => s.clone(),
+        Some(PathSeg::Idx(i)) => match path.get(path.len().saturating_sub(2)) {
+            Some(PathSeg::Key(k)) => format!("{}[{}]", k, i),
+            _ => format!("[{}]", i),
+        },
+        None => String::new(),
+    }
+}
+
+/// pasteValueRowOK reports whether the cursor row is a value slot a pasted
+/// single value can replace.
+pub(crate) fn paste_value_row_ok(r: &Row) -> bool {
+    match r.kind {
+        // The root scalar document is a Field row with an empty path.
+        RowKind::Field => true,
+        RowKind::Unknown => !r.path.is_empty(),
+        // A oneOf picker row still points at the field's value (or the root
+        // document): P replaces the value and the variant is re-inferred.
+        RowKind::Variant => true,
+        RowKind::Drill => {
+            // A oneOf/object/array key row is still one value slot: P with a
+            // single value replaces that whole value (the variant is inferred
+            // again from the new value on the next refresh).
+            !r.path.is_empty() && r.fn_.is_some()
+        }
+        _ => false,
+    }
 }
 
 // --- kinds -----------------------------------------------------------------
@@ -614,6 +693,166 @@ mod filter;
 pub use filter::*;
 mod issue_parse;
 pub use issue_parse::*;
+
+// --- merge/alias lookups feeding the row model (Go menu_merge.go) ---
+
+/// MergeLookup implements [`MergeView`] over the document's anchor state —
+/// Go hung these on the listModel; they are pure document walks here.
+pub struct MergeLookup<'a> {
+    pub doc: &'a Doc,
+}
+
+impl MergeView for MergeLookup<'_> {
+    fn alias_at(&self, path: &[PathSeg]) -> Option<String> {
+        // Go's listModel.aliasAt returns ok only for reference occurrences
+        // (menu_alias.go:64-67): the menu offers < Expand > on a reference,
+        // not on the anchor carrier itself.
+        alias_at(self.doc, path)
+            .filter(|(_, is_ref)| *is_ref)
+            .map(|(name, _)| name)
+    }
+
+    fn merged_keys(&self, st: &MenuState) -> Vec<MergedKey> {
+        merged_keys(self.doc, st)
+    }
+}
+
+/// MergeSource is one merge input: the anchor holder's path and the anchor
+/// node (see `merge_defining_source`).
+type MergeSource = (Vec<PathSeg>, NodeId);
+
+/// mergeSourceFor resolves one merge reference into (name, holder path,
+/// node). Unreachable references (their anchor was deleted) drop out.
+fn merge_source_for(doc: &Doc, r: NodeId) -> Option<(String, Vec<PathSeg>, NodeId)> {
+    let data = doc.node(r);
+    if data.anchor.is_empty() || !matches!(doc.value(r), Value::Object(_)) {
+        return None;
+    }
+    let holder = anchor_holder_path(doc, r)?;
+    Some((data.anchor.clone(), holder, r))
+}
+
+/// mergedKeys lists the merged keys of the mapping at st.path in merge order
+/// with YAML precedence applied: keys the mapping defines itself, and keys
+/// an earlier anchor already provided, shadow the later ones.
+pub fn merged_keys(doc: &Doc, st: &MenuState) -> Vec<MergedKey> {
+    let Some(n) = doc.get(&st.path) else {
+        return Vec::new();
+    };
+    let Some(Value::Object(mems)) = doc.value_opt(n) else {
+        return Vec::new();
+    };
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for mem in mems {
+        if doc.node(mem.val).merge.is_empty() {
+            seen.insert(mem.key.clone());
+        }
+    }
+    let mut out: Vec<MergedKey> = Vec::new();
+    for r in doc.merge_refs(n) {
+        let Some((_, holder, node)) = merge_source_for(doc, r) else {
+            continue;
+        };
+        // the anchor's resolved members: its own keys plus whatever its own
+        // "<<" chain provides, with the anchor's own keys winning
+        for mem in doc.resolved_members(node) {
+            if seen.contains(&mem.key) {
+                continue;
+            }
+            seen.insert(mem.key.clone());
+            // inherited keys live in the mapping that actually defines them:
+            // the badge, the breadcrumb and edits follow that source
+            let mut busy = std::collections::HashSet::new();
+            let (def_holder, def_node) =
+                merge_defining_source(doc, (holder.clone(), node), &mem.key, &mut busy)
+                    .unwrap_or((holder.clone(), node));
+            let mut path = def_holder;
+            path.push(PathSeg::key(mem.key.clone()));
+            // Go's mergedKey src is the defining source, so the badge names
+            // the anchor that actually holds the value (menu_merge.go:89).
+            out.push(MergedKey {
+                key: mem.key,
+                path,
+                src_name: doc.node(def_node).anchor.clone(),
+            });
+        }
+    }
+    out
+}
+
+/// mergeDefiningSource finds the mapping that defines key for the merge
+/// source src: the mapping itself when it defines it, else the first mapping
+/// its own merge keys pull the key from (YAML precedence: own keys win,
+/// earlier anchors before later ones).
+fn merge_defining_source(
+    doc: &Doc,
+    src: MergeSource,
+    key: &str,
+    busy: &mut std::collections::HashSet<NodeId>,
+) -> Option<MergeSource> {
+    let (path, node) = src;
+    if !busy.insert(node) {
+        return None;
+    }
+    let result = (|| {
+        if let Some(Value::Object(mems)) = doc.value_opt(node) {
+            for mem in mems {
+                if doc.node(mem.val).merge.is_empty() && mem.key == key {
+                    return Some((path, node));
+                }
+            }
+        }
+        for r in doc.merge_refs(node) {
+            if let Some(sub) = merge_source_for(doc, r) {
+                if let Some(got) = merge_defining_source(doc, (sub.1, r), key, busy) {
+                    return Some(got);
+                }
+            }
+        }
+        None
+    })();
+    busy.remove(&node);
+    result
+}
+
+impl App {
+    /// menuRows builds the row list for the current (top) menu state.
+    pub fn menu_rows(&mut self) -> Vec<Row> {
+        let st = self.top().cloned();
+        match st {
+            Some(st) => self.menu_rows_state(&st),
+            None => Vec::new(),
+        }
+    }
+
+    /// menuRowsFor builds the row list for one menu state: the top one in
+    /// menu_rows, any state for cursor bookkeeping during variant flips.
+    pub fn menu_rows_state(&mut self, st: &MenuState) -> Vec<Row> {
+        let hide_empty = self.hide_empty;
+        let cur = self.cur;
+        let f = &mut self.files[cur];
+        let is_root = f.stack.first().map_or(false, |top| same_state(top, st));
+        let FileState {
+            schema,
+            doc,
+            menu_cache,
+            issues_now,
+            ..
+        } = f;
+        let lookup = MergeLookup { doc };
+        let mut cache = std::mem::take(menu_cache);
+        let mut env = RowsEnv {
+            is_root,
+            issues_now,
+            merge: &lookup,
+            synth: cache,
+        };
+        let rows = menu_rows_for(schema, doc, hide_empty, st, &mut env);
+        cache = env.synth;
+        *menu_cache = cache;
+        rows
+    }
+}
 
 #[cfg(test)]
 mod tests;

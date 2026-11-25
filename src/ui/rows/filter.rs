@@ -1,4 +1,12 @@
-use super::*;
+use regex::Regex;
+
+use crate::doc::jsondoc::path_string;
+use crate::doc::{Doc, PathSeg, Value};
+use crate::smodel::Schema;
+use crate::ui::{MenuCtx, Row, RowKind};
+
+use super::summary::{summary_raw, value_clip};
+use super::{is_null, path_eq};
 
 // --- search filtering --------------------------------------------------------
 
@@ -375,6 +383,56 @@ pub(crate) fn row_raw_scalar(schema: &Schema, doc: &Doc, r: &Row) -> Option<Stri
         Value::Bool(b) => Some(b.to_string()),
         _ => None,
     }
+}
+
+/// rowScalarValue reports whether the row carries a live scalar value
+/// (or a schema default) to include in its search match text.
+pub(super) fn row_scalar_value(schema: &Schema, doc: &Doc, r: &Row) -> bool {
+    let mut n = doc.get(&r.path).filter(|&v| !is_null(doc, v));
+    let mut vdoc = doc;
+    if n.is_none() {
+        match r.fn_.and_then(|f| schema.nodes[f as usize].default_) {
+            Some(d) => {
+                n = Some(d);
+                vdoc = &schema.doc;
+            }
+            None => return false,
+        }
+    }
+    matches!(
+        vdoc.value(n.unwrap()),
+        Value::Str(_) | Value::Num(_) | Value::Bool(_)
+    )
+}
+
+/// rowSearchText builds the text a search matches against for one row:
+/// schema title and key, the document member's key when it differs, and
+/// the raw value summary for scalar rows. None for rows without match
+/// text.
+pub(super) fn row_search_text(schema: &Schema, doc: &Doc, r: &Row) -> Option<String> {
+    let Some(f) = r.fn_ else {
+        if r.kind != RowKind::Unknown {
+            return None;
+        }
+        return Some(unknown_match_text(r, row_scalar_value(schema, doc, r)));
+    };
+    let node = &schema.nodes[f as usize];
+    let mut text = format!("{} {}", node.title, node.key);
+    // Map rows (additionalProperties/patternProperties) edit against the
+    // value schema, whose key is the map's key, not the document member's.
+    // The member key is the row's identity, so it must be searchable.
+    if let Some(PathSeg::Key(k)) = r.path.last() {
+        if *k != node.key {
+            text += &format!(" {k}");
+        }
+    }
+    if row_scalar_value(schema, doc, r) {
+        let s = summary_raw(schema, doc, f, &r.path);
+        if s != "—" {
+            text += &format!(" {s}");
+        }
+    }
+    Some(text)
 }
 
 /// pathBody is a row path as a path-query match subject: the rendered path

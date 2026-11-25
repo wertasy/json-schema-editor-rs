@@ -21,12 +21,12 @@ pub mod command;
 pub mod files;
 pub mod history;
 pub mod keys;
-pub mod lineio;
 pub mod menu;
 pub mod nav;
 pub mod rows;
 pub mod schema_picker;
-pub mod shell;
+pub mod state;
+pub mod style;
 pub mod util;
 pub mod widgets;
 
@@ -229,7 +229,7 @@ pub struct MenuState {
     /// row where visual select started
     pub vanchor: usize,
     /// inline list search (oneOf picker / enum-array toggles)
-    pub filter: crate::ui::menu::ListFilter,
+    pub filter: crate::ui::state::ListFilter,
 }
 
 /// issue is one validation message with its parsed instance location.

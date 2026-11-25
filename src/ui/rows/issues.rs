@@ -1,4 +1,12 @@
-use super::*;
+use std::collections::HashSet;
+
+use crate::doc::jsondoc::path_string;
+use crate::doc::{Doc, NodeId, PathSeg, Value, append_idx, append_key};
+use crate::smodel::{FormNodeId, Kind, Schema};
+use crate::ui::Issue;
+
+use super::issue_parse::quote_key;
+use super::variant::{dynamic_variants, match_variant_list};
 
 // --- unknown-key issues -----------------------------------------------------
 
@@ -175,48 +183,4 @@ pub fn member_of(doc: &Doc, n: NodeId, key: &str) -> Option<NodeId> {
         Value::Object(members) => members.iter().find(|m| m.key == key).map(|m| m.val),
         _ => None,
     }
-}
-
-pub(crate) fn row_scalar_value(schema: &Schema, doc: &Doc, r: &Row) -> bool {
-    let mut n = doc.get(&r.path).filter(|&v| !is_null(doc, v));
-    let mut vdoc = doc;
-    if n.is_none() {
-        match r.fn_.and_then(|f| schema.nodes[f as usize].default_) {
-            Some(d) => {
-                n = Some(d);
-                vdoc = &schema.doc;
-            }
-            None => return false,
-        }
-    }
-    matches!(
-        vdoc.value(n.unwrap()),
-        Value::Str(_) | Value::Num(_) | Value::Bool(_)
-    )
-}
-
-pub(crate) fn row_search_text(schema: &Schema, doc: &Doc, r: &Row) -> Option<String> {
-    let Some(f) = r.fn_ else {
-        if r.kind != RowKind::Unknown {
-            return None;
-        }
-        return Some(unknown_match_text(r, row_scalar_value(schema, doc, r)));
-    };
-    let node = &schema.nodes[f as usize];
-    let mut text = format!("{} {}", node.title, node.key);
-    // Map rows (additionalProperties/patternProperties) edit against the
-    // value schema, whose key is the map's key, not the document member's.
-    // The member key is the row's identity, so it must be searchable.
-    if let Some(PathSeg::Key(k)) = r.path.last() {
-        if *k != node.key {
-            text += &format!(" {k}");
-        }
-    }
-    if row_scalar_value(schema, doc, r) {
-        let s = summary_raw(schema, doc, f, &r.path);
-        if s != "—" {
-            text += &format!(" {s}");
-        }
-    }
-    Some(text)
 }

@@ -11,35 +11,56 @@ use std::collections::HashSet;
 
 use regex::Regex;
 
-use crate::doc::jsondoc;
+use crate::doc::jsondoc::bump_number_literal;
+use crate::doc::paste::{
+    PasteMember, parse_paste, paste_empty_node, paste_has_key, plain_paste_doc,
+};
 use crate::doc::{CopyMode, Doc, Member, NodeData, NodeId, PathSeg, Value, append_idx, append_key};
 use crate::icons::{ERR, WARN};
-use crate::smodel::{EnumOpt, FormNode, FormNodeId, Kind, Schema};
+use crate::smodel::{FormNode, FormNodeId, Kind};
+use crate::ui::cmd_history::MAX_CMD_HISTORY;
 use crate::ui::command;
+use crate::ui::command::{
+    CommandState, ShellMode, ShellTarget, apply, apply_lines, cmd_complete, cmd_complete_step,
+    cmd_completion_active, cmd_sug_refresh, compact_output, completion_candidate,
+    enum_choice_error, enum_index, filter_completions, filter_enum_keywords, output_lines,
+    output_text, resolve_array_target, resolve_target, run_capture, run_with_input, strip_query,
+};
 use crate::ui::menu::{
-    AddState, AnchorMode, AnchorState, App, CommandState, CommentEditState, CommentState,
+    AddState, AnchorMode, AnchorState, App, CommentEditState, CommentState, ConfirmAction,
     ConfirmState, DESC_BLOCK_PREVIEW_LINES, DescLine, DescSource, EditState, ErrsState,
     ExternalEdit, FastMoveState, FilePickState, FilterAction, HelpState, IssuesState, ListFilter,
-    MergeState, Msg, Overlay, RefPickState, SearchState, ShellOutState, TextState, WriteState,
-    anchor_defs, anchor_holder, anchor_holder_path, anchor_merge_use_paths, anchor_role,
-    count_anchor_uses, cursor_ancestor, cursor_by_path, cursor_for_row, cursor_prefix,
-    is_path_prefix, merge_ref_uses, nodes_equal, nodes_equal_doc, page_delta, read_clipboard,
-    ref_would_cycle, remap_state_cursor, vertical_delta, write_clipboard,
+    MergeState, Msg, Overlay, RefPickState, SearchState, ShellOutState, SynthKey, TextState,
+    WriteState, anchor_defs, anchor_holder, anchor_holder_path, anchor_merge_use_paths,
+    anchor_role, count_anchor_uses, cursor_ancestor, cursor_by_path, cursor_for_row, cursor_prefix,
+    is_path_prefix, merge_ref_uses, msg_key, nodes_equal, nodes_equal_doc, page_delta,
+    ref_would_cycle, remap_state_cursor, vertical_delta,
 };
 use crate::ui::rows::{
-    SynthKey, any_type_menu, clip_runes, current_variant, display_title, dynamic_variants,
-    filter_search, is_dot_query, is_path_query, match_variant_list, matched_leaf_variant,
-    path_pattern, raw_value_summary, rebuild_stack, replace_all, replace_hits, search_index,
-    seed_variant_cursor, summary, variant_field_defs, variant_signature, variant_value_summary,
+    any_type_menu, clip_runes, copy_row_key, current_variant, display_title, doc_key_at,
+    dynamic_variants, filter_search, find_row_key, is_dot_query, is_null, is_null_opt,
+    is_path_query, match_variant_list, matched_leaf_variant, paste_value_row_ok, path_pattern,
+    raw_value_summary, rebuild_stack, replace_all, replace_hits, schema_accepts_string,
+    schema_accepts_value, search_index, seed_variant_cursor, sel_key, selectable_row, summary,
+    tag_of_node, value_text, variant_contains, variant_field_defs, variant_label,
+    variant_signature, variant_value_summary,
 };
-use crate::ui::shell::{self, ShellTarget};
-use crate::ui::util::{page_cursor, wrap_cursor};
-use crate::ui::widgets::{Key, TextArea, TextInput, apply_scalar};
+use crate::ui::state::MAX_MACRO_KEYS;
+use crate::ui::state::{
+    buf_count, desc_line_view, err_indices, fold_desc_block, is_count_buf, is_digit_key,
+    issue_indices, merge_filtered, merge_token_list, ref_words_above, same_state_eq,
+    split_last_token, worst_issue_icon,
+};
+use crate::ui::style;
+use crate::ui::util::{
+    clip_display, clip_keep_tail, clip_left, clip_left_ellipsis, display_width, page_cursor,
+    wrap_cursor, wrap_text,
+};
+use crate::ui::widgets::{
+    Key, TextArea, TextInput, apply_scalar, cycle_text_sugs, input_avail, search_field_line,
+    search_input_line, ta_view, ti_view, ti_window,
+};
 use crate::ui::{Issue, MenuKind, MenuState, Row, RowKind};
-
-/// MAX_CMD_HISTORY caps the `:` command history ring; the oldest entry
-/// drops first.
-pub const MAX_CMD_HISTORY: usize = 100;
 
 /// CMD_SUG_WINDOW caps the visible tab-completion candidates above the
 /// command prompt.
@@ -52,1080 +73,238 @@ pub const SUG_MIN_WIDTH: usize = 24;
 /// prefix so their differing tails stay visible.
 pub const SUG_STRIP_PREFIX_MIN: usize = 8;
 
-/// cmd_sug_refresh rebuilds the auto-completion list for the word before
-/// the cursor without choosing a candidate; tab/arrows select from it.
-/// The scan is cheap except at a word start: a fresh shell argument word
-/// runs bash's programmable completion once (BashCache), later keystrokes
-/// filter the fetched words locally.
-fn cmd_sug_refresh(s: &mut CommandState, file_path: &str) {
-    let line = s.ti.value().to_string();
-    let cursor = s.ti.cursor_byte();
-    let done = s.bash_cache.auto_candidates(&line, cursor, file_path);
-    cmd_sug_apply(s, done, cursor);
-}
-
-/// cmd_tab_refresh is the fresh scan of an explicit tab press: it always
-/// re-asks bash's programmable completion for the word's full context
-/// (shell argument words only) and stores the fetch for later filtering.
-fn cmd_tab_refresh(s: &mut CommandState, file_path: &str) {
-    let line = s.ti.value().to_string();
-    let cursor = s.ti.cursor_byte();
-    let done = s.bash_cache.tab_candidates(&line, cursor, file_path);
-    cmd_sug_apply(s, done, cursor);
-}
-
-/// cmd_sug_apply stores one scan result as the active completion list.
-fn cmd_sug_apply(s: &mut CommandState, done: command::Completion, cursor: usize) {
-    s.sug_prefix = done.prefix;
-    s.sug = done.candidates;
-    s.sug_idx = None;
-    s.sug_line.clear();
-    s.sug_start = done.start;
-    s.sug_end = cursor;
-    // The candidate window aligns with the word being completed: deriving
-    // the anchor from the token start keeps the window still while the user
-    // types inside one word; a separator that starts a new word re-anchors.
-    s.sug_col = display_width(&s.ti.value()[..s.sug_start]);
-}
-
-/// cmd_complete applies the next/previous completion. A fresh cycle scans the
-/// word before the cursor (builtin command, PATH command, bash completion or
-/// filesystem path) and inserts the candidate there, leaving the text after
-/// the cursor alone; repeated tab presses walk the same candidate list.
-fn cmd_complete(s: &mut CommandState, forward: bool, file_path: &str) {
-    let value = s.ti.value().to_string();
-    let inserted = &value[s.sug_start.min(value.len())..s.sug_end.min(value.len())];
-    // Entering a directory or the shell marker needs a fresh scan, not a
-    // cycle over the single applied candidate.
-    if s.sug_idx.is_none()
-        || value != s.sug_line
-        || inserted.ends_with(['/', '\\'])
-        || inserted == "!"
-    {
-        cmd_tab_refresh(s, file_path);
-        if s.sug.is_empty() {
-            return;
-        }
-        let idx = if forward { 0 } else { s.sug.len() - 1 };
-        cmd_apply_sug(s, idx);
-        return;
-    }
-    cmd_complete_step(s, forward);
-}
-
-/// cycle_text_sugs moves a TextInput completion cursor over a stored candidate
-/// list and writes the selected candidate. Used by arrows once completion is
-/// active, so the list is not rebuilt from the completed value (which would
-/// shrink it to that one candidate).
-fn cycle_text_sugs(ti: &mut TextInput, sugs: &[String], idx: &mut i64, delta: i64) -> bool {
-    if sugs.is_empty() {
-        return false;
-    }
-    let n = sugs.len() as i64;
-    *idx = if *idx < 0 {
-        if delta > 0 { 0 } else { n - 1 }
-    } else {
-        (*idx + delta).rem_euclid(n)
-    };
-    ti.set_value(sugs[*idx as usize].clone());
-    ti.cursor_end();
-    true
-}
-
-/// cmd_completion_active reports whether the input still holds a candidate
-/// from the current completion list (so arrows should move within it).
-fn cmd_completion_active(s: &CommandState) -> bool {
-    s.sug_idx.is_some() && s.ti.value() == s.sug_line && s.ti.cursor_byte() == s.sug_end
-}
-
-/// cmd_complete_step moves the candidate cursor without rescanning the
-/// token; tab and, while active, the arrow keys use this.
-fn cmd_complete_step(s: &mut CommandState, forward: bool) {
-    let Some(i) = s.sug_idx else { return };
-    let n = s.sug.len();
-    if n == 0 {
-        return;
-    }
-    let idx = if forward {
-        (i + 1) % n
-    } else {
-        (i + n - 1) % n
-    };
-    cmd_apply_sug(s, idx);
-}
-
-fn cmd_apply_sug(s: &mut CommandState, idx: usize) {
-    let candidate = s.sug[idx].clone();
-    s.ti.replace_range(s.sug_start, s.sug_end, &candidate);
-    s.sug_end = s.sug_start + candidate.len();
-    s.sug_line = s.ti.value().to_string();
-    s.sug_idx = Some(idx);
-    s.hist_idx = None;
-}
-
-// ---------------------------------------------------------------------------
-// free helpers
-
-/// isDigitKey reports whether key is a single decimal digit.
-fn is_digit_key(key: &str) -> bool {
-    let b = key.as_bytes();
-    b.len() == 1 && b[0] >= b'0' && b[0] <= b'9'
-}
-
-/// isCountBuf reports whether the pending buffer is digits only — a count
-/// for N gg. A buffer holding the armed g (or ga/gr remnants) is not.
-fn is_count_buf(buf: &[String]) -> bool {
-    !buf.is_empty() && buf.iter().all(|k| is_digit_key(k))
-}
-
-/// bufCount folds the digit prefix of a pending buffer into its number.
-fn buf_count(buf: &[String]) -> (usize, bool) {
-    let mut n = 0usize;
-    let mut digits = 0;
-    for k in buf {
-        if !is_digit_key(k) {
-            break;
-        }
-        n = n * 10 + (k.as_bytes()[0] - b'0') as usize;
-        digits += 1;
-    }
-    (n, digits > 0)
-}
-
-/// selKey renders a path as the selection map key; the s:/i: tags keep
-/// string keys and array indexes distinct.
-fn sel_key(path: &[PathSeg]) -> String {
-    let mut b = String::new();
-    for seg in path {
-        match seg {
-            PathSeg::Key(s) => {
-                b.push_str("s:");
-                b.push_str(s);
-            }
-            PathSeg::Idx(i) => {
-                b.push_str("i:");
-                b.push_str(&i.to_string());
-            }
-        }
-        b.push('\0');
-    }
-    b
-}
-
-/// selectableRow reports whether a row can carry a selection mark: object
-/// menu key-value rows (fields, container rows, schema-less keys) and array
-/// item rows (their label is "key[N]", as the item has no object key) — no
-/// action or status rows.
-fn selectable_row(r: &Row) -> bool {
-    matches!(r.kind, RowKind::Field | RowKind::Drill | RowKind::Unknown) && !r.path.is_empty()
-}
-
-/// findRowKey returns the key a row matches by: the schema key, or the
-/// document key (last path segment) for schema-less rows. Only key-value
-/// rows match — array items and action rows are skipped.
-fn find_row_key(schema: &Schema, r: &Row) -> Option<String> {
-    if !selectable_row(r) {
-        return None;
-    }
-    if let Some(f) = r.fn_ {
-        let key = &schema.nodes[f as usize].key;
-        if !key.is_empty() {
-            return Some(key.clone());
-        }
-    }
-    match r.path.last() {
-        Some(PathSeg::Key(k)) if !k.is_empty() => Some(k.clone()),
-        _ => None,
-    }
-}
-
-/// completionCandidate reports whether v can be offered as a completion:
-/// empty text never is, and multiline values are skipped.
-fn completion_candidate(v: &str) -> bool {
-    !v.is_empty() && !v.contains('\r') && !v.contains('\n')
-}
-
-/// fuzzy_match matches query against text case-insensitively as a
-/// subsequence and returns the matched char indices plus a quality score
-/// (lower is better): 0 exact, 1 prefix, 2 substring, 3 subsequence. The
-/// indices drive the red matched-text highlight in the dropdown.
-pub(crate) fn fuzzy_match(query: &str, text: &str) -> Option<(u8, Vec<usize>)> {
-    if query.is_empty() {
-        return Some((4, Vec::new()));
-    }
-    let lq: Vec<char> = query.to_lowercase().chars().collect();
-    let lt: Vec<char> = text.to_lowercase().chars().collect();
-    if lq.len() > lt.len() {
-        return None;
-    }
-    if lt == lq {
-        return Some((0, (0..lt.len()).collect()));
-    }
-    if lt.starts_with(&lq) {
-        return Some((1, (0..lq.len()).collect()));
-    }
-    if let Some(pos) = lt.windows(lq.len()).position(|w| w == lq.as_slice()) {
-        return Some((2, (pos..pos + lq.len()).collect()));
-    }
-    // subsequence: greedy left-to-right keeps the earliest occurrence of
-    // every query char, so the highlight stays where a reader expects it
-    let mut q = 0usize;
-    let mut hits = Vec::with_capacity(lq.len());
-    for (i, c) in lt.iter().enumerate() {
-        if q < lq.len() && *c == lq[q] {
-            hits.push(i);
-            q += 1;
-        }
-    }
-    if q == lq.len() { Some((3, hits)) } else { None }
-}
-
-/// fuzzy_filter keeps candidates that fuzzy_match the query, best match
-/// first (score, then the candidate's original order). An empty query keeps
-/// everything unhighlighted and unsorted.
-pub(crate) fn fuzzy_filter(
-    cands: impl IntoIterator<Item = String>,
-    query: &str,
-    usable: impl Fn(&str) -> bool,
-) -> Vec<(String, Vec<usize>)> {
-    let mut matched: Vec<(u8, usize, String, Vec<usize>)> = cands
-        .into_iter()
-        .enumerate()
-        .filter(|(_, c)| usable(c))
-        .filter_map(|(i, c)| fuzzy_match(query, &c).map(|(score, hits)| (score, i, c, hits)))
-        .collect();
-    matched.sort_by_key(|(score, i, ..)| (*score, *i));
-    matched.into_iter().map(|(.., c, hits)| (c, hits)).collect()
-}
-
-/// filterCompletions fuzzy-matches candidates against the query
-/// (case-insensitive subsequence; prefix/substring rank first); an empty
-/// query keeps everything. Returns each candidate with its matched char
-/// indices for the red highlight.
-fn filter_completions(cands: &[String], query: &str) -> Vec<(String, Vec<usize>)> {
-    fuzzy_filter(cands.iter().cloned(), query, |c| completion_candidate(c))
-}
-
-/// filter_enum_keywords fuzzy-matches option displays against the query
-/// (keyword search in the enum dropdown); an empty query keeps every
-/// option. Unlike filter_completions an exact match stays listed: the
-/// input text itself names a selectable option.
-fn filter_enum_keywords(opts: &[EnumOpt], query: &str) -> Vec<(String, Vec<usize>)> {
-    fuzzy_filter(opts.iter().map(|o| o.display.clone()), query, |_| true)
-}
-
-/// enumIndex returns the cursor position of the current (or default) value
-/// in fn's option list.
-fn enum_index(schema: &Schema, fn_: FormNodeId, vdoc: &Doc, v: Option<NodeId>) -> usize {
-    let f = &schema.nodes[fn_ as usize];
-    let mut enc = String::new();
-    if let Some(v) = v {
-        if !matches!(vdoc.value(v), Value::Null) {
-            enc = vdoc.encode_value(v);
-        }
-    }
-    if !enc.is_empty() {
-        for (i, o) in f.enum_.iter().enumerate() {
-            if o.encoded == enc {
-                return i;
-            }
-        }
-    }
-    if let Some(d) = f.default_ {
-        let de = schema.doc.encode_value(d);
-        for (i, o) in f.enum_.iter().enumerate() {
-            if o.encoded == de {
-                return i;
-            }
-        }
-    }
-    0
-}
-
-/// listSearchMatch reports whether text contains the query
-/// (case-insensitive); an empty query matches everything.
-fn list_search_match(q: &str, text: &str) -> bool {
-    q.is_empty() || text.to_lowercase().contains(&q.to_lowercase())
-}
-
-/// enumChoiceError names the options a failed enum input must choose from,
-/// spelled as JSON literals so empty-string members stay visible.
-fn enum_choice_error(opts: &[EnumOpt]) -> String {
-    let names: Vec<&str> = opts.iter().map(|o| o.encoded.as_str()).collect();
-    format!("must be one of: {}", names.join(", "))
-}
-
-/// issueIndices lists the issues matching the overlay's search query.
-fn issue_indices(s: &IssuesState) -> impl Iterator<Item = usize> + '_ {
-    let q = s.filter.ti.value();
-    s.items
-        .iter()
-        .enumerate()
-        .filter(move |(_, it)| {
-            list_search_match(q, &it.msg)
-                || it.path.as_ref().map_or(false, |p| {
-                    list_search_match(q, &crate::doc::jsondoc::path_string(p))
-                })
-        })
-        .map(|(i, _)| i)
-}
-
-/// errIndices lists the save-error lines matching the search query.
-fn err_indices(s: &ErrsState) -> impl Iterator<Item = usize> + '_ {
-    let q = s.filter.ti.value();
-    s.lines
-        .iter()
-        .enumerate()
-        .filter(move |(_, line)| list_search_match(q, line))
-        .map(|(i, _)| i)
-}
-
-/// variantContains reports whether target is one of the oneOf node's
-/// variants (nested groups included).
-fn variant_contains(schema: &Schema, node: FormNodeId, target: FormNodeId) -> bool {
-    if schema.nodes[node as usize].kind != Kind::OneOf {
-        return false;
-    }
-    schema.nodes[node as usize].variants.iter().any(|&v| {
-        v == target
-            || (schema.nodes[v as usize].kind == Kind::OneOf && variant_contains(schema, v, target))
-    })
-}
-
-/// docKeyAt renders the document position of a menu path as a key label.
-fn doc_key_at(path: &[PathSeg]) -> String {
-    match path.last() {
-        Some(PathSeg::Key(s)) => s.clone(),
-        Some(PathSeg::Idx(i)) => match path.get(path.len().saturating_sub(2)) {
-            Some(PathSeg::Key(k)) => format!("{}[{}]", k, i),
-            _ => format!("[{}]", i),
-        },
-        None => String::new(),
-    }
-}
-
-/// tagOfNode returns an object's "tag" string value.
-fn tag_of_node(doc: &Doc, n: NodeId) -> String {
-    if let Value::Object(mems) = doc.value(n) {
-        for m in mems {
-            if m.key == "tag" {
-                if let Value::Str(s) = doc.value(m.val) {
-                    return s.clone();
-                }
-            }
-        }
-    }
-    String::new()
-}
-
-/// refWordsAbove reports whether every word appears as a whole member key in
-/// the NUL-wrapped ancestor path.
-fn ref_words_above(words: &[&str], ancestors: &str) -> bool {
-    words
-        .iter()
-        .all(|w| ancestors.contains(&format!("\0{w}\0")))
-}
-
-/// copyRowKey returns the row's object key: the last path segment when it is
-/// a string. Array indexes and the root path have no object key.
-fn copy_row_key(path: &[PathSeg]) -> Option<String> {
-    match path.last() {
-        Some(PathSeg::Key(k)) => Some(k.clone()),
-        _ => None,
-    }
-}
-
-/// isMergeSeparator reports whether r separates merge-key tokens: spaces and
-/// commas (both the "a b" and "[*a, *b]" reading work).
-fn is_merge_separator(r: char) -> bool {
-    r == ' ' || r == ',' || r == '\t'
-}
-
-/// splitLastToken splits the input into everything up to the final token and
-/// that token, keeping the separator before it in rest.
-fn split_last_token(v: &str) -> (String, String) {
-    if let Some(i) = v.rfind(is_merge_separator) {
-        return (v[..=i].to_string(), v[i + 1..].to_string());
-    }
-    (String::new(), v.to_string())
-}
-
-/// mergeTokenList splits an input fragment into bare anchor names: tokens
-/// separated by spaces or commas, an optional "*" prefix stripped, empty
-/// tokens dropped.
-fn merge_token_list(v: &str) -> Vec<String> {
-    v.split(is_merge_separator)
-        .map(|t| t.trim().trim_start_matches('*').to_string())
-        .filter(|t| !t.is_empty())
-        .collect()
-}
-
-/// mergeFiltered lists the candidates for the token being typed.
-fn merge_filtered(s: &MergeState) -> Vec<String> {
-    let (rest, last) = split_last_token(s.ti.value());
-    let used: HashSet<String> = merge_token_list(&rest).into_iter().collect();
-    let last = last.trim_start_matches('*').to_lowercase();
-    s.cands
-        .iter()
-        .filter(|c| !used.contains(*c) && (last.is_empty() || c.to_lowercase().starts_with(&last)))
-        .cloned()
-        .collect()
-}
-
-fn is_null_val(doc: &Doc, v: NodeId) -> bool {
-    matches!(doc.value(v), Value::Null)
-}
-
-/// bump_number_literal adds delta to a numeric literal. Integer spellings
-/// stay exact (i128, no f64 round trip); fractional/exponent forms fall back
-/// to the shortest JSON float form.
-pub(crate) fn bump_number_literal(lit: &str, delta: i64) -> Option<String> {
-    if !lit.contains(['.', 'e', 'E']) {
-        // Integer spellings stay exact; an integer outside i128 is left
-        // untouched rather than rounded through f64.
-        let v = lit.parse::<i128>().ok()?;
-        return v.checked_add(delta as i128).map(|n| n.to_string());
-    }
-    let f = lit.parse::<f64>().ok()?;
-    let sum = f + delta as f64;
-    if !sum.is_finite() {
-        return None;
-    }
-    Some(jsondoc::number_text(sum))
-}
-
-fn is_null_opt(doc: &Doc, v: Option<NodeId>) -> bool {
-    v.map_or(true, |v| is_null_val(doc, v))
-}
-
-/// variantLabel renders a variant for the picker's bottom information line:
-/// its type name (when it has one) plus the structural signature.
-fn variant_label(schema: &Schema, v: FormNodeId) -> String {
-    let f = &schema.nodes[v as usize];
-    let sig = variant_signature(schema, Some(v));
-    if f.title.is_empty() {
-        sig
-    } else if f.title.eq_ignore_ascii_case(&sig) {
-        f.title.clone()
-    } else {
-        format!("{} {}", f.title, sig)
-    }
-}
-
-/// completionCandidate text extraction: the value form the field accepts —
-/// strings for string fields, the numeric literal for numeric fields.
-fn value_text(doc: &Doc, v: Option<NodeId>, want_num: bool) -> Option<String> {
-    let v = v?;
-    match doc.value(v) {
-        Value::Str(s) if !want_num => Some(s.clone()),
-        Value::Num(n) if want_num => Some(n.clone()),
-        _ => None,
-    }
-}
-
-// --- terminal-cell text helpers (Go ansi.StringWidthWc / ansi.TruncateWc) ---
-
-/// displayWidth returns the terminal cell width of s (ANSI escapes are
-/// skipped; wide runes count two cells).
-pub(crate) fn display_width(s: &str) -> usize {
-    let mut w = 0usize;
-    let mut esc = false;
-    for c in s.chars() {
-        if esc {
-            if c == 'm' {
-                esc = false;
-            }
-            continue;
-        }
-        if c == '\x1b' {
-            esc = true;
-            continue;
-        }
-        w += char_width(c);
-    }
-    w
-}
-
-pub(crate) fn char_width(c: char) -> usize {
-    let cp = c as u32;
-    // wide: CJK, Hangul, full-width forms, emoji ranges (wcwidth semantics,
-    // approximated)
-    if (0x1100..=0x115F).contains(&cp)
-        || (0x2E80..=0xA4CF).contains(&cp)
-        || (0xAC00..=0xD7A3).contains(&cp)
-        || (0xF900..=0xFAFF).contains(&cp)
-        || (0xFE10..=0xFE19).contains(&cp)
-        || (0xFE30..=0xFE6F).contains(&cp)
-        || (0xFF00..=0xFF60).contains(&cp)
-        || (0xFFE0..=0xFFE6).contains(&cp)
-        || (0x1F300..=0x1F64F).contains(&cp)
-        || (0x20000..=0x3FFFD).contains(&cp)
-    {
-        2
-    } else {
-        1
-    }
-}
-
-/// clipDisplay truncates s to max terminal cells, ANSI-aware. A reset closes
-/// any style left open by the cut.
-pub(crate) fn clip_display(s: &str, max: usize) -> String {
-    if max < 1 {
-        return String::new();
-    }
-    if display_width(s) <= max {
-        return s.to_string();
-    }
-    let mut out = String::new();
-    let mut w = 0usize;
-    let mut styled = false;
-    let mut esc = false;
-    'outer: for c in s.chars() {
-        if esc {
-            out.push(c);
-            if c == 'm' {
-                esc = false;
-            }
-            continue;
-        }
-        if c == '\x1b' {
-            out.push(c);
-            esc = true;
-            styled = true;
-            continue;
-        }
-        let cw = char_width(c);
-        if w + cw > max {
-            break 'outer;
-        }
-        out.push(c);
-        w += cw;
-    }
-    if styled {
-        out.push_str("\x1b[0m");
-    }
-    out
-}
-
-/// clip_keep_tail clips `body` so a protected tail of `keep` cells (change
-/// dot, severity glyph) still fits into `avail` cells, marking the cut with
-/// an ellipsis. A body that already fits comes back unchanged; the caller
-/// appends the tail itself.
-pub(crate) fn clip_keep_tail(body: &str, avail: usize, keep: usize) -> String {
-    let keep = keep.min(avail);
-    let budget = avail.saturating_sub(keep);
-    if display_width(body) <= budget {
-        return body.to_string();
-    }
-    if budget < 2 {
-        return String::new();
-    }
-    let mut out = clip_display(body, budget - 1);
-    out.push('…');
-    out
-}
-
-/// strip_query removes the already-typed prefix from a candidate. Matching is
-/// case-insensitive, mirroring suggestion filtering; the returned slice is
-/// the differing tail.
-fn strip_query<'a>(candidate: &'a str, query: &str) -> Option<&'a str> {
-    if query.is_empty() {
-        return None;
-    }
-    let mut end = 0usize;
-    let mut cand = candidate.char_indices();
-    for q in query.chars() {
-        let Some((idx, c)) = cand.next() else {
-            return None;
-        };
-        if c != q && !c.to_lowercase().eq(q.to_lowercase()) {
-            return None;
-        }
-        end = idx + c.len_utf8();
-    }
-    Some(&candidate[end..])
-}
-
-/// clip_left_ellipsis keeps the end of plain text within max cells, marking
-/// the cut with a leading `…`. The tail is never dropped: it is the part that
-/// distinguishes candidates sharing a long prefix.
-fn clip_left_ellipsis(s: &str, max: usize) -> String {
-    if display_width(s) <= max {
-        return s.to_string();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    if max == 1 {
-        return "…".to_string();
-    }
-    let mut tail: Vec<char> = Vec::new();
-    let mut w = 0usize;
-    for c in s.chars().rev() {
-        let cw = char_width(c);
-        if w + cw > max - 1 {
-            break;
-        }
-        tail.push(c);
-        w += cw;
-    }
-    let mut out = String::from("…");
-    out.extend(tail.into_iter().rev());
-    out
-}
-
-/// clipLeft keeps the tail of s within max runes, marking the cut with "…".
-fn clip_left(s: &str, max: usize) -> String {
-    if max == 0 {
-        return String::new();
-    }
-    let r: Vec<char> = s.chars().collect();
-    if r.len() <= max {
-        return s.to_string();
-    }
-    if max == 1 {
-        return "…".to_string();
-    }
-    "…".to_string() + &r[r.len() - (max - 1)..].iter().collect::<String>()
-}
-
-/// wrapText wraps s to max display cells per line, preserving explicit
-/// newlines. It breaks at the last space when that leaves a non-empty prefix;
-/// otherwise it breaks between runes.
-fn wrap_text(s: &str, max: usize) -> Vec<String> {
-    if max < 1 {
-        return vec![s.to_string()];
-    }
-    let mut out: Vec<String> = Vec::new();
-    for para in s.split('\n') {
-        let mut line = String::new();
-        for r in para.chars() {
-            let mut cand = line.clone();
-            cand.push(r);
-            if display_width(&cand) <= max {
-                line = cand;
-                continue;
-            }
-            if line.is_empty() {
-                line = r.to_string();
-                continue;
-            }
-            if let Some(i) = line.rfind(' ') {
-                if i > 0 {
-                    out.push(line[..i].to_string());
-                    line = line[i + 1..].to_string();
-                    line.push(r);
-                    continue;
-                }
-            }
-            out.push(line);
-            line = r.to_string();
-        }
-        out.push(line);
-    }
-    out
-}
-
-/// fold_desc_block caps one collapsed source block at
-/// [`DESC_BLOCK_PREVIEW_LINES`] lines, leaving room for the trailing `…`.
-fn fold_desc_block(mut lines: Vec<String>, width: usize) -> Vec<String> {
-    if lines.len() <= DESC_BLOCK_PREVIEW_LINES {
-        return lines;
-    }
-    lines.truncate(DESC_BLOCK_PREVIEW_LINES);
-    if let Some(last) = lines.last_mut() {
-        // one column for the space and one for the `…`
-        *last = clip_display(last, width.saturating_sub(2));
-    }
-    lines
-}
-
-/// desc_line_view styles one description line; a folded block ends with an
-/// emphasized `…`.
-fn desc_line_view(line: &DescLine) -> String {
-    let body = match line.source {
-        DescSource::Schema => style::desc(&line.text),
-        DescSource::Comment => style::comment(&line.text),
-    };
-    if line.folded {
-        format!("{body} {}", style::accent("…"))
-    } else {
-        body
-    }
-}
-use crate::ui::menu::style;
-
-/// worstIssueIcon picks the severity glyph for a set of issues: any real
-/// validation error outranks the warnings.
-fn worst_issue_icon(items: &[Issue]) -> &'static str {
-    if items.iter().any(|it| !it.warn) {
-        ERR
-    } else {
-        WARN
-    }
-}
-
-/// A paste member: one key-value pair.
-struct PasteMember {
-    key: String,
-    val: NodeId, // id into the parsed paste document
-}
-
-/// stripTrailingComma drops one comma sitting right before the closing
-/// bracket; reports whether the text changed.
-fn strip_trailing_comma(s: &str) -> Option<String> {
-    if let Some(t) = s.strip_suffix(",}") {
-        return Some(format!("{t}}}"));
-    }
-    if let Some(t) = s.strip_suffix(",]") {
-        return Some(format!("{t}]"));
-    }
-    None
-}
-
-/// classifyParsed splits a fully parsed document into members or items; a
-/// scalar root is a single value (members and items both None). The parsed
-/// document is returned so the members/items' NodeIds stay resolvable.
-fn classify_parsed(doc: Doc) -> (Option<Vec<PasteMember>>, Option<Vec<NodeId>>, Option<Doc>) {
-    let root = doc.root;
-    let members = if let Value::Object(mems) = doc.value(root) {
-        Some(
-            mems.iter()
-                .map(|m| PasteMember {
-                    key: m.key.clone(),
-                    val: m.val,
-                })
-                .collect(),
-        )
-    } else {
-        None
-    };
-    let items = if let Value::Array(items) = doc.value(root) {
-        Some(items.clone())
-    } else {
-        None
-    };
-    (members, items, Some(doc))
-}
-
-/// classifyPasteYAML decodes clipboard text as YAML for YAML documents;
-/// scalar roots come back as a single value.
-fn classify_paste_yaml(
-    s: &str,
-) -> Result<(Option<Vec<PasteMember>>, Option<Vec<NodeId>>, Option<Doc>), String> {
-    let (doc, _meta) = crate::doc::yamldoc::parse(s)
-        .map_err(|_| "clipboard is not JSON keys or items".to_string())?;
-    Ok(classify_parsed(doc))
-}
-
-/// classifyPasteTOML decodes clipboard text as TOML for TOML documents.
-/// A full document supplies members/items; otherwise a single value (scalar,
-/// array, inline table) replaces the target value.
-fn classify_paste_toml(
-    s: &str,
-) -> Result<(Option<Vec<PasteMember>>, Option<Vec<NodeId>>, Option<Doc>), String> {
-    if let Ok((doc, _meta)) = crate::doc::tomldoc::parse(s) {
-        return Ok(classify_parsed(doc));
-    }
-    if let Ok((doc, _meta)) = crate::doc::tomldoc::parse_value(s) {
-        return Ok(classify_parsed(doc));
-    }
-    // Copying a string value writes its text without quotes (the same rule
-    // every format uses), so a single unadorned line is that string.
-    if !s.contains('\n') && !s.contains('=') && !s.starts_with(['[', '{', '"', '\'']) {
-        let mut doc = Doc::new();
-        let n = doc.new_str(s);
-        doc.root = n;
-        return Ok((None, None, Some(doc)));
-    }
-    Err("clipboard is not JSON keys or items".to_string())
-}
-
-/// parsePaste classifies the clipboard (Go menu_paste.go parsePaste).
-fn parse_paste(
-    text: &str,
-    mode: &str,
-) -> Result<(Option<Vec<PasteMember>>, Option<Vec<NodeId>>, Option<Doc>), String> {
-    let mut s = text.trim().to_string();
-    if s.is_empty() {
-        return Err("clipboard is empty".to_string());
-    }
-    if s.starts_with('{') || s.starts_with('[') {
-        match jsondoc::parse(&s) {
-            Ok(doc) => return Ok(classify_parsed(doc)),
-            Err(_) => {
-                // one trailing comma before the closing bracket is tolerated
-                if let Some(t) = strip_trailing_comma(&s) {
-                    if let Ok(doc) = jsondoc::parse(&t) {
-                        return Ok(classify_parsed(doc));
-                    }
-                }
-                match mode {
-                    "YAML" => return classify_paste_yaml(&s),
-                    "TOML" => return classify_paste_toml(&s),
-                    _ => {}
-                }
-                return Err("clipboard is not JSON keys or items".to_string());
-            }
-        }
-    }
-    // a complete JSON document that is neither {…} nor […] is one value
-    if let Ok(doc) = jsondoc::parse(&s) {
-        return Ok(classify_parsed(doc));
-    }
-    if s.ends_with(',') {
-        s = s.trim().trim_end_matches(',').trim().to_string();
-    }
-    if s.is_empty() {
-        return Err("clipboard is empty".to_string());
-    }
-    if let Ok(doc) = jsondoc::parse(&format!("{{{s}}}")) {
-        if let Value::Object(mems) = doc.value(doc.root) {
-            let members = mems
-                .iter()
-                .map(|m| PasteMember {
-                    key: m.key.clone(),
-                    val: m.val,
-                })
-                .collect();
-            return Ok((Some(members), None, Some(doc)));
-        }
-    }
-    if let Ok(doc) = jsondoc::parse(&format!("[{s}]")) {
-        if let Value::Array(items) = doc.value(doc.root) {
-            return Ok((None, Some(items.clone()), Some(doc)));
-        }
-    }
-    match mode {
-        "YAML" => classify_paste_yaml(&s),
-        "TOML" => classify_paste_toml(&s),
-        _ => Err("clipboard is not JSON keys or items".to_string()),
-    }
-}
-
-/// plain_paste_doc turns clipboard text that parsed as no structured value
-/// into a single string value. `y`/`Y` copy strings without quotes, so `P`
-/// on a string row must accept that text back in every format (JSON had no
-/// such fallback). One surrounding pair of double quotes is stripped so a
-/// hand-quoted string whose JSON spelling is invalid still lands as its text.
-fn plain_paste_doc(text: &str) -> Option<Doc> {
-    let t = text.trim_matches(['\r', '\n']);
-    if t.trim().is_empty() {
-        return None;
-    }
-    let s = if t.starts_with('"') && t.ends_with('"') && t.len() >= 2 {
-        &t[1..t.len() - 1]
-    } else {
-        t
-    };
-    let mut doc = Doc::new();
-    let n = doc.new_str(s);
-    doc.root = n;
-    Some(doc)
-}
-
-/// schema_accepts_string reports whether a schema node can hold an arbitrary
-/// string: a text scalar (typed or unconstrained), an enum, an unconstrained
-/// raw/any-JSON field, or a oneOf group with such a leaf. `seen` breaks
-/// recursive schema references.
-fn schema_accepts_string(
-    schema: &Schema,
-    node: FormNodeId,
-    seen: &mut HashSet<FormNodeId>,
-) -> bool {
-    if !seen.insert(node) {
-        return false;
-    }
-    let n = &schema.nodes[node as usize];
-    match n.kind {
-        Kind::Scalar => n.json_type.is_empty() || n.json_type == "string",
-        Kind::Enum => true,
-        // A raw field takes any JSON value; null-only raw does not.
-        Kind::Raw => !n.null_only,
-        Kind::OneOf => n
-            .variants
-            .iter()
-            .any(|&v| schema_accepts_string(schema, v, seen)),
-        _ => false,
-    }
-}
-
-/// pasteValueRowOK reports whether the cursor row is a value slot a pasted
-/// single value can replace.
-fn paste_value_row_ok(r: &Row) -> bool {
-    match r.kind {
-        // The root scalar document is a Field row with an empty path.
-        RowKind::Field => true,
-        RowKind::Unknown => !r.path.is_empty(),
-        // A oneOf picker row still points at the field's value (or the root
-        // document): P replaces the value and the variant is re-inferred.
-        RowKind::Variant => true,
-        RowKind::Drill => {
-            // A oneOf/object/array key row is still one value slot: P with a
-            // single value replaces that whole value (the variant is inferred
-            // again from the new value on the next refresh).
-            !r.path.is_empty() && r.fn_.is_some()
-        }
-        _ => false,
-    }
-}
-
-/// pasteEmptyNode mirrors jsondoc's own emptiness test: null or no value at
-/// all converts to a container.
-fn paste_empty_node(doc: &Doc, n: NodeId) -> bool {
-    matches!(doc.value(n), Value::Null) || matches!(doc.value(n), Value::Object(m) if m.is_empty())
-}
-
-/// pasteHasKey reports whether the member list contains key.
-fn paste_has_key(members: &[Member], key: &str) -> bool {
-    members.iter().any(|m| m.key == key)
-}
-
-/// Map a Msg to the reduced widget Key (Go feeds the bubbles widgets the
-/// tea.KeyMsg directly; this covers the operations they exercise).
-pub(crate) fn msg_key(msg: &Msg) -> Option<Key> {
-    Some(match msg {
-        Msg::Char(c, false) => Key::Char(*c),
-        // shell-style word motion inside every text input
-        Msg::Char('f', true) | Msg::Char('F', true) => Key::WordForward,
-        Msg::Char('b', true) | Msg::Char('B', true) => Key::WordBackward,
-        Msg::Enter => Key::Enter,
-        Msg::Backspace => Key::Backspace,
-        Msg::Delete => Key::Delete,
-        Msg::Left => Key::Left,
-        Msg::Right => Key::Right,
-        Msg::Up => Key::Up,
-        Msg::Down => Key::Down,
-        Msg::Home => Key::Home,
-        Msg::End => Key::End,
-        Msg::Ctrl('a') => Key::CtrlA,
-        Msg::Ctrl('e') => Key::CtrlE,
-        Msg::Ctrl('k') => Key::CtrlK,
-        Msg::Ctrl('u') => Key::CtrlU,
-        Msg::Ctrl('w') => Key::CtrlW,
-        Msg::Ctrl('y') => Key::CtrlY,
-        _ => return None,
-    })
-}
-
-/// input_avail is the viewport width of a TextInput rendered after `prefix`
-/// cells on a line clipped to `width`: the caret cell and one margin column
-/// stay inside the clip.
-pub(crate) fn input_avail(width: usize, prefix: usize) -> usize {
-    width.saturating_sub(prefix + 2)
-}
-
-/// ti_window returns the char range [start, end) of a TextInput value that a
-/// viewport of `avail` cells shows so the cursor cell stays visible, plus
-/// the display width skipped before `start`. Long values scroll horizontally
-/// around the caret instead of running past the terminal edge (the schema
-/// picker's inputLine behavior, bubbles textinput with a Width).
-pub(crate) fn ti_window(ti: &TextInput, avail: usize) -> (usize, usize, usize) {
-    let chars: Vec<char> = ti.value().chars().collect();
-    let cursor = ti.cursor().min(chars.len());
-    let cell_at = |n: usize| chars[..n].iter().map(|&c| char_width(c)).sum::<usize>();
-    let cursor_cell = cell_at(cursor);
-    let mut start = 0usize;
-    let window = avail.max(1);
-    while start < cursor && cursor_cell - cell_at(start) >= window {
-        start += 1;
-    }
-    let mut end = start;
-    let mut used = 0usize;
-    while end < chars.len() {
-        let w = char_width(chars[end]);
-        if used + w > avail {
-            break;
-        }
-        used += w;
-        end += 1;
-    }
-    (start, end, cell_at(start))
-}
-
-/// ti_view renders a TextInput viewport of `avail` cells like bubbles
-/// textinput.View(): the value with the cursor cell reverse-video, scrolled
-/// horizontally so the caret stays visible. Returns the skipped leading
-/// cells so callers can map value columns (sug_col) to screen columns.
-pub(crate) fn ti_view(ti: &TextInput, avail: usize) -> (usize, String) {
-    let (start, end, shift) = ti_window(ti, avail);
-    let chars: Vec<char> = ti.value().chars().collect();
-    let cursor = ti.cursor().min(chars.len());
-    let mut out = String::new();
-    if cursor < end {
-        out.push_str(&chars[start..cursor].iter().collect::<String>());
-        out.push_str("\x1b[7m");
-        out.push(chars[cursor]);
-        out.push_str("\x1b[27m");
-        out.push_str(&chars[cursor + 1..end].iter().collect::<String>());
-    } else {
-        out.push_str(&chars[start..end].iter().collect::<String>());
-        out.push_str("\x1b[7m \x1b[27m");
-    }
-    (shift, out)
-}
-
-/// inputLine renders `prompt + value` with a reverse-video caret, scrolling
-/// horizontally so the caret stays visible (the schema picker's search row).
-fn search_input_line(prompt: &str, ti: &TextInput, width: usize) -> String {
-    let (_, input) = ti_view(ti, input_avail(width, display_width(prompt)));
-    format!("{prompt}{input}")
-}
-
-/// search_field_line renders one overlay input row. Only the focused input
-/// shows the reverse-video caret; the inactive row is dimmed and caret-less
-/// so tabbing between search and replace is visible.
-fn search_field_line(label: &str, ti: &TextInput, focused: bool, width: usize) -> String {
-    if focused {
-        let (_, input) = ti_view(ti, input_avail(width, display_width(label) + 2));
-        format!("{label}: {input}")
-    } else {
-        style::faint(&format!("{label}: {}", ti.value()))
-    }
-}
-
-/// Render a TextArea viewport with a reverse-video cursor cell. The window
-/// follows the cursor row (bubbles textarea behavior); a long line scrolls
-/// horizontally so the cursor stays visible.
-fn ta_view(ta: &TextArea) -> String {
-    let (top, h) = ta.window();
-    let w = (ta.width() as usize).max(1);
-    let (cursor_row, cursor_col) = ta.cursor();
-    let mut out = String::new();
-    let end = (top + h).min(ta.line_count());
-    for i in top..end {
-        if i > top {
-            out.push('\n');
-        }
-        let line = ta.line(i).unwrap_or("");
-        let shift = if i == cursor_row && cursor_col >= w {
-            cursor_col + 1 - w
-        } else {
-            0
-        };
-        let chars: Vec<char> = line.chars().skip(shift).take(w).collect();
-        if i != cursor_row {
-            out.extend(chars);
-            continue;
-        }
-        let col = cursor_col.saturating_sub(shift).min(w - 1);
-        let upto = col.min(chars.len());
-        out.extend(chars.iter().take(upto));
-        let cell = chars.get(col).copied().unwrap_or(' ');
-        out.push_str("\x1b[7m");
-        out.push(cell);
-        out.push_str("\x1b[0m");
-        if col < chars.len() {
-            out.extend(chars.iter().skip(col + 1));
-        }
-    }
-    out
-}
-
 // ---------------------------------------------------------------------------
 // App key handling
 
 impl App {
+    // --- the key pipeline ---------------------------------------------------
+
+    /// plain_motion reports a vertical cursor key in the plain menu. It
+    /// cannot change the document, so dispatch_key skips the undo snapshot,
+    /// the whole-document comparison and the variant/issue refresh that
+    /// every other key pays. A 20k-row menu made that work dominate the
+    /// per-repeat cost while a key was held.
+    fn plain_motion(&self, msg: &Msg) -> bool {
+        self.overlay.is_none()
+            && self.list_mode()
+            && (vertical_delta(msg).is_some() || page_delta(msg).is_some())
+    }
+
+    /// Update handles one key message: ctrl+c aborts, q aliases esc outside
+    /// inputs, macros intercept, then dispatchKey.
+    pub fn update(&mut self, msg: Msg) {
+        if msg == Msg::Ctrl('c') {
+            self.aborted = true;
+            return;
+        }
+        // q is an esc alias in every non-typing context; inside a focused
+        // text input it is an ordinary character.
+        let msg = if let Msg::Char('q', false) = &msg {
+            if !self.typing() { Msg::Esc } else { msg }
+        } else {
+            msg
+        };
+        self.notice.clear();
+        // session info notices live until the first key press
+        self.fs_mut().startup.clear();
+        // ctrl+v (and terminals that report ctrl+shift+v as ctrl+v) reads the
+        // clipboard and flows through the same paste path as bracketed paste.
+        // Outside a text input it stays an unbound list key.
+        let msg = if msg == Msg::Ctrl('v') && self.typing() {
+            match self.read_clipboard_text() {
+                Ok(text) => Msg::Paste(text),
+                Err(e) => {
+                    self.notice = format!("paste failed: {e}");
+                    return;
+                }
+            }
+        } else {
+            msg
+        };
+        if self.macro_control(&msg) {
+            return;
+        }
+        if self.recording {
+            self.rec_buf.push(msg.clone());
+            if self.rec_buf.len() >= MAX_MACRO_KEYS {
+                self.macro_buf = std::mem::take(&mut self.rec_buf);
+                self.recording = false;
+                self.notice = format!(
+                    "macro limit reached ({} keys) — recording stopped",
+                    MAX_MACRO_KEYS
+                );
+            }
+        }
+        self.dispatch_key(msg);
+    }
+
+    /// dispatchKey routes one key to the active handler and runs the
+    /// post-key refreshes (variant inference, live validation issues). Keys
+    /// that change the document push the pre-key snapshot onto the undo
+    /// stack, so one undo step reverts exactly one key's worth of changes.
+    /// u/ctrl+r act only in list mode and bypass the snapshot wrap.
+    pub fn dispatch_key(&mut self, msg: Msg) {
+        // An expanded description is transient: any key except the c toggle
+        // folds it first, then runs normally.
+        if self.desc_expanded && msg.key_str() != "c" {
+            self.desc_expanded = false;
+        }
+        // Bracketed paste (terminal paste, ctrl+shift+v) only edits focused
+        // text inputs; list mode keeps ignoring it.
+        if let Msg::Paste(text) = &msg {
+            if self.typing() {
+                self.paste_into_focused_input(text);
+            }
+            return;
+        }
+        if self.list_mode() && self.apply_history_key(&msg) {
+            self.cmd_buf.clear(); // a history key breaks any pending g combo
+            self.refresh_variant_menu();
+            self.refresh_issues();
+            return;
+        }
+        self.ring_keep = false;
+        // S switches the schema, not a document edit: it records the location
+        // and refreshes issues itself, so it must not pollute undo history.
+        if self.list_mode() && msg.key_str() == "S" {
+            self.route_key(msg);
+            return;
+        }
+        if self.plain_motion(&msg) {
+            self.route_key(msg);
+            return;
+        }
+        let pre = self.doc().clone();
+        let pre_file = self.cur;
+        self.route_key(msg);
+        // A file switch swaps the active document. That is navigation, not an
+        // edit: pushing the leaving clone would pollute the restored file's
+        // undo history.
+        let edited = self.cur == pre_file
+            && !nodes_equal(
+                &pre,
+                Some(pre.root),
+                &self.fs().doc,
+                Some(self.fs().doc.root),
+            );
+        if edited {
+            self.files[pre_file].history.push_undo(pre);
+        }
+        if edited && !self.ring_keep {
+            self.files[pre_file].change_jump = None;
+        }
+        self.refresh_variant_menu();
+        if edited {
+            self.refresh_issues();
+        }
+    }
+
+    /// routeKey is the overlay dispatch: the innermost open surface consumes
+    /// the key.
+    fn route_key(&mut self, msg: Msg) {
+        let Some(ov) = self.overlay.take() else {
+            self.key_list(msg);
+            return;
+        };
+        self.overlay = match ov {
+            Overlay::Confirm(c) => self.key_confirm(msg, c),
+            Overlay::Issues(s) => self.key_issues(msg, s),
+            Overlay::Errs(s) => self.key_errs(msg, s),
+            Overlay::RefPick(s) => self.key_ref_pick(msg, s),
+            Overlay::Text(s) => self.key_text(msg, s),
+            Overlay::Search(s) => self.key_search(msg, s),
+            Overlay::Edit(s) => self.key_edit(msg, s),
+            Overlay::Add(s) => self.key_add(msg, s),
+            Overlay::Write(s) => self.key_write(msg, s),
+            Overlay::Command(s) => self.key_command(msg, s),
+            Overlay::ShellOut(s) => self.key_shell_out(msg, s),
+            Overlay::Anc(s) => self.key_anchor(msg, s),
+            Overlay::Mrg(s) => self.key_merge(msg, s),
+            Overlay::Comment(s) => self.key_comment(msg, s),
+            Overlay::CommentEdit(s) => self.key_comment_edit(msg, s),
+            Overlay::Help(s) => self.key_help(&msg, s),
+            Overlay::FilePick(s) => self.key_file_pick(&msg, s),
+        };
+    }
+
+    /// applyHistoryKey handles u/ctrl+r; consumed reports whether the key
+    /// was a history key. A successful undo/redo arms the change ring and
+    /// lands the cursor on the first changed row; ctrl+j/k cycles the rest.
+    pub fn apply_history_key(&mut self, msg: &Msg) -> bool {
+        let key = msg.key_str();
+        let f = self.fs_mut();
+        let res = match key.as_str() {
+            "u" => Some(f.history.undo(&mut f.doc)),
+            "ctrl+r" => Some(f.history.redo(&mut f.doc)),
+            _ => None,
+        };
+        match res {
+            Some(mut res) => {
+                self.notice = res.notice.to_string();
+                if res.changed {
+                    self.repair_stack();
+                    if !res.paths.is_empty() {
+                        let first = res.paths[0].clone();
+                        // rotate the landed entry to the back: ctrl+j then
+                        // walks the rest in order even when the landing left
+                        // the cursor off any entry (rule 1 keeps an editor
+                        // open; removals park on the container row), and
+                        // ctrl+k re-lands it. replace-all/issues/search
+                        // rings arm unchanged and always land exactly.
+                        let mut ring = std::mem::take(&mut res.paths);
+                        ring.remove(0);
+                        ring.push(first.clone());
+                        self.fs_mut().change_jump = Some(ring);
+                        self.nav_forward();
+                        self.land_after_history(&first);
+                    }
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    // --- save flow ----------------------------------------------------------
+
+    /// save handles ctrl+s: validate, then write the active file and stay in
+    /// the session (an invalid document opens the errors overlay; --force
+    /// writes anyway).
+    pub fn save(&mut self) {
+        self.validate_and_write(false, "");
+    }
+
+    /// openWriteTo arms the w/W input.
+    pub fn open_write_to(&mut self) {
+        let mut ti = TextInput::new();
+        ti.set_value(self.opts().path.clone());
+        ti.cursor_end();
+        self.overlay = Some(Overlay::Write(WriteState {
+            ti,
+            err: String::new(),
+            sug_prefix: String::new(),
+            sugs: Vec::new(),
+            sug_idx: -1,
+            sug_col: 0,
+        }));
+        self.refresh_write_suggestions();
+    }
+
+    /// validateAndWrite validates the document like ctrl+s and then writes
+    /// it to target: "" is the session's own file (opts.Save), any other
+    /// path goes through opts.WriteTo (menu W).
+    pub fn validate_and_write(&mut self, exit: bool, target: &str) {
+        let validate = self.opts().validate.clone();
+        if let Some(validate) = validate {
+            let errs = validate(&self.doc());
+            if !errs.is_empty() {
+                self.open_errs_overlay(errs, exit, target);
+                return;
+            }
+        }
+        self.write_to(exit, false, target);
+    }
+
     /// Rows available to a scrolling overlay list: the screen minus the
     /// title/footer chrome, an optional extra line and the filter input.
     pub(crate) fn overlay_page_size(&self, extra: usize, filtering: bool) -> usize {
@@ -1827,10 +1006,8 @@ impl App {
         self.overlay = Some(Overlay::Confirm(ConfirmState {
             title,
             hint: "y/enter/space save & exit · n discard & exit · esc stay".to_string(),
-            on_yes: Some(Box::new(|m| m.save_dirty_files_and_exit())),
-            on_no: Some(Box::new(|m| {
-                m.aborted = true;
-            })),
+            on_yes: Some(ConfirmAction::SaveDirtyAndExit),
+            on_no: Some(ConfirmAction::Abort),
         }));
     }
 
@@ -2129,35 +1306,6 @@ mod edit;
 mod overlays;
 mod render;
 mod search;
-
-// matchedLeafVariant re-export (rows.rs) used by value_style
-fn matched_leaf_variant_pub(
-    schema: &Schema,
-    node: FormNodeId,
-    doc: &Doc,
-    val: Option<NodeId>,
-) -> Option<FormNodeId> {
-    crate::ui::rows::matched_leaf_variant(schema, node, doc, val)
-}
-
-/// schemaAcceptsValue wrapper (rows.rs).
-fn schema_accepts_value_(
-    schema: &Schema,
-    def: Option<FormNodeId>,
-    doc: &Doc,
-    v: Option<NodeId>,
-) -> bool {
-    crate::ui::rows::schema_accepts_value(schema, def, doc, v)
-}
-
-/// same_state by value (menu.rs same_state needs two MenuStates).
-fn same_state_eq(a: &MenuState, b: &MenuState) -> bool {
-    a.node == b.node
-        && a.kind == b.kind
-        && a.variant_of == b.variant_of
-        && a.one_of == b.one_of
-        && a.path == b.path
-}
 
 /// Severity marker for the issues status row.
 enum Sev {

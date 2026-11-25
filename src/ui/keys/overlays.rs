@@ -65,22 +65,45 @@ impl App {
     pub fn key_confirm(&mut self, msg: Msg, c: ConfirmState) -> Option<Overlay> {
         match msg.key_str().as_str() {
             "y" | "enter" | " " => {
-                if let Some(on_yes) = c.on_yes {
-                    on_yes(self);
+                if let Some(action) = c.on_yes {
+                    self.run_confirm(action);
                 }
-                // the callback may have opened another surface (the enum
+                // the action may have opened another surface (the enum
                 // picker of a chosen variant, the save-errors overlay):
                 // keep whatever it installed, like Go's model fields.
                 self.overlay.take()
             }
             "n" => {
-                if let Some(on_no) = c.on_no {
-                    on_no(self);
+                if let Some(action) = c.on_no {
+                    self.run_confirm(action);
                 }
                 self.overlay.take()
             }
             "esc" => None,
             _ => Some(Overlay::Confirm(c)),
+        }
+    }
+
+    /// runConfirm interprets one ConfirmAction against the app (the data
+    /// the confirm carried when it was armed; see `ConfirmState`).
+    fn run_confirm(&mut self, action: ConfirmAction) {
+        match action {
+            ConfirmAction::ReloadFile(idx) => self.reload_file(idx),
+            ConfirmAction::RemoveItem { path, pop } => {
+                let _ = self.fs_mut().doc.remove(&path);
+                if pop {
+                    self.fs_mut().stack.pop(); // back to the items menu
+                }
+            }
+            ConfirmAction::ReplaceValue {
+                variant,
+                path,
+                one_of,
+                old,
+                keep_slot,
+            } => self.apply_replace_value(variant, path, one_of, old, keep_slot),
+            ConfirmAction::SaveDirtyAndExit => self.save_dirty_files_and_exit(),
+            ConfirmAction::Abort => self.aborted = true,
         }
     }
 
@@ -296,28 +319,6 @@ impl App {
             }
         }
         Some(Overlay::RefPick(s))
-    }
-
-    /// ref_label renders one reference row: path plus value summary.
-    pub(super) fn ref_label(&self, p: &[PathSeg]) -> String {
-        format!(
-            "{}  {}",
-            crate::doc::jsondoc::path_string(p),
-            raw_value_summary(&self.fs().schema, self.doc(), p)
-        )
-    }
-
-    /// ref_indices lists the reference paths matching the picker query.
-    pub(super) fn ref_indices<'a>(
-        &'a self,
-        s: &'a RefPickState,
-    ) -> impl Iterator<Item = usize> + 'a {
-        let q = s.filter.ti.value().to_lowercase();
-        s.paths
-            .iter()
-            .enumerate()
-            .filter(move |(_, p)| q.is_empty() || self.ref_label(p).to_lowercase().contains(&q))
-            .map(|(i, _)| i)
     }
 
     /// keyText drives the raw textarea overlay (Go keyText).
@@ -826,10 +827,10 @@ impl App {
             command::Command::Shell { mode, command } => {
                 let cmd = command::expand_percent(&command, &self.opts().path);
                 match mode {
-                    shell::ShellMode::Read => self.shell_read(&cmd),
-                    shell::ShellMode::AppendLines => self.shell_append_lines(&cmd),
-                    shell::ShellMode::Write => self.shell_write(&cmd),
-                    shell::ShellMode::Execute => self.shell_execute_only(&cmd),
+                    ShellMode::Read => self.shell_read(&cmd),
+                    ShellMode::AppendLines => self.shell_append_lines(&cmd),
+                    ShellMode::Write => self.shell_write(&cmd),
+                    ShellMode::Execute => self.shell_execute_only(&cmd),
                 }
             }
         }
@@ -838,7 +839,7 @@ impl App {
     /// shell_read is vi's `:r !cmd` scoped to the cursor value: the command's
     /// stdout replaces a string or appends to a string array.
     pub(super) fn shell_read(&mut self, cmd: &str) {
-        let stdout = match shell::run_capture(cmd) {
+        let stdout = match run_capture(cmd) {
             Ok(out) => out,
             Err(e) => {
                 self.notice = format!(": {e}");
@@ -852,8 +853,8 @@ impl App {
                 return;
             }
         };
-        let output = shell::output_text(&stdout);
-        if let Err(e) = shell::apply(&mut self.fs_mut().doc, &target, &output) {
+        let output = output_text(&stdout);
+        if let Err(e) = apply(&mut self.fs_mut().doc, &target, &output) {
             self.notice = format!(": {e}");
         }
     }
@@ -861,7 +862,7 @@ impl App {
     /// shell_append_lines is the `a <cmd>` mode: split stdout into lines and
     /// append each one as a new item of the focused string array.
     pub(super) fn shell_append_lines(&mut self, cmd: &str) {
-        let stdout = match shell::run_capture(cmd) {
+        let stdout = match run_capture(cmd) {
             Ok(out) => out,
             Err(e) => {
                 self.notice = format!(": {e}");
@@ -875,8 +876,8 @@ impl App {
                 return;
             }
         };
-        let lines = shell::output_lines(&stdout);
-        if let Err(e) = shell::apply_lines(&mut self.fs_mut().doc, &target, &lines) {
+        let lines = output_lines(&stdout);
+        if let Err(e) = apply_lines(&mut self.fs_mut().doc, &target, &lines) {
             self.notice = format!(": {e}");
         }
     }
@@ -892,9 +893,9 @@ impl App {
                 return;
             }
         };
-        match shell::run_with_input(cmd, &text) {
+        match run_with_input(cmd, &text) {
             Ok(out) => {
-                let shown = shell::compact_output(&out);
+                let shown = compact_output(&out);
                 self.notice = if shown.is_empty() {
                     format!(": piped {} bytes to command", text.len())
                 } else {
@@ -911,11 +912,11 @@ impl App {
     /// fits the blank rows above the bottom block and otherwise opens the
     /// scrolling page.
     pub(super) fn shell_execute_only(&mut self, cmd: &str) {
-        match shell::run_capture(cmd) {
+        match run_capture(cmd) {
             Ok(out) => {
-                let text = shell::output_text(&out);
+                let text = output_text(&out);
                 if !text.contains('\n') {
-                    self.notice = shell::compact_output(&out);
+                    self.notice = compact_output(&out);
                     return;
                 }
                 let lines = wrap_text(&text, self.width.saturating_sub(1));
@@ -952,7 +953,7 @@ impl App {
                 return None;
             };
         let f = self.fs();
-        shell::resolve_target(&f.schema, &f.doc, node, &path)
+        resolve_target(&f.schema, &f.doc, node, &path)
     }
 
     /// shell_array_target resolves the `a` mode slot. A row that is itself a
@@ -966,13 +967,13 @@ impl App {
         let r = rows.get(cursor)?;
         if matches!(r.kind, RowKind::Field | RowKind::Drill | RowKind::Unknown) {
             let f = self.fs();
-            if let Some(t) = shell::resolve_array_target(&f.schema, &f.doc, r.fn_, &r.path) {
+            if let Some(t) = resolve_array_target(&f.schema, &f.doc, r.fn_, &r.path) {
                 return Some(t);
             }
         }
         if st.kind == MenuKind::Items {
             let f = self.fs();
-            return shell::resolve_array_target(&f.schema, &f.doc, Some(st.node), &st.path);
+            return resolve_array_target(&f.schema, &f.doc, Some(st.node), &st.path);
         }
         None
     }
@@ -1318,45 +1319,6 @@ impl App {
 
     // --- external $EDITOR ---------------------------------------------------
 
-    /// editRawExternal writes the whole document to a temp file and arms
-    /// $EDITOR (Go editRawExternal). Used by E at the root.
-    pub(super) fn edit_raw_external(&mut self) {
-        let codec = self.fs().codec;
-        match codec.write(self.doc(), &self.fs().meta) {
-            Err(e) => self.notice = format!("editor: {e}"),
-            Ok(data) => {
-                self.launch_external_edit(data, None, true, -1, false);
-            }
-        }
-    }
-
-    /// editValueExternal edits one value in $EDITOR (Go editValueExternal).
-    /// A string value is text, not a document: it opens without quotes or
-    /// format escaping and the edited text applies verbatim (the built-in
-    /// raw textarea's rule); every other value opens in the file's format.
-    pub(super) fn edit_value_external(&mut self, path: Vec<PathSeg>, insert_idx: i64) {
-        let mut buf = String::new();
-        let mut verbatim = false;
-        if let Some(cur) = self.doc().get(&path) {
-            if !is_null_val(self.doc(), cur) {
-                if let Value::Str(text) = self.doc().value(cur) {
-                    buf = text.clone();
-                    verbatim = true;
-                } else {
-                    let codec = self.fs().codec;
-                    match codec.write_value(self.doc(), cur) {
-                        Err(e) => {
-                            self.notice = format!("editor: {e}");
-                            return;
-                        }
-                        Ok(s) => buf = s,
-                    }
-                }
-            }
-        }
-        self.launch_external_edit(buf, Some(path), false, insert_idx, verbatim);
-    }
-
     /// run_pending_editor runs the armed $EDITOR and applies its output (Go
     /// applyExternalEdit + the exec path). In tests (exec_editor=false) the
     /// pending edit is stashed so `finish_external_value` can deliver the
@@ -1416,69 +1378,6 @@ impl App {
             }
         }
         let _ = std::fs::remove_file(&edit_path);
-    }
-
-    /// editExternalJSON writes data to a temp file and arms the editor.
-    pub(super) fn launch_external_edit(
-        &mut self,
-        data: String,
-        target: Option<Vec<PathSeg>>,
-        whole_doc: bool,
-        insert_idx: i64,
-        verbatim_str: bool,
-    ) {
-        let ext = self.fs().codec.raw_ext();
-        // uniquify: pid + a counter would race across processes; use nanos
-        let path = std::env::temp_dir().join(format!(
-            "jse-{}-{}{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0),
-            ext
-        ));
-        if let Err(e) = std::fs::write(&path, data) {
-            self.notice = format!("editor: {e}");
-            return;
-        }
-        let edit = ExternalEdit {
-            target: target.unwrap_or_default(),
-            insert_idx,
-            path: path.to_string_lossy().to_string(),
-            whole_doc,
-            verbatim_str,
-        };
-        self.pending_edit = Some(edit);
-    }
-
-    /// rebuildSchemaLessRoot re-derives the runtime root after a whole-document
-    /// raw edit swapped the root type (object ↔ array ↔ scalar): the
-    /// schema-less model is a snapshot of the loaded shape, so a stale root
-    /// would offer the wrong menu. Synth nodes and the stack are rebuilt
-    /// against the new model.
-    pub(crate) fn rebuild_schema_less_root(&mut self) {
-        let f = self.fs_mut();
-        f.schema = crate::smodel::untyped(&f.doc);
-        let root = f.schema.root;
-        let kind = crate::ui::rows::menu_kind_for(&f.schema, root);
-        f.menu_cache.clear();
-        f.stack.truncate(1);
-        if let Some(st) = f.stack.first_mut() {
-            st.kind = kind;
-            st.node = root;
-            st.path.clear();
-            st.cursor = 0;
-            st.offset = 0;
-            st.variant_of = None;
-            st.one_of = None;
-            st.sel.clear();
-            st.visual = false;
-            st.vanchor = 0;
-            st.filter.ti = Default::default();
-            st.filter.active = false;
-            st.filter.restore = 0;
-        }
     }
 
     /// applyExternalEdit parses the editor's temp file and applies it (Go
@@ -1605,5 +1504,64 @@ impl App {
     pub fn external_edit_failed(&mut self, err: &str) {
         self.pending_edit = None;
         self.notice = format!("editor: {err}");
+    }
+
+    /// keyFilePick drives the s-key file switcher: enter switches to the
+    /// highlighted file, esc closes without moving.
+    pub fn key_file_pick(&mut self, msg: &Msg, mut s: FilePickState) -> Option<Overlay> {
+        if s.filter.active {
+            return self.key_file_pick_search(msg, s);
+        }
+        let n = self.files.len();
+        if self.jump_keys(msg, &mut s.cursor, n) {
+            return Some(Overlay::FilePick(s));
+        }
+        match msg.key_str().as_str() {
+            "/" => s.filter.open(s.cursor),
+            "up" | "k" | "ctrl+k" => {
+                s.cursor = wrap_cursor(s.cursor, -1, n);
+            }
+            "down" | "j" | "ctrl+j" => {
+                s.cursor = wrap_cursor(s.cursor, 1, n);
+            }
+            "pgdown" | "ctrl+f" => {
+                let page = self.overlay_page_size(0, false);
+                s.cursor = (s.cursor + page).min(n.saturating_sub(1));
+            }
+            "pgup" | "ctrl+b" => {
+                let page = self.overlay_page_size(0, false);
+                s.cursor = s.cursor.saturating_sub(page);
+            }
+            "enter" => {
+                self.switch_to_file(s.cursor);
+                return None;
+            }
+            "esc" => return None,
+            _ => {}
+        }
+        Some(Overlay::FilePick(s))
+    }
+
+    /// keyFilePickSearch consumes keys while the file-picker filter is
+    /// active.
+    pub(super) fn key_file_pick_search(
+        &mut self,
+        msg: &Msg,
+        mut s: FilePickState,
+    ) -> Option<Overlay> {
+        let n = self.file_pick_indices(&s).count();
+        let total = self.files.len();
+        let page = self.overlay_page_size(0, true);
+        if matches!(
+            s.filter.key(msg, &mut s.cursor, n, total, page),
+            FilterAction::Commit
+        ) {
+            let idx = self.file_pick_indices(&s).nth(s.cursor);
+            if let Some(i) = idx {
+                self.switch_to_file(i);
+                return None;
+            }
+        }
+        Some(Overlay::FilePick(s))
     }
 }

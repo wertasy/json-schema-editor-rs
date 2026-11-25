@@ -400,10 +400,10 @@ fn diff_node(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doc::jsondoc::parse;
+    use crate::doc::jsoncdoc::parse_strict;
 
     fn doc(src: &str) -> Doc {
-        parse(src).expect("test json")
+        parse_strict(src).expect("test json")
     }
 
     fn push(h: &mut History, src: &str) {

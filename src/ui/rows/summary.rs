@@ -241,3 +241,28 @@ pub fn clip_runes(s: &str, max: usize) -> String {
     }
     chs[..max - 1].iter().collect::<String>() + "…"
 }
+
+/// tagOfNode returns an object's "tag" string value.
+pub(crate) fn tag_of_node(doc: &Doc, n: NodeId) -> String {
+    if let Value::Object(mems) = doc.value(n) {
+        for m in mems {
+            if m.key == "tag" {
+                if let Value::Str(s) = doc.value(m.val) {
+                    return s.clone();
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+/// completionCandidate text extraction: the value form the field accepts —
+/// strings for string fields, the numeric literal for numeric fields.
+pub(crate) fn value_text(doc: &Doc, v: Option<NodeId>, want_num: bool) -> Option<String> {
+    let v = v?;
+    match doc.value(v) {
+        Value::Str(s) if !want_num => Some(s.clone()),
+        Value::Num(n) if want_num => Some(n.clone()),
+        _ => None,
+    }
+}

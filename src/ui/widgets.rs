@@ -6,6 +6,8 @@
 
 use crate::doc::jsondoc::{self, CopyMode, Doc, DocError, NodeId, PathSeg, Value};
 use crate::smodel::FormNode;
+use crate::ui::style;
+use crate::ui::util::{char_width, display_width};
 
 // --- raw editors (Go raw.go) ----------------------------------------------------
 
@@ -457,16 +459,30 @@ impl TextArea {
         self.col = 0;
     }
 
-    pub fn set_width(&mut self, w: u16) {
-        self.width = w;
+    /// set_viewport_within fits the overlay textarea to the terminal: four
+    /// columns / six rows of margin, at least 20×3, at most 100×24. The raw
+    /// terminal size goes in; the text area's own viewport comes out.
+    pub fn set_viewport_within(&mut self, outer_w: u16, outer_h: u16) {
+        self.width = outer_w.saturating_sub(4).clamp(20, 100);
+        self.height = outer_h.saturating_sub(6).clamp(3, 24);
     }
 
-    pub fn set_height(&mut self, h: u16) {
+    /// The editing viewport is width+height as a pair: one call replaces
+    /// both, so callers cannot leave them inconsistent. Widget tests size
+    /// the viewport directly; overlay code goes through
+    /// [`TextArea::set_viewport_within`].
+    #[cfg(test)]
+    pub fn set_viewport(&mut self, w: u16, h: u16) {
+        self.width = w;
         self.height = h;
     }
 
     pub fn width(&self) -> u16 {
         self.width
+    }
+
+    pub fn height(&self) -> u16 {
+        self.height
     }
 
     pub fn cursor(&self) -> (usize, usize) {
@@ -701,10 +717,155 @@ impl TextArea {
     }
 }
 
+// --- input view rendering -------------------------------------------------------
+
+/// cycle_text_sugs moves a TextInput completion cursor over a stored candidate
+/// list and writes the selected candidate. Used by arrows once completion is
+/// active, so the list is not rebuilt from the completed value (which would
+/// shrink it to that one candidate).
+pub(crate) fn cycle_text_sugs(
+    ti: &mut TextInput,
+    sugs: &[String],
+    idx: &mut i64,
+    delta: i64,
+) -> bool {
+    if sugs.is_empty() {
+        return false;
+    }
+    let n = sugs.len() as i64;
+    *idx = if *idx < 0 {
+        if delta > 0 { 0 } else { n - 1 }
+    } else {
+        (*idx + delta).rem_euclid(n)
+    };
+    ti.set_value(sugs[*idx as usize].clone());
+    ti.cursor_end();
+    true
+}
+
+/// input_avail is the viewport width of a TextInput rendered after `prefix`
+/// cells on a line clipped to `width`: the caret cell and one margin column
+/// stay inside the clip.
+pub(crate) fn input_avail(width: usize, prefix: usize) -> usize {
+    width.saturating_sub(prefix + 2)
+}
+
+/// ti_window returns the char range [start, end) of a TextInput value that a
+/// viewport of `avail` cells shows so the cursor cell stays visible, plus
+/// the display width skipped before `start`. Long values scroll horizontally
+/// around the caret instead of running past the terminal edge (the schema
+/// picker's inputLine behavior, bubbles textinput with a Width).
+pub(crate) fn ti_window(ti: &TextInput, avail: usize) -> (usize, usize, usize) {
+    let chars: Vec<char> = ti.value().chars().collect();
+    let cursor = ti.cursor().min(chars.len());
+    let cell_at = |n: usize| chars[..n].iter().map(|&c| char_width(c)).sum::<usize>();
+    let cursor_cell = cell_at(cursor);
+    let mut start = 0usize;
+    let window = avail.max(1);
+    while start < cursor && cursor_cell - cell_at(start) >= window {
+        start += 1;
+    }
+    let mut end = start;
+    let mut used = 0usize;
+    while end < chars.len() {
+        let w = char_width(chars[end]);
+        if used + w > avail {
+            break;
+        }
+        used += w;
+        end += 1;
+    }
+    (start, end, cell_at(start))
+}
+
+/// ti_view renders a TextInput viewport of `avail` cells like bubbles
+/// textinput.View(): the value with the cursor cell reverse-video, scrolled
+/// horizontally so the caret stays visible. Returns the skipped leading
+/// cells so callers can map value columns (sug_col) to screen columns.
+pub(crate) fn ti_view(ti: &TextInput, avail: usize) -> (usize, String) {
+    let (start, end, shift) = ti_window(ti, avail);
+    let chars: Vec<char> = ti.value().chars().collect();
+    let cursor = ti.cursor().min(chars.len());
+    let mut out = String::new();
+    if cursor < end {
+        out.push_str(&chars[start..cursor].iter().collect::<String>());
+        out.push_str("\x1b[7m");
+        out.push(chars[cursor]);
+        out.push_str("\x1b[27m");
+        out.push_str(&chars[cursor + 1..end].iter().collect::<String>());
+    } else {
+        out.push_str(&chars[start..end].iter().collect::<String>());
+        out.push_str("\x1b[7m \x1b[27m");
+    }
+    (shift, out)
+}
+
+/// inputLine renders `prompt + value` with a reverse-video caret, scrolling
+/// horizontally so the caret stays visible (the schema picker's search row).
+pub(crate) fn search_input_line(prompt: &str, ti: &TextInput, width: usize) -> String {
+    let (_, input) = ti_view(ti, input_avail(width, display_width(prompt)));
+    format!("{prompt}{input}")
+}
+
+/// search_field_line renders one overlay input row. Only the focused input
+/// shows the reverse-video caret; the inactive row is dimmed and caret-less
+/// so tabbing between search and replace is visible.
+pub(crate) fn search_field_line(
+    label: &str,
+    ti: &TextInput,
+    focused: bool,
+    width: usize,
+) -> String {
+    if focused {
+        let (_, input) = ti_view(ti, input_avail(width, display_width(label) + 2));
+        format!("{label}: {input}")
+    } else {
+        style::faint(&format!("{label}: {}", ti.value()))
+    }
+}
+
+/// Render a TextArea viewport with a reverse-video cursor cell. The window
+/// follows the cursor row (bubbles textarea behavior); a long line scrolls
+/// horizontally so the cursor stays visible.
+pub(crate) fn ta_view(ta: &TextArea) -> String {
+    let (top, h) = ta.window();
+    let w = (ta.width() as usize).max(1);
+    let (cursor_row, cursor_col) = ta.cursor();
+    let mut out = String::new();
+    let end = (top + h).min(ta.line_count());
+    for i in top..end {
+        if i > top {
+            out.push('\n');
+        }
+        let line = ta.line(i).unwrap_or("");
+        let shift = if i == cursor_row && cursor_col >= w {
+            cursor_col + 1 - w
+        } else {
+            0
+        };
+        let chars: Vec<char> = line.chars().skip(shift).take(w).collect();
+        if i != cursor_row {
+            out.extend(chars);
+            continue;
+        }
+        let col = cursor_col.saturating_sub(shift).min(w - 1);
+        let upto = col.min(chars.len());
+        out.extend(chars.iter().take(upto));
+        let cell = chars.get(col).copied().unwrap_or(' ');
+        out.push_str("\x1b[7m");
+        out.push(cell);
+        out.push_str("\x1b[0m");
+        if col < chars.len() {
+            out.extend(chars.iter().skip(col + 1));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doc::jsondoc::parse;
+    use crate::doc::jsoncdoc::parse_strict;
 
     fn seg(path: &[&str]) -> Vec<PathSeg> {
         path.iter().map(|p| PathSeg::key(*p)).collect()
@@ -889,7 +1050,7 @@ mod tests {
 
     #[test]
     fn omit_or_set_semantics() {
-        let mut doc = parse(r#"{"keep": 1, "drop": "x"}"#).unwrap();
+        let mut doc = parse_strict(r#"{"keep": 1, "drop": "x"}"#).unwrap();
         let empty = FormNode::default();
         let mut schema_doc = Doc::new();
 
@@ -941,7 +1102,7 @@ mod tests {
     #[test]
     fn omit_or_set_null_placeholder_stays() {
         // a null placeholder (a key seeded by a) must survive an empty submit
-        let mut doc = parse(r#"{"seed": null}"#).unwrap();
+        let mut doc = parse_strict(r#"{"seed": null}"#).unwrap();
         let empty = FormNode::default();
         let schema_doc = Doc::new();
         omit_or_set(&mut doc, &seg(&["seed"]), true, &empty, &schema_doc, |d| {
@@ -970,7 +1131,7 @@ mod tests {
 
     #[test]
     fn apply_scalar_validation_error_does_not_touch_doc() {
-        let mut doc = parse(r#"{"p": 1}"#).unwrap();
+        let mut doc = parse_strict(r#"{"p": 1}"#).unwrap();
         let schema_doc = Doc::new();
         let int_fn = fn_json_type("integer");
         let err = apply_scalar(&mut doc, &int_fn, &schema_doc, &seg(&["p"]), "abc").unwrap_err();
@@ -1288,9 +1449,8 @@ mod tests {
     #[test]
     fn text_area_set_value_and_dimensions() {
         let mut ta = TextArea::new();
-        ta.set_width(80);
-        ta.set_height(24);
-        assert_eq!((ta.width(), ta.height), (80, 24));
+        ta.set_viewport(80, 24);
+        assert_eq!((ta.width(), ta.height()), (80, 24));
         ta.set_value("a\n\nb\n"); // trailing newline keeps a final empty line
         assert_eq!(ta.value(), "a\n\nb\n");
         assert_eq!(ta.cursor(), (0, 0));
@@ -1324,8 +1484,7 @@ mod ta_window_tests {
                 .collect::<Vec<_>>()
                 .join("\n"),
         );
-        ta.set_height(10);
-        ta.set_width(40);
+        ta.set_viewport(40, 10);
         assert_eq!(ta.window(), (0, 10), "cursor at row 0 shows the first page");
         for _ in 0..15 {
             ta.insert_newline();
