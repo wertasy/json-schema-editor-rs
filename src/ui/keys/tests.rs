@@ -1058,6 +1058,100 @@ fn multi_tail_deletions_count_on_parent() {
     );
 }
 
+/// Mouse hover must stay inert while an overlay owns the screen or a
+/// visual selection is live: it neither moves the cursor nor repaints.
+#[test]
+fn hover_guards_overlay_and_visual_select() {
+    let mut m = mk_app(test_doc(), test_opts());
+    m.width = 80;
+    let _ = m.view(); // populate the frame's click-target map
+    // visual select live: hover is ignored
+    press(&mut m, &["v"]); // visual on at row 0
+    let _ = m.view();
+    let before = cursor_cursor(&mut m);
+    assert!(
+        !m.mouse_hover(4),
+        "hover must be inert during visual select"
+    );
+    assert_eq!(cursor_cursor(&mut m), before);
+    press(&mut m, &["v"]); // visual off
+    let _ = m.view();
+    assert!(m.mouse_hover(4), "plain-menu hover moves the cursor");
+    press(&mut m, &["?"]); // help overlay owns the screen
+    let _ = m.view();
+    let cur = cursor_cursor(&mut m);
+    assert!(!m.mouse_hover(4), "hover must be inert under an overlay");
+    assert_eq!(cursor_cursor(&mut m), cur);
+    press(&mut m, &["esc"]); // close help
+    let _ = m.view();
+    // hover a DIFFERENT row: the row the cursor already sits on is a
+    // deliberate no-op (no repaint)
+    assert!(
+        m.mouse_hover(5),
+        "hover works again after the overlay closes"
+    );
+    assert_eq!(cursor_cursor(&mut m), 3);
+}
+
+/// The wheel on a numeric edit seeds an empty input from ±1 (schema default
+/// first), keeps stepping, and ignores non-numeric content entirely.
+#[test]
+fn edit_wheel_seeds_empty_numeric_and_ignores_text() {
+    let schema = schema_build(|b| {
+        let port = b.id(scalar("port", "Port", "integer"));
+        let name = b.id(scalar("name", "Name", "string"));
+        b.id(FormNode {
+            key: "$".into(),
+            kind: Kind::Object,
+            children: vec![port, name],
+            ..FormNode::default()
+        })
+    });
+    let doc = dbuild(|db| db.obj(vec![("port", db.n("7")), ("name", db.s("abc"))]));
+    let mut m = app_with(schema, doc, test_opts());
+    let port = sp(&["port"]);
+    let name = sp(&["name"]);
+
+    // numeric edit with an existing value: wheel up/down step the literal
+    set_cursor_path(&mut m, &port);
+    press(&mut m, &["enter"]);
+    assert!(m.edit_wheel(1), "wheel up on a number edits it");
+    match &m.overlay {
+        Some(Overlay::Edit(e)) => assert_eq!(e.ti.value(), "8"),
+        _ => panic!("edit overlay missing"),
+    }
+    assert!(m.edit_wheel(-2), "wheel down steps by the delta");
+    match &m.overlay {
+        Some(Overlay::Edit(e)) => assert_eq!(e.ti.value(), "6"),
+        _ => panic!("edit overlay missing"),
+    }
+    press(&mut m, &["esc"]);
+
+    // an empty numeric input seeds before stepping (schema has no default:
+    // ±1)
+    set_cursor_path(&mut m, &port);
+    press(&mut m, &["enter"]);
+    if let Some(Overlay::Edit(e)) = &mut m.overlay {
+        e.ti.set_value("");
+    }
+    assert!(m.edit_wheel(1), "empty numeric seeds from the wheel");
+    match &m.overlay {
+        Some(Overlay::Edit(e)) => assert_eq!(e.ti.value(), "1"),
+        _ => panic!("edit overlay missing"),
+    }
+    press(&mut m, &["esc"]);
+
+    // a text edit ignores the wheel entirely
+    set_cursor_path(&mut m, &name);
+    press(&mut m, &["enter"]);
+    assert!(!m.edit_wheel(1), "text edits ignore the wheel");
+    match &m.overlay {
+        Some(Overlay::Edit(e)) => assert_eq!(e.ti.value(), "abc"),
+        _ => panic!("edit overlay missing"),
+    }
+    press(&mut m, &["esc"]);
+}
+
 /// Rows modified against the baseline carry ` ~`, rows the schema still
 /// lists after removal carry ` -`, each in its own color.
 #[test]

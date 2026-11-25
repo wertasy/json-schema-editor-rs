@@ -1507,7 +1507,7 @@ impl App {
     /// subtree inherit the `+` once they carry a value; unassigned keys are
     /// suppressed (`drop_added`).
     pub(crate) fn diff_badge_of(&self, path: &[PathSeg], has_value: bool) -> Option<String> {
-        let mut bits = self.diff_kinds_of(path, has_value)?;
+        let bits = self.diff_kinds_of(path, has_value)?;
         if bits == 0 {
             return None;
         }
