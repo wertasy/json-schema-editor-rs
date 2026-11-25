@@ -1,0 +1,9 @@
+{
+  "name": "jse",
+  "id": "dev.jse.editor",
+  "version": "0.12.0",
+  "build": 1,
+  "rust": "gui-app",
+  "root": "App",
+  "appearance": "system"
+}
