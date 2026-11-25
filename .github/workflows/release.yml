@@ -211,8 +211,10 @@ jobs:
             cp "$f" dist/
           done
           for app in .nsh/out/*.app; do
-            # macOS and unsigned iOS builds ship as .app bundles
-            ditto -c -k --keepParent "$app" "dist/$(basename "$app").zip"
+            # macOS and unsigned iOS builds ship as .app bundles; name the
+            # zip per target so same-named bundles don't overwrite each
+            # other when the release job merges the artifacts
+            ditto -c -k --keepParent "$app" "dist/jse-${{ matrix.target }}-app.zip"
           done
           ls -l dist
       - uses: actions/upload-artifact@v4
