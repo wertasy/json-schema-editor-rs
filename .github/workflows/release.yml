@@ -123,6 +123,7 @@ jobs:
           - os: ubuntu-latest
             target: android
             artifact: jse-gui-android
+            rust_targets: aarch64-linux-android,armv7-linux-androideabi
           - os: macos-latest
             target: macos
             artifact: jse-gui-macos-arm64
