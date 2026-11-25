@@ -50,7 +50,9 @@ struct Boot {
 static BOOT: Mutex<Option<Boot>> = Mutex::new(None);
 
 /// Runs the GUI over preloaded sessions and returns the outcome for the
-/// binary's exit mapping. Blocks until the window closes (desktops).
+/// binary's exit mapping. Blocks until the window closes (desktops). The
+/// desktop mounts require the desktop platform backends (`gui` feature,
+/// not just `gui-lib`).
 pub fn run(files: Vec<FileSession>, open: Option<OpenFn>) -> Outcome {
     let outcome = Arc::new(SharedOutcome::default());
     if let Ok(mut slot) = BOOT.lock() {
@@ -63,7 +65,7 @@ pub fn run(files: Vec<FileSession>, open: Option<OpenFn>) -> Outcome {
 
     // Desktop mounts; Android reaches App through the Native Shell runner
     // (nsh.json "root"), where run() is never called.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "gui"))]
     nsh_platform_linux::run_app(
         nsh_platform_linux::AppSource::Rust(nsh_platform_linux::Root::of::<App>()),
         nsh_platform_linux::AppOptions {
@@ -73,7 +75,7 @@ pub fn run(files: Vec<FileSession>, open: Option<OpenFn>) -> Outcome {
             ..Default::default()
         },
     );
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "gui"))]
     nsh_platform_macos::run_app(
         nsh_platform_macos::AppSource::Rust(nsh_platform_macos::Root::of::<App>()),
         nsh_platform_macos::AppOptions {
@@ -82,7 +84,7 @@ pub fn run(files: Vec<FileSession>, open: Option<OpenFn>) -> Outcome {
             ..Default::default()
         },
     );
-    #[cfg(target_os = "windows")]
+    #[cfg(all(target_os = "windows", feature = "gui"))]
     nsh_platform_windows::run_app(
         nsh_platform_windows::AppSource::Rust(nsh_platform_windows::Root::of::<App>()),
         nsh_platform_windows::AppOptions {

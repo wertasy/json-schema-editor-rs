@@ -23,7 +23,12 @@ path = "src/main.rs"
 [features]
 default = ["tui"]
 tui = []
-gui = ["dep:nsh-core", "dep:nsh-base", "dep:env_logger", "dep:nsh-platform-linux", "dep:nsh-platform-macos", "dep:nsh-platform-windows"]
+# GUI library code only (nsh runners link it through gui-app/): no desktop
+# platform backends, so cross builds (android describe etc.) need no GTK.
+gui-lib = ["dep:nsh-core", "dep:nsh-base"]
+# The jse desktop binary with the GUI: gui-lib plus the platform backends
+# the entry point mounts on Linux/macOS/Windows.
+gui = ["gui-lib", "dep:nsh-platform-linux", "dep:nsh-platform-macos", "dep:nsh-platform-windows"]
 
 [dependencies]
 ratatui = "=0.30.2"
@@ -42,10 +47,10 @@ url = "=2.5.8"
 ryu = "=1.0.23"
 parking_lot = "0.12.5"
 
-# Native Shell GUI (`--features gui`); pinned to the 0.7.0 release line.
+# Native Shell GUI (`--features gui-lib` / `gui`); pinned to the 0.7.0
+# release line.
 nsh-core = { version = "=0.7.0", optional = true }
 nsh-base = { version = "=0.7.0", optional = true }
-env_logger = { version = "=0.11", optional = true }
 
 # Platform backends are only linked by the desktop entry (src/main.rs);
 # the Android/Windows/Linux packages link them through the nsh runners.

@@ -137,7 +137,7 @@ mod progress {
     }
 }
 
-#[cfg(feature = "gui")]
+#[cfg(feature = "gui-lib")]
 pub mod gui;
 
 #[cfg(test)]

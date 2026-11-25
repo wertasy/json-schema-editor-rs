@@ -184,12 +184,14 @@ Rules of engagement, learned by using it here:
 
 The GUI is a second view over the same model, not a second editor:
 
-- **Feature matrix.** `tui` (default) builds the terminal front end; `gui` swaps
-  `main.rs` to mount the Native Shell app instead. Both may be on at once
-  (`nsh` runners enable `gui` on top of the defaults) — `main.rs` picks GUI
-  when `gui` is set. The nsh runners link `gui-app/`, a thin crate whose
-  path dependency requests `default-features = false, features = ["gui"]`;
-  `nsh.json` names it in `"rust"` and its root component `App`.
+- **Feature matrix.** `tui` (default) builds the terminal front end; `gui`
+  swaps `main.rs` to mount the Native Shell app instead (it implies
+  `gui-lib`). `gui-lib` is the library-only GUI (nsh-core/nsh-base, no
+  desktop platform backends) — the nsh runners link `gui-app/`, a thin
+  crate whose path dependency requests
+  `default-features = false, features = ["gui-lib"]`, so cross builds
+  (android describe) need no GTK; `nsh.json` names it in `"rust"` and its
+  root component `App`.
 - **One model.** `src/gui/bridge.rs` owns a headless `App` (the TUI's own)
   and drives it exclusively through `App::update(Msg)` and cursor moves —
   never by mutating documents directly. Editing semantics come for free;

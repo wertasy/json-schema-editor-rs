@@ -16,7 +16,7 @@ use nsh_core::prelude::Signal;
 use nsh_core::prelude::signal;
 
 pub use crate::ui::rows::{RowOps, RowView};
-use crate::ui::state::{App, FileState, Msg, OverlayData};
+use crate::ui::state::{App, FileState, Msg};
 use crate::ui::{FileSession, Outcome};
 
 pub use crate::ui::state::OverlayData as SheetView;

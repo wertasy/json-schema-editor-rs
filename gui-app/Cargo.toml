@@ -7,7 +7,8 @@ publish = false
 [workspace]
 
 [dependencies]
-# The GUI front end of jse with the `gui` feature; the nsh runners link
-# this crate, which turns the feature on for the editor library.
-json-schema-editor = { path = "..", default-features = false, features = ["gui"] }
+# The GUI front end of jse: the runners link this crate, which turns on
+# gui-lib for the editor library (platform backends come from the runners
+# themselves, so e.g. the android describe build needs no GTK).
+json-schema-editor = { path = "..", default-features = false, features = ["gui-lib"] }
 nsh-core = "=0.7.0"
