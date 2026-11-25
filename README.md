@@ -26,6 +26,7 @@ $
 - **Schema auto-discovery**: `-s`, the config's own `$schema`, YAML file-header directives, TOML `#:schema` directives, or SchemaStore directory matching/search; during a session, `S` re-searches and switches the current file's schema. Remote schemas come with a 24-hour cache and offline fallback. When no schema is found, the file still opens for direct editing (objects/arrays are navigated by structure, other values by runtime type; saving skips validation).
 - **Visible errors**: validation issues are listed at load time, and field lines and the issue list refresh in real time; unknown keys are warnings, not errors; `--force` forces a save.
 - **Multi-file sessions**: `jse a.json b.json` opens several files at once, `s` switches between them, and `ctrl+o`/`ctrl+i` move backward/forward through navigation history; on exit, all changes are saved in one pass.
+- **GUI front end**: `--features gui` swaps the terminal for a [Native Shell](https://nsh.dev) window (Linux/Windows/Android) over the same core — a schema-driven list with in-place forms and the same validation; see [GUI](docs/gui.md).
 
 ## Installation
 
@@ -107,6 +108,7 @@ For the complete key bindings, interface elements, and the keys of each overlay,
 | [Command line](docs/cli.md) | Arguments, multiple files, environment variables, exit codes |
 | [Schema sources and caching](docs/schema-sources.md) | Resolution order, SchemaStore, remote cache, offline fallback |
 | [Configuration file formats](docs/formats.md) | JSONC, YAML, TOML, comments/anchors/merge keys, format extensions |
+| [GUI (Native Shell)](docs/gui.md) | `--features gui` window front end, packaged apps for Linux/Windows/Android |
 | [Interface and key bindings](docs/interface.md) | Layout, status line, full key table, file switching and navigation history |
 | [Editing](docs/editing.md) | Field editing, clipboard, multi-select, search and replace, undo, macros, external editor |
 | [Validation and saving](docs/validation.md) | Form keywords, degradation rules, issue list, atomic write, exit codes |

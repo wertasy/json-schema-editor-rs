@@ -317,6 +317,11 @@ impl App {
     /// dirtyFiles lists the tabs with unsaved changes, the active file
     /// first, the rest in file order. A single-file session reports only
     /// itself.
+    /// Whether the active file has unsaved changes.
+    pub fn active_dirty(&self) -> bool {
+        self.dirty_files().contains(&self.cur)
+    }
+
     pub fn dirty_files(&self) -> Vec<usize> {
         if self.files.len() <= 1 {
             if self.dirty() {

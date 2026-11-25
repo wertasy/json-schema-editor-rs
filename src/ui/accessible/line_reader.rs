@@ -14,6 +14,7 @@ use std::io::BufRead;
 
 /// LineReader delivers at most one line (up to and including '\n') per
 /// [`read_line`](Self::read_line) call; the trailing newline is stripped.
+#[derive(Debug)]
 pub struct LineReader<R: BufRead> {
     src: R,
     pending: Vec<u8>,

@@ -22,7 +22,9 @@ use crate::doc::jsondoc::{parse_path, path_string};
 use crate::doc::{Doc, NodeId, PathSeg, Value, append_idx, append_key};
 use crate::icons::{ERR, WARN};
 use crate::smodel::{FormNode, FormNodeId, Kind, Schema};
-use crate::ui::state::{App, FileState, SynthKey, alias_at, anchor_holder_path, same_state};
+use crate::ui::state::{
+    App, FileState, SynthKey, alias_at, anchor_holder_path, is_path_prefix, same_state,
+};
 use crate::ui::util::wrap_cursor;
 use crate::ui::{Issue, MenuCtx, MenuKind, MenuState, Row, RowKind};
 
@@ -54,6 +56,7 @@ pub trait MergeView {
 }
 
 /// Merge-free default.
+#[derive(Debug)]
 pub struct NoMerge;
 
 impl MergeView for NoMerge {}
@@ -66,6 +69,16 @@ pub struct RowsEnv<'a> {
     pub merge: &'a dyn MergeView,
     /// memo of synthesized schema nodes (stable ids across calls)
     pub synth: HashMap<SynthKey, FormNodeId>,
+}
+
+impl std::fmt::Debug for RowsEnv<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RowsEnv")
+            .field("is_root", &self.is_root)
+            .field("issues_now", &self.issues_now.len())
+            .field("synth", &self.synth.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for RowsEnv<'_> {
@@ -698,6 +711,7 @@ pub use issue_parse::*;
 
 /// MergeLookup implements [`MergeView`] over the document's anchor state —
 /// Go hung these on the listModel; they are pure document walks here.
+#[derive(Debug)]
 pub struct MergeLookup<'a> {
     pub doc: &'a Doc,
 }
@@ -856,3 +870,206 @@ impl App {
 
 #[cfg(test)]
 mod tests;
+
+// --- view data for non-terminal front ends ----------------------------------
+
+/// One row of a front end's field list: the label/summary/marks the TUI's
+/// `row_line` assembles, as plain data instead of styled text.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RowView {
+    pub kind: RowKind,
+    pub label: String,
+    pub summary: String,
+    /// enum-array member / oneOf variant currently selected
+    pub on: bool,
+    /// schema-required member (the TUI labels it with a `*`)
+    pub required: bool,
+    /// validation error / unknown-key warning marks
+    pub err: bool,
+    pub warn: bool,
+    /// schema-unknown key: the TUI appends "(not in schema)"
+    pub not_in_schema: bool,
+    /// row opens a submenu (chevron)
+    pub drill: bool,
+    /// trailing row actions
+    pub ops: RowOps,
+    pub merged: String,
+}
+
+/// Trailing actions a front end offers on a row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RowOps {
+    #[default]
+    None,
+    /// delete the member/item
+    Delete,
+    /// delete plus insert before/after (array items)
+    ArrayOps,
+}
+
+impl App {
+    /// row_views builds the current menu's rows as view data: labels,
+    /// summaries, issue marks and trailing actions, for a front end that
+    /// is not the terminal menu.
+    pub fn row_views(&mut self) -> Vec<RowView> {
+        let Some(st) = self.top().cloned() else {
+            return Vec::new();
+        };
+        let rows = self.menu_rows();
+        let f = &self.files[self.cur];
+        let schema = &f.schema;
+        let doc = &f.doc;
+        let ctx = MenuCtx { schema, doc };
+        rows.iter()
+            .map(|r| row_view(schema, doc, Some(&st), r, &ctx, &f.err_paths, &f.warn_paths))
+            .collect()
+    }
+
+    /// menu_crumb is the top menu's breadcrumb title ("", the root).
+    pub fn menu_crumb(&self) -> Vec<String> {
+        let f = &self.files[self.cur];
+        self.top()
+            .map(|st| menu_crumb_title(&f.schema, st))
+            .unwrap_or_default()
+    }
+}
+
+fn row_view(
+    schema: &Schema,
+    doc: &Doc,
+    st: Option<&MenuState>,
+    r: &Row,
+    ctx: &MenuCtx<'_>,
+    errs: &[Vec<PathSeg>],
+    warns: &[Vec<PathSeg>],
+) -> RowView {
+    let mut v = RowView {
+        kind: r.kind,
+        label: row_label(schema, r),
+        summary: String::new(),
+        on: false,
+        required: false,
+        merged: r.merged.clone(),
+        err: errs.iter().any(|p| is_path_prefix(&r.path, p)),
+        warn: warns.iter().any(|p| is_path_prefix(&r.path, p)),
+        not_in_schema: r.kind == RowKind::Unknown && !r.in_schema && !schema.schema_less,
+        drill: matches!(r.kind, RowKind::Drill | RowKind::Issues),
+        ops: match r.kind {
+            RowKind::Field | RowKind::Drill | RowKind::Unknown if !r.path.is_empty() => {
+                if st.is_some_and(|s| s.kind == MenuKind::Items) && r.kind != RowKind::Unknown {
+                    RowOps::ArrayOps
+                } else {
+                    RowOps::Delete
+                }
+            }
+            _ => RowOps::None,
+        },
+    };
+    match r.kind {
+        RowKind::Field | RowKind::Drill => {
+            v.required = r.fn_.is_some_and(|f| schema.nodes[f as usize].required);
+            v.summary = r.fn_.map(|f| summary(ctx, f, &r.path)).unwrap_or_default();
+        }
+        RowKind::Unknown => {
+            v.summary = raw_value_summary(schema, doc, &r.path);
+        }
+        RowKind::Toggle => {
+            v.on = enum_member_on(schema, doc, r);
+        }
+        RowKind::Variant => {
+            let val = doc.get(&r.path);
+            let cur = st
+                .map(|s| current_variant(schema, s.node, doc, val))
+                .unwrap_or(-1);
+            v.on = cur >= 0 && r.variant.is_some_and(|vn| vn as i64 == cur);
+            let (label, summary) = variant_texts(schema, doc, r, v.on);
+            v.label = label;
+            v.summary = summary;
+        }
+        RowKind::Add | RowKind::Expand | RowKind::NoItems | RowKind::Issues => {}
+    }
+    v
+}
+
+/// The left-column label: a fixed row label wins, else the schema title.
+fn row_label(schema: &Schema, r: &Row) -> String {
+    if !r.label.is_empty() {
+        return r.label.clone();
+    }
+    r.fn_
+        .map(|f| schema.nodes[f as usize].title.clone())
+        .unwrap_or_default()
+}
+
+/// enumMemberOn: the option is a member of the enum array's document value.
+fn enum_member_on(schema: &Schema, doc: &Doc, r: &Row) -> bool {
+    let Some(cur) = doc.get(&r.path) else {
+        return false;
+    };
+    let crate::doc::Value::Array(items) = doc.value(cur) else {
+        return false;
+    };
+    let Some(f) = r.fn_ else {
+        return false;
+    };
+    let Some(it) = schema.nodes[f as usize].items else {
+        return false;
+    };
+    let Some(opt) = schema.nodes[it as usize].enum_.get(r.idx.max(0) as usize) else {
+        return false;
+    };
+    items.iter().any(|&i| doc.encode_value(i) == opt.encoded)
+}
+
+/// Variant row label + summary: the current variant is filled (●); untitled
+/// variants stand in their structural signature.
+fn variant_texts(schema: &Schema, doc: &Doc, r: &Row, on: bool) -> (String, String) {
+    let Some(vn) = r.variant else {
+        return (r.label.clone(), String::new());
+    };
+    let title = display_title(schema, vn);
+    let mark = if on { "●" } else { "○" };
+    let label = if title.is_empty() {
+        format!("{mark} {}", variant_signature(schema, Some(vn)))
+    } else {
+        format!("{mark} {title}")
+    };
+    let mut summary = String::new();
+    if !title.is_empty() {
+        summary = variant_signature(schema, Some(vn));
+    }
+    if on
+        && doc
+            .get(&r.path)
+            .is_some_and(|v| !matches!(doc.value(v), crate::doc::Value::Null))
+    {
+        let s = variant_value_summary(schema, vn, doc, doc.get(&r.path));
+        if !s.is_empty() {
+            summary = if summary.is_empty() {
+                s
+            } else {
+                format!("{summary} {s}")
+            };
+        }
+    }
+    (label, summary)
+}
+
+/// Breadcrumb title for the current stack level (root dropped; the file
+/// name leads the header).
+fn menu_crumb_title(schema: &Schema, st: &MenuState) -> Vec<String> {
+    let node = &schema.nodes[st.node as usize];
+    let mut title = if node.title.is_empty() {
+        node.key.clone()
+    } else {
+        node.title.clone()
+    };
+    if title == "$" {
+        title = String::new();
+    }
+    if title.is_empty() {
+        Vec::new()
+    } else {
+        vec![title]
+    }
+}

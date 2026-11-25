@@ -54,19 +54,19 @@ oneOf/anyOf/allOf. Everything else is still validated on save; unsupported
 constructs fall back to a raw editor in the file's format (JSON, YAML, or TOML).";
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Invocation {
+pub enum Invocation {
     Help,
     Version,
     Edit(Flags),
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct Flags {
-    pub(crate) schema: String,
-    pub(crate) force: bool,
-    pub(crate) accessible: bool,
-    pub(crate) pick: bool,
-    pub(crate) files: Vec<String>,
+pub struct Flags {
+    pub schema: String,
+    pub force: bool,
+    pub accessible: bool,
+    pub pick: bool,
+    pub files: Vec<String>,
 }
 
 /// parse_args implements the getopt/getopt_long option syntax used by the
@@ -75,7 +75,7 @@ pub(crate) struct Flags {
 /// `--` terminator. `-h`/`-v` (and their long forms) stop parsing as soon as
 /// they are seen. Errors are returned instead of exiting so they can be
 /// tested; run() prints the message plus the usage and exits 2.
-pub(crate) fn parse_args(args: &[String]) -> Result<Invocation, String> {
+pub fn parse_args(args: &[String]) -> Result<Invocation, String> {
     let mut f = Flags::default();
     let mut i = 0;
     while i < args.len() {
@@ -167,6 +167,6 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Invocation, String> {
     }
     Ok(Invocation::Edit(f))
 }
-pub(crate) fn print_usage() {
+pub fn print_usage() {
     eprintln!("{USAGE_TEXT}");
 }

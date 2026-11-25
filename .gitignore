@@ -31,6 +31,12 @@ bin/
 
 # Local secret-bearing config — never commit
 *.json
+# Native Shell app manifest (gui feature packaging)
+!nsh.json
+
+# Native Shell CLI build/output (gui-artifacts)
+/.nsh/
+/gui-app/target/
 
 
 # Added by cargo

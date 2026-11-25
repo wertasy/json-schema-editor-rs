@@ -188,6 +188,7 @@ fn shell_arg(rest: &str) -> Option<String> {
 /// up/down walking the executed command history. Completion candidates
 /// replace the word before the cursor only; `sug_start..sug_end` records the
 /// text the current cycle owns so repeated tab presses do not rescan it.
+#[derive(Debug)]
 pub struct CommandState {
     pub ti: TextInput,
     /// index into App::cmd_history while browsing; None at the prompt
@@ -419,15 +420,6 @@ fn filter_prefix(candidates: &[String], prefix: &str) -> Vec<String> {
         .filter(|c| c.to_lowercase().starts_with(&lower))
         .cloned()
         .collect()
-}
-
-/// bash_completion runs bash's programmable completion for `line`, the
-/// shell command after `!` with the caret at `point`. Returns the COMPREPLY
-/// words in the completion script's order; an empty result means bash, the
-/// bash-completion machinery or a rule for this command is missing and the
-/// caller keeps its local candidates.
-fn bash_completion(line: &str, point: usize) -> Vec<String> {
-    bash_completion_env(line, point, &[])
 }
 
 /// bash_completion_env is [`bash_completion`] with extra environment

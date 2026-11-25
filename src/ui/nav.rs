@@ -38,7 +38,7 @@ pub struct NavMark {
 }
 
 /// The two navigation trails. Go: `navBack` / `navFwd` on the listModel.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Nav {
     pub back: Vec<NavMark>,
     pub fwd: Vec<NavMark>,

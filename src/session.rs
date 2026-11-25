@@ -25,7 +25,7 @@ pub(crate) type WriteToFn = Arc<dyn Fn(&str, &Doc, &Meta) -> Result<(), String> 
 /// Why a file could not be opened. The exit code is a CLI concern, not an
 /// error value the UI ever sees.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum LoadError {
+pub enum LoadError {
     /// Invalid invocation (exit 2).
     #[error("{0}")]
     Usage(String),
@@ -35,7 +35,7 @@ pub(crate) enum LoadError {
 }
 
 impl LoadError {
-    pub(crate) fn exit_code(&self) -> i32 {
+    pub fn exit_code(&self) -> i32 {
         match self {
             LoadError::Usage(_) => 2,
             LoadError::Runtime(_) => 1,
@@ -52,7 +52,7 @@ pub(crate) struct NoSchema;
 /// catalog, --pick forces the picker per file), compile the validator, wire
 /// save/write-to and the raw codec. Err is an exit status after the error was
 /// printed.
-pub(crate) fn load_session(
+pub fn load_session(
     config: &str,
     schema_flag: &str,
     force: bool,

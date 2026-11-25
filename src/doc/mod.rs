@@ -260,7 +260,7 @@ pub struct Parsed {
 }
 
 /// Codec edits one configuration file format.
-pub trait Codec: Sync {
+pub trait Codec: Send + Sync {
     /// Extensions lists the lower-case, dot-prefixed file extensions this
     /// format handles (".yaml", ".yml", …).
     fn extensions(&self) -> &'static [&'static str];
@@ -358,6 +358,7 @@ pub trait Codec: Sync {
 /// JSONC codec: .json/.jsonc. JSONC is a superset of JSON, so it is also the
 /// default format for unknown or missing extensions (the historical
 /// "everything is JSON" behavior).
+#[derive(Debug)]
 pub struct JsoncCodec;
 
 impl Codec for JsoncCodec {
@@ -396,6 +397,7 @@ impl Codec for JsoncCodec {
 }
 
 /// YAML codec: .yaml/.yml.
+#[derive(Debug)]
 pub struct YamlCodec;
 
 impl Codec for YamlCodec {
@@ -458,6 +460,7 @@ impl Codec for YamlCodec {
 /// TOML codec: .toml. Scalars JSON cannot spell exactly (non-decimal
 /// integers, date/time values) keep their source literal on the node for
 /// faithful saves; edits write canonical TOML.
+#[derive(Debug)]
 pub struct TomlCodec;
 
 impl Codec for TomlCodec {

@@ -14,6 +14,7 @@ use crate::ui::util::{char_width, clip_display, display_width, wrap_cursor};
 use crate::ui::widgets::{Key, TextInput};
 
 /// PickOptions configures pick.
+#[derive(Debug)]
 pub struct PickOptions {
     /// line protocol; false = full-screen TUI
     pub accessible: bool,

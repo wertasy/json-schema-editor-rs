@@ -216,7 +216,7 @@ impl App {
 
     /// openIssues shows the load-time issues overlay, recomputed against
     /// the current document when save-time validation is available.
-    pub(super) fn open_issues(&mut self) {
+    pub(crate) fn open_issues(&mut self) {
         let mut items = self.fs().issues_now.clone();
         if let Some(validate) = self.opts().validate.clone() {
             items = self.live_issues(validate(&self.doc()));

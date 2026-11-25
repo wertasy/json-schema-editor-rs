@@ -14,6 +14,7 @@
 | [Editing](editing.md) | Array / map / oneOf editing, copy & paste, multi-select, search & replace, undo, macros |
 | [Validation and saving](validation.md) | Which keywords take effect, what to do about errors, save behavior and exit codes |
 | [Line mode](accessible.md) | Environments without a TUI, script-driven use, screen readers |
+| [GUI (Native Shell)](gui.md) | Building the windowed front end and its packaged apps (`--features gui`) |
 | [Troubleshooting](troubleshooting.md) | Errors, cache, proxy, clipboard, fonts, editor |
 
 ## Three reading paths

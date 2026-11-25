@@ -15,7 +15,7 @@ pub const MAX_HISTORY: usize = 100;
 
 /// Snapshot pair for one file: the document states a `u` / `ctrl+r` walk
 /// through. Go: `undoStack`/`redoStack` on the listModel.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct History {
     pub undo_stack: Vec<Doc>,
     pub redo_stack: Vec<Doc>,

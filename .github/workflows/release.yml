@@ -102,9 +102,126 @@ jobs:
           name: jse-${{ matrix.pkg_os }}-${{ matrix.pkg_arch }}
           path: dist/*
           if-no-files-found: error
+  build-gui:
+    name: build gui (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    env:
+      # Optional code signing for the macOS app and the iOS device package.
+      # Without them macOS is ad hoc signed and iOS stays unsigned.
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_PROFILE_BASE64: ${{ secrets.APPLE_PROFILE_BASE64 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux
+            artifact: jse-gui-linux-amd64
+          - os: windows-latest
+            target: windows
+            artifact: jse-gui-windows-amd64
+          - os: ubuntu-latest
+            target: android
+            artifact: jse-gui-android
+          - os: macos-latest
+            target: macos
+            artifact: jse-gui-macos-arm64
+            rust_targets: ''
+          - os: macos-latest
+            target: ios
+            artifact: jse-gui-ios
+            rust_targets: aarch64-apple-ios
+          - os: macos-latest
+            target: ios-simulator
+            artifact: jse-gui-ios-simulator
+            rust_targets: aarch64-apple-ios-sim
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust targets
+        if: matrix.rust_targets != ''
+        run: rustup target add ${{ matrix.rust_targets }}
+      - name: Native Shell CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = Windows ]; then
+            powershell -NoProfile -Command "irm https://nsh.dev/install.ps1 | iex"
+            echo "$LOCALAPPDATA/nsh/bin" >> "$GITHUB_PATH"
+          else
+            curl -fsSL https://nsh.dev/install.sh | sh
+            echo "$HOME/.nsh/bin" >> "$GITHUB_PATH"
+          fi
+      - name: Linux build dependencies
+        if: matrix.target == 'linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libgtk-4-dev clang \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+      - name: iOS runtime component
+        if: startsWith(matrix.target, 'ios')
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.nsh/bin:$PATH"
+          nsh component add ios
+      - name: Android SDK components
+        if: matrix.target == 'android'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" > /dev/null
+          nsh component add android
+      - name: Version metadata
+        shell: bash
+        run: |
+          echo "JSE_VERSION_OVERRIDE=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          echo "JSE_COMMIT=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          echo "JSE_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.nsh/bin:$LOCALAPPDATA/nsh/bin:$PATH"
+          if [ "${{ matrix.target }}" = android ]; then
+            export ANDROID_HOME="${ANDROID_HOME:-$HOME/android-sdk}"
+            export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_HOME/ndk/27.2.12479018}"
+          fi
+          sign_args=()
+          if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            sign_args+=(--sign "$APPLE_SIGNING_IDENTITY")
+          fi
+          if [ -n "${APPLE_PROFILE_BASE64:-}" ]; then
+            printf '%s' "$APPLE_PROFILE_BASE64" | base64 -d > /tmp/app.mobileprovision
+            sign_args+=(--profile /tmp/app.mobileprovision)
+          fi
+          nsh package --target ${{ matrix.target }} \
+            --app-version "${GITHUB_REF_NAME#v}" --build "${GITHUB_RUN_NUMBER:-1}" \
+            ${sign_args[@]+"${sign_args[@]}"}
+      - name: Collect
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mkdir -p dist
+          for f in .nsh/out/*.tar.gz .nsh/out/*.zip .nsh/out/*.apk .nsh/out/*.iss; do
+            cp "$f" dist/
+          done
+          for app in .nsh/out/*.app; do
+            # macOS and unsigned iOS builds ship as .app bundles
+            ditto -c -k --keepParent "$app" "dist/$(basename "$app").zip"
+          done
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
   release:
     name: publish release
-    needs: build
+    needs: [build, build-gui]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

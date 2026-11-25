@@ -26,6 +26,7 @@ $
 - **Schema 自动发现**：`-s`、配置自带的 `$schema`、YAML 文件头指令、TOML `#:schema` 指令，或 SchemaStore 目录匹配/检索；会话中按 `S` 可重新搜索并切换当前文件的 schema。远端 schema 带 24 小时缓存与离线回退。找不到 schema 时仍可打开文件直接编辑（对象/数组按结构导航，其他值按运行时类型；保存不校验）。
 - **错误可见**：加载即列出校验问题，字段行与问题列表实时刷新；未知键作为警告而非错误；`--force` 可强存。
 - **多文件会话**：`jse a.json b.json` 同开多个文件，`s` 切换，`ctrl+o`/`ctrl+i` 在导航历史中后退/前进；退出时一次保存全部改动。
+- **GUI 前端**：`--features gui` 用 [Native Shell](https://nsh.dev) 窗口（Linux/Windows/Android）替换终端，驱动同一套核心——schema 驱动的列表与就地表单，校验一致；见 [GUI](docs/zh/gui.md)。
 
 ## 安装
 
@@ -107,6 +108,7 @@ jse -s server.schema.json a.json b.yaml
 | [命令行](docs/zh/cli.md) | 参数、多文件、环境变量、退出码 |
 | [Schema 来源与缓存](docs/zh/schema-sources.md) | 解析顺序、SchemaStore、远端缓存、离线回退 |
 | [配置文件格式](docs/zh/formats.md) | JSONC、YAML、TOML、注释/锚点/合并键、格式扩展 |
+| [GUI（Native Shell）](docs/zh/gui.md) | `--features gui` 窗口前端、Linux/Windows/Android 打包产物 |
 | [界面与键位](docs/zh/interface.md) | 布局、状态行、完整按键表、文件切换与导航历史 |
 | [编辑功能](docs/zh/editing.md) | 字段编辑、剪贴板、多选、搜索替换、撤销、宏、外部编辑器 |
 | [校验与保存](docs/zh/validation.md) | 表单关键字、降级规则、问题列表、原子写、退出码 |

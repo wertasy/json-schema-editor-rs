@@ -17,7 +17,10 @@ cargo test                          # full suite: unit + accessible/pty + schema
 cargo test --test arch              # A1–A7 architecture invariants (fast)
 cargo test pty_multi_file_session   # one test by name
 cargo build --release
+cargo build --release --features gui  # GUI front end (Native Shell window)
 cargo run -- -s examples/server.schema.json examples/server.config.json
+nsh run                               # GUI through the nsh runner (gui-app/, nsh.json)
+nsh package --target linux|windows|android  # packaged GUI apps
 cargo fmt                           # keep formatting local to touched code
 cargo clippy --all-targets --all-features  # lint gate; lints live in [lints] (Cargo.toml) + clippy.toml
 cargo clippy --all-targets --all-features -- -D clippy::too_many_lines  # CI's architecture gate
@@ -33,7 +36,9 @@ Before finishing any behavioral change: run the specific test covering it, then 
 ## Architecture map
 
 ```
-src/main.rs          entry point: module wiring, exit-code mapping, main_test
+src/lib.rs           the crate as a library: module wiring, the nsh native_module
+                     registry (gui), main_test
+src/main.rs          thin binary: CLI parsing, session loading, exit-code mapping
 src/cli.rs           getopt-style flags, Invocation/Flags, usage text (std only)
 src/paths.rs         lexical Go-filepath-compatible helpers (std only)
 src/session.rs       config load, schema resolution/compilation, save wiring
@@ -96,6 +101,13 @@ src/ui/
   accessible/        --accessible line protocol (mod.rs) + LineReader
                      one-line-per-read stdin reader (line_reader.rs)
   schema_picker.rs   SchemaStore picker (TUI + accessible)
+src/gui/             GUI front end (feature "gui", Native Shell):
+  mod.rs             run() desktop mounts, App component, screen switch
+  bridge.rs          headless TUI App driven via Msg + Snapshot (rows/header/sheet)
+  render.rs          header bar, list rows (virtual_list), status line
+  sheets.rs          open screen + modal sheets (edit/raw/add/confirm/issues/files)
+gui-app/             thin crate enabling jse's "gui" feature for nsh runners
+                     (nsh.json "rust"); re-exports App + registry
   command.rs         vi-style `:` grammar: builtins (w/wa/wq/waq, q/q!), shell
                      escapes and their execution (former shell.rs: `r !`
                      stdout insert, `a !` line append, `w !`
@@ -168,6 +180,34 @@ Rules of engagement, learned by using it here:
 - `wide-directory`/`long-file`: split test files by topic into directories (`src/ui/keys/tests/`, `tests/e2e/`) with a small entry file holding the shared harness; keep entry files under ~500 lines and modules under 2000.
 - `--allow <path>` records existing debt so only *new* errors fail; fix the recorded entries from first principles rather than growing the allowlist.
 
+## GUI front end (feature `gui`, Native Shell)
+
+The GUI is a second view over the same model, not a second editor:
+
+- **Feature matrix.** `tui` (default) builds the terminal front end; `gui` swaps
+  `main.rs` to mount the Native Shell app instead. Both may be on at once
+  (`nsh` runners enable `gui` on top of the defaults) — `main.rs` picks GUI
+  when `gui` is set. The nsh runners link `gui-app/`, a thin crate whose
+  path dependency requests `default-features = false, features = ["gui"]`;
+  `nsh.json` names it in `"rust"` and its root component `App`.
+- **One model.** `src/gui/bridge.rs` owns a headless `App` (the TUI's own)
+  and drives it exclusively through `App::update(Msg)` and cursor moves —
+  never by mutating documents directly. Editing semantics come for free;
+  duplicating an apply/insert/variant rule in the GUI is a bug.
+- **Signals live on the engine thread.** `Signal` handles cannot exist
+  outside a component; `Views::new()` runs inside `App` and is attached to
+  the bridge there. Never create signals in `run()` or in row closures.
+- **List cells are recycled.** Bindings must read `at.index()` *inside*
+  their closures; anything captured at element build time goes stale.
+- **Snapshots, not borrowing.** Views render from `Bridge::publish()`
+  snapshots (`Vec<RowView>`, `Header`, `SheetView`); render code never
+  touches `RefCell<App>`.
+- **No schema loading.** The GUI never calls `smodel::load` / `validate::new`
+  / `fetch`: sessions arrive preloaded and the binary injects the open-file
+  loader (`OpenFn`), mirroring A2's rule for `src/ui`.
+- `tests/arch.rs` still scans `src/gui/**` for the helper-uniqueness, Go-name
+  and dead-code rules; keep GUI code under those constraints.
+
 ## Behavioral contracts
 
 Treat these as public API; tests and docs assert them:
@@ -208,7 +248,7 @@ To add a format:
 
 ## Release
 
-`.github/workflows/release.yml` builds Linux musl (amd64/arm64), macOS and Windows (amd64/arm64) on `v*` tags, injects `JSE_VERSION_OVERRIDE`/`JSE_COMMIT`/`JSE_BUILD_DATE`, packages the binary alone (no README/docs/LICENSE in the archives), writes `checksums.txt`, creates the GitHub Release, and then publishes the crate to crates.io. The publish job uses the `CARGO_REGISTRY_TOKEN` repository secret, verifies that the tag matches the `Cargo.toml` version, and skips publishing when that version already exists on crates.io.
+`.github/workflows/release.yml` builds Linux musl (amd64/arm64), macOS and Windows (amd64/arm64) on `v*` tags, plus the GUI artifacts (`build-gui`: Linux and Windows amd64, Android APK, macOS .app, iOS packages — device unsigned and simulator) with `nsh package` from `gui-app/` — the GUI jobs need the Native Shell CLI, GTK dev packages (Linux), the Android SDK/NDK (preinstalled on the hosted runners), Xcode (macOS/iOS runners) and optional signing secrets (`APPLE_SIGNING_IDENTITY`, `APPLE_PROFILE_BASE64`). It injects `JSE_VERSION_OVERRIDE`/`JSE_COMMIT`/`JSE_BUILD_DATE`, packages the binary alone (no README/docs/LICENSE in the archives), writes `checksums.txt`, creates the GitHub Release, and then publishes the crate to crates.io. The publish job uses the `CARGO_REGISTRY_TOKEN` repository secret, verifies that the tag matches the `Cargo.toml` version, and skips publishing when that version already exists on crates.io.
 
 A release bumps the version in `Cargo.toml`, `Cargo.lock`, and the version examples in `docs/install.md` before tagging:
 

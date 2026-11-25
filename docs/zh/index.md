@@ -16,6 +16,7 @@ English version of this manual: [docs/index.md](../index.md)（英文为主文�
 | [编辑功能](editing.md) | 数组/映射/oneOf 编辑、复制粘贴、多选、搜索替换、撤销、宏 |
 | [校验与保存](validation.md) | 哪些关键字生效、出错怎么办、保存行为和退出码 |
 | [行式模式](accessible.md) | 无 TUI 环境、脚本驱动、屏幕阅读器 |
+| [GUI（Native Shell）](gui.md) | 构建窗口前端及其打包产物（`--features gui`） |
 | [故障排查](troubleshooting.md) | 报错、缓存、代理、剪贴板、字体、编辑器 |
 
 ## 三条阅读路径

@@ -109,6 +109,21 @@ pub struct FileState {
     pub disk_stat: Option<DiskStat>,
 }
 
+impl std::fmt::Debug for FileState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileState")
+            .field("schema", &self.schema)
+            .field("doc", &self.doc)
+            .field("meta", &self.meta)
+            .field("opts", &self.opts)
+            .field("stack", &self.stack)
+            .field("saved", &self.saved)
+            .field("with_errors", &self.with_errors)
+            .field("history", &self.history)
+            .field("issues_now", &self.issues_now)
+            .finish_non_exhaustive()
+    }
+}
 // --- help text and description data -------------------------------------------
 
 pub const MENU_HELP: &str =
@@ -151,6 +166,7 @@ pub const TITLE_COL_MIN: usize = 16;
 pub const TITLE_COL_MAX: usize = 42;
 
 /// helpEntry is one row of the "?" key reference.
+#[derive(Debug)]
 pub struct HelpEntry {
     pub keys: &'static str,
     pub desc: &'static str,
@@ -459,6 +475,7 @@ pub(crate) fn msg_key(msg: &Msg) -> Option<Key> {
 // --- overlay states ----------------------------------------------------------
 
 /// editState is an in-place scalar input on one field row.
+#[derive(Debug)]
 pub struct EditState {
     pub fn_: Option<FormNodeId>,
     /// schema-less scalar edits carry a synthetic node (Go built one on the
@@ -487,6 +504,7 @@ pub struct EditState {
 
 /// addState is the key-name input overlay for a: add a schema-less
 /// key-value member under the current object menu.
+#[derive(Debug)]
 pub struct AddState {
     /// object the new member goes into
     pub path: Vec<PathSeg>,
@@ -499,6 +517,7 @@ pub struct AddState {
 }
 
 /// writeState is the write-to-path input for W.
+#[derive(Debug)]
 pub struct WriteState {
     pub ti: TextInput,
     pub err: String,
@@ -523,6 +542,7 @@ pub struct ListFilter {
 }
 
 /// The outcome of one key in a focused list filter.
+#[derive(Debug)]
 pub enum FilterAction {
     /// the filter consumed the key (motion or text edit)
     Handled,
@@ -595,7 +615,7 @@ impl ListFilter {
 }
 
 /// helpState is the "?" keyboard-help page; `scroll` is its first visible row.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct HelpState {
     pub scroll: usize,
 }
@@ -603,6 +623,7 @@ pub struct HelpState {
 /// textState is the built-in raw textarea overlay; its syntax follows
 /// Options.Raw (JSON, YAML, or TOML). `path` is None for the whole-document
 /// editor.
+#[derive(Debug)]
 pub struct TextState {
     pub path: Option<Vec<PathSeg>>,
     pub fn_: Option<FormNodeId>,
@@ -614,7 +635,7 @@ pub struct TextState {
 }
 
 /// issuesState is the load-time validation issues overlay.
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct IssuesState {
     pub items: Vec<Issue>,
     pub cursor: usize,
@@ -623,6 +644,7 @@ pub struct IssuesState {
 }
 
 /// refPickState is the gr picker.
+#[derive(Debug)]
 pub struct RefPickState {
     pub name: String,
     pub paths: Vec<Vec<PathSeg>>,
@@ -632,6 +654,7 @@ pub struct RefPickState {
 }
 
 /// errsState is the save-time validation error overlay.
+#[derive(Debug)]
 pub struct ErrsState {
     pub lines: Vec<String>,
     pub paths: Vec<Option<Vec<PathSeg>>>,
@@ -645,6 +668,7 @@ pub struct ErrsState {
 }
 
 /// confirmState is a y/n question overlay. on_no is optional.
+#[derive(Debug)]
 pub struct ConfirmState {
     pub title: String,
     /// optional footer override
@@ -657,6 +681,7 @@ pub struct ConfirmState {
 /// data the answer acts on, not behavior: the confirm state must not know
 /// the app model, so the key router (keys::overlays) interprets the variant
 /// against `App`.
+#[derive(Debug)]
 pub enum ConfirmAction {
     /// reload the file at this index from disk
     ReloadFile(usize),
@@ -679,6 +704,7 @@ pub enum ConfirmAction {
 
 /// searchState is the "/" filter mode, scoped to the subtree below the
 /// current breadcrumb path.
+#[derive(Debug)]
 pub struct SearchState {
     /// replace mode: show the replace input, results are previews
     pub replace: bool,
@@ -714,6 +740,7 @@ pub enum AnchorMode {
 }
 
 /// anchorState is the name input behind & and *.
+#[derive(Debug)]
 pub struct AnchorState {
     pub path: Vec<PathSeg>,
     pub mode: AnchorMode,
@@ -739,6 +766,7 @@ pub struct AnchorState {
 
 /// mergeState is the input behind `<`: anchor names, space-separated; tab
 /// completes the token being typed over the document's mapping anchors.
+#[derive(Debug)]
 pub struct MergeState {
     pub path: Vec<PathSeg>,
     pub ti: TextInput,
@@ -749,13 +777,14 @@ pub struct MergeState {
 }
 
 /// fastMoveState is f/F fast move: waiting for the character.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct FastMoveState {
     /// F: search upward
     pub backward: bool,
 }
 
 /// filePickState is the s-key file switcher overlay.
+#[derive(Debug)]
 pub struct FilePickState {
     pub cursor: usize,
     /// inline '/'-search over file paths
@@ -764,7 +793,7 @@ pub struct FilePickState {
 
 /// externalEdit is the target of a pending $EDITOR run. A non-negative
 /// insert_idx splices a new member instead of Set.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ExternalEdit {
     pub target: Vec<PathSeg>,
     pub insert_idx: i64,
@@ -779,6 +808,7 @@ pub struct ExternalEdit {
 
 /// commentState is the dedicated page for a description that does not fit
 /// the menu's inline description area. `scroll` is the first visible line.
+#[derive(Debug)]
 pub struct CommentState {
     /// the field/row label shown in the page title
     pub title: String,
@@ -790,6 +820,7 @@ pub struct CommentState {
 /// ShellOutState is the scrolling page for a bare `!<cmd>` command's
 /// multi-line stdout. `lines` are already wrapped to the terminal width;
 /// `scroll` is the first visible line.
+#[derive(Debug)]
 pub struct ShellOutState {
     /// the executed command line, shown in the page title
     pub command: String,
@@ -800,6 +831,7 @@ pub struct ShellOutState {
 /// CommentEditState is the multiline editor for the document comment of one
 /// key. ctrl+s applies it to the session metadata (the document body is not
 /// touched); esc cancels.
+#[derive(Debug)]
 pub struct CommentEditState {
     pub path: Vec<PathSeg>,
     /// the row label shown in the editor title
@@ -810,6 +842,7 @@ pub struct CommentEditState {
 /// Overlay is the single open surface (Go's 16 nullable fields + routeKey
 /// priority chain). Only one can be open at a time; the key router matches
 /// on it.
+#[derive(Debug)]
 pub enum Overlay {
     Confirm(ConfirmState),
     Issues(IssuesState),
@@ -856,6 +889,7 @@ impl Overlay {
 // --- the app ------------------------------------------------------------------
 
 /// App is the menu TUI model (Go listModel) over one or more files.
+#[derive(Debug)]
 pub struct App {
     pub files: Vec<FileState>,
     pub cur: usize,
@@ -956,7 +990,255 @@ pub(crate) fn human_bytes(v: u64) -> String {
     }
 }
 
+/// Document path as `a.b[2].c` for sheet subtitles.
+fn overlay_path_text(path: &[crate::doc::PathSeg]) -> String {
+    use crate::doc::PathSeg;
+    let mut s = String::new();
+    for seg in path {
+        match seg {
+            PathSeg::Key(k) => {
+                if !s.is_empty() {
+                    s.push('.');
+                }
+                s.push_str(k);
+            }
+            PathSeg::Idx(i) => s.push_str(&format!("[{i}]")),
+        }
+    }
+    s
+}
+
+/// The open overlay as plain data for a non-terminal front end (the GUI's
+/// sheets): what the TUI draws from its overlay states, owned and resolved.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OverlayData {
+    /// scalar / enum / number field editor
+    Edit {
+        title: String,
+        path: String,
+        text: String,
+        err: String,
+        /// enum options (display strings); empty for free text
+        options: Vec<String>,
+        selected: Option<usize>,
+        number: bool,
+    },
+    /// raw / multiline value editor
+    Text {
+        title: String,
+        path: String,
+        text: String,
+        err: String,
+    },
+    /// key-name input for a new member
+    Add {
+        title: String,
+        text: String,
+        err: String,
+    },
+    /// save / exit confirmation (y/n/esc)
+    Confirm { title: String, hint: String },
+    /// validation issues; picking one jumps to it
+    Issues { items: Vec<String>, cursor: usize },
+    /// open files; picking one switches
+    Files { paths: Vec<String>, cursor: usize },
+    /// save-time validation errors; with `--force` the write can proceed
+    Errs {
+        lines: Vec<String>,
+        cursor: usize,
+        can_force: bool,
+    },
+}
+
+impl OverlayData {
+    /// The sheet's title.
+    pub fn title(&self) -> &str {
+        match self {
+            OverlayData::Edit { title, .. }
+            | OverlayData::Text { title, .. }
+            | OverlayData::Add { title, .. }
+            | OverlayData::Confirm { title, .. } => title,
+            OverlayData::Issues { .. } => "Issues",
+            OverlayData::Files { .. } => "Files",
+            OverlayData::Errs { .. } => "Validation errors",
+        }
+    }
+}
+
 impl App {
+    /// The active file's index.
+    pub fn cur_index(&self) -> usize {
+        self.cur
+    }
+
+    /// Adds one file session and makes it active.
+    pub fn add_file(&mut self, file: FileState) {
+        self.cur = self.files.len();
+        self.files.push(file);
+    }
+
+    fn cur_file_state(&self) -> Option<&FileState> {
+        self.files.get(self.cur)
+    }
+
+    /// The active file's path (`""` before a file is loaded).
+    pub fn active_path(&self) -> String {
+        self.cur_file_state()
+            .map(|f| f.opts.path.clone())
+            .unwrap_or_default()
+    }
+
+    /// The active file's schema status lines.
+    pub fn active_status(&self) -> String {
+        self.cur_file_state()
+            .map(|f| f.opts.status.clone())
+            .unwrap_or_default()
+    }
+
+    /// How many problems the active file loaded with.
+    pub fn active_load_errors(&self) -> usize {
+        self.cur_file_state()
+            .map(|f| f.opts.load_errors.len())
+            .unwrap_or(0)
+    }
+
+    /// (errors, warnings) of the active file's live issues.
+    pub fn issue_counts(&self) -> (usize, usize) {
+        let Some(f) = self.cur_file_state() else {
+            return (0, 0);
+        };
+        (
+            f.issues_now.iter().filter(|i| !i.warn).count(),
+            f.issues_now.iter().filter(|i| i.warn).count(),
+        )
+    }
+
+    /// Every open file's path, in tab order.
+    pub fn file_paths(&self) -> Vec<String> {
+        self.files.iter().map(|f| f.opts.path.clone()).collect()
+    }
+
+    /// (path, saved-with-`--force`) of the files written this session.
+    pub fn written_files(&self) -> Vec<(String, bool)> {
+        self.files
+            .iter()
+            .filter(|f| f.saved)
+            .map(|f| (f.opts.path.clone(), f.with_errors))
+            .collect()
+    }
+
+    /// The open overlay resolved to owned data; None when no surface is open.
+    pub fn overlay_data(&self) -> Option<OverlayData> {
+        let f = self.cur_file_state()?;
+        match self.overlay.as_ref()? {
+            Overlay::Edit(e) => {
+                let node = e.fn_.map(|id| &f.schema.nodes[id as usize]);
+                let number = node.is_some_and(|n| {
+                    n.kind == crate::smodel::Kind::Scalar
+                        && matches!(n.json_type.as_str(), "integer" | "number")
+                });
+                let is_enum = node.is_some_and(|n| !n.enum_.is_empty());
+                let title = node
+                    .map(|n| {
+                        if n.title.is_empty() {
+                            n.key.clone()
+                        } else {
+                            n.title.clone()
+                        }
+                    })
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| "Value".to_string());
+                let (options, selected) = if is_enum {
+                    let selected = e.sugs.iter().position(|s| s.as_str() == e.ti.value());
+                    (e.sugs.clone(), selected)
+                } else {
+                    (Vec::new(), None)
+                };
+                Some(OverlayData::Edit {
+                    title,
+                    path: overlay_path_text(&e.path),
+                    text: e.ti.value().to_string(),
+                    err: e.err.clone(),
+                    options,
+                    selected,
+                    number,
+                })
+            }
+            Overlay::Text(t) => Some(OverlayData::Text {
+                title: "Raw value".to_string(),
+                path: t
+                    .path
+                    .as_ref()
+                    .map(|p| overlay_path_text(p))
+                    .unwrap_or_default(),
+                text: t.ta.value(),
+                err: t.err.clone(),
+            }),
+            Overlay::Add(a) => Some(OverlayData::Add {
+                title: "New key".to_string(),
+                text: a.ti.value().to_string(),
+                err: a.err.clone(),
+            }),
+            Overlay::Confirm(c) => Some(OverlayData::Confirm {
+                title: c.title.clone(),
+                hint: c.hint.clone(),
+            }),
+            Overlay::Issues(s) => Some(OverlayData::Issues {
+                items: s.items.iter().map(|i| i.msg.clone()).collect(),
+                cursor: s.cursor,
+            }),
+            Overlay::FilePick(s) => Some(OverlayData::Files {
+                paths: self.file_paths(),
+                cursor: s.cursor,
+            }),
+            Overlay::Errs(s) => Some(OverlayData::Errs {
+                lines: s.lines.clone(),
+                cursor: s.cursor,
+                can_force: f.opts.force,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Moves the open list sheet's cursor (issues / errors / files).
+    pub fn overlay_cursor_to(&mut self, k: usize) {
+        match self.overlay.as_mut() {
+            Some(Overlay::Issues(s)) => s.cursor = k,
+            Some(Overlay::FilePick(s)) => s.cursor = k,
+            Some(Overlay::Errs(s)) => s.cursor = k,
+            _ => {}
+        }
+    }
+
+    /// Replaces the open editor sheet's text buffer.
+    pub fn overlay_set_text(&mut self, text: &str) {
+        match self.overlay.as_mut() {
+            Some(Overlay::Edit(e)) => {
+                e.ti.set_value(text);
+                e.ti.cursor_end();
+            }
+            Some(Overlay::Add(a)) => {
+                a.ti.set_value(text);
+                a.ti.cursor_end();
+            }
+            Some(Overlay::Text(t)) => t.ta.set_value(text),
+            _ => {}
+        }
+    }
+
+    /// Highlights enum option `k` of the open edit sheet (its dropdown pick).
+    pub fn overlay_pick_option(&mut self, k: usize) {
+        let Some(Overlay::Edit(e)) = self.overlay.as_mut() else {
+            return;
+        };
+        let Some(v) = e.sugs.get(k).cloned() else {
+            return;
+        };
+        e.ti.set_value(v);
+        e.ti.cursor_end();
+        e.sug_idx = k as i64;
+    }
+
     /// set_viewport adopts the terminal size. A pty can report a degenerate
     /// size (0×0 while tearing down); the floor keeps every row/pane
     /// computation a real divisor instead of an empty screen.
@@ -1338,6 +1620,7 @@ pub fn anchor_holder_path(doc: &Doc, n: NodeId) -> Option<Vec<PathSeg>> {
 }
 
 /// anchorDef is one anchor in document order: its name and carrier node.
+#[derive(Debug)]
 pub struct AnchorDef {
     pub name: String,
     pub node: NodeId,

@@ -114,6 +114,7 @@ pub type FormNodeId = u32;
 
 /// The form model of one schema document: the normalized node tree plus the
 /// schema document arena its enum/default values point into.
+#[derive(Debug)]
 pub struct Schema {
     pub nodes: Vec<FormNode>,
     pub root: FormNodeId,

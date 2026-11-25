@@ -417,6 +417,7 @@ impl TextInput {
 /// across line boundaries), line home/end, ctrl+k (kill to end of line),
 /// ctrl+u (kill from line start), ctrl+w (delete word backward).
 /// Width/height are stored for the renderer only.
+#[derive(Debug)]
 pub struct TextArea {
     lines: Vec<String>,
     row: usize,

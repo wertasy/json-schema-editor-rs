@@ -63,6 +63,17 @@ pub struct LoadedSchema {
     pub schema_member: bool,
 }
 
+impl std::fmt::Debug for LoadedSchema {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoadedSchema")
+            .field("schema", &self.schema)
+            .field("validate", &self.validate.is_some())
+            .field("status", &self.status)
+            .field("schema_member", &self.schema_member)
+            .finish()
+    }
+}
+
 /// Options configures a Run. Only genuine environment I/O stays behind a
 /// closure; document state (doc, meta, codec) belongs to [`FileState`].
 #[derive(Clone)]
@@ -103,6 +114,26 @@ pub struct Options {
     pub load_errors: Vec<String>,
 }
 
+impl std::fmt::Debug for Options {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Options")
+            .field("accessible", &self.accessible)
+            .field("force", &self.force)
+            .field("validate", &self.validate.is_some())
+            .field("save", &self.save.is_some())
+            .field("path", &self.path)
+            .field("write_to", &self.write_to.is_some())
+            .field("copy", &self.copy.is_some())
+            .field("paste", &self.paste.is_some())
+            .field("load_schema", &self.load_schema.is_some())
+            .field("cmd_history_file", &self.cmd_history_file)
+            .field("status", &self.status)
+            .field("startup_notice", &self.startup_notice)
+            .field("load_errors", &self.load_errors)
+            .finish()
+    }
+}
+
 impl Default for Options {
     fn default() -> Options {
         Options {
@@ -132,6 +163,18 @@ pub struct FileSession {
     pub meta: crate::doc::Meta,
     pub codec: &'static dyn crate::doc::Codec,
     pub opts: Options,
+}
+
+impl std::fmt::Debug for FileSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileSession")
+            .field("schema", &self.schema)
+            .field("root", &self.root)
+            .field("doc", &self.doc)
+            .field("meta", &self.meta)
+            .field("opts", &self.opts)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Outcome reports how the session ended.
@@ -249,6 +292,7 @@ pub struct Issue {
 
 /// The context pure row functions read: the schema and document of the
 /// active file. Kept as a struct so the row layer never takes `App`.
+#[derive(Debug)]
 pub struct MenuCtx<'a> {
     pub schema: &'a Schema,
     pub doc: &'a Doc,
