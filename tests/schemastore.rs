@@ -390,3 +390,72 @@ fn pty_schema_download_shows_progress_bar() {
         "S did not record the chosen schema"
     );
 }
+
+/// A schema served over HTTP whose `$ref` points at ANOTHER http URL on the
+/// same server: both fetches share the JSE_CACHE_DIR, so after one warm run
+/// the schema (and its remote $ref) keep loading with the server stopped.
+#[test]
+fn remote_ref_survives_offline_via_cache() {
+    let server = Arc::new(Server::http("127.0.0.1:0").expect("start server"));
+    let url = format!("http://{}", server.server_addr());
+    let s = Arc::clone(&server);
+    let base = url.clone();
+    thread::spawn(move || {
+        for request in s.incoming_requests() {
+            let path = request.url().split('?').next().unwrap_or("").to_string();
+            let body = match path.as_str() {
+                "/root.schema.json" => format!(
+                    r#"{{"type":"object","properties":{{"profile":{{"$ref":"{base}/profile.json"}}}}}}"#,
+                    base = base
+                )
+                .into_bytes(),
+                "/profile.json" => br#"{"type":"object","properties":{"env":{"type":"string"}}}"#.to_vec(),
+                _ => Vec::new(),
+            };
+            let _ = request.respond(Response::from_data(body));
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("app.json");
+    write_file(&cfg, r#"{"profile": {"env": "dev"}}"#);
+    let cfg_arg = cfg.to_string_lossy().into_owned();
+    let schema_url = url.clone() + "/root.schema.json";
+    let cache = tempfile::tempdir().unwrap();
+    let cache_dir = cache.path().to_string_lossy().into_owned();
+
+    // warm run: fetches the schema AND the remote $ref, validates, saves
+    {
+        let mut pty = match PtySession::spawn(
+            dir.path(),
+            &["-s", schema_url.as_str(), cfg_arg.as_str()],
+            &[("JSE_CACHE_DIR", cache_dir.as_str())],
+        ) {
+            PtySpawn::Ok(p) => p,
+            PtySpawn::Unavailable(e) => {
+                eprintln!("SKIP: no pty available: {e}");
+                return;
+            }
+        };
+        pty.wait_frame("warm root", 0, &["env", "↑/↓ move"]);
+        pty.send(b"\x03");
+        pty.wait_exit(130);
+    }
+
+    // offline run: server stopped, same cache — schema and its remote $ref
+    // still load from the cache and the form still offers the $ref'd field
+    drop(server);
+    let mut pty = match PtySession::spawn(
+        dir.path(),
+        &["-s", schema_url.as_str(), cfg_arg.as_str()],
+        &[("JSE_CACHE_DIR", cache_dir.as_str())],
+    ) {
+        PtySpawn::Ok(p) => p,
+        PtySpawn::Unavailable(e) => {
+            eprintln!("SKIP: no pty available: {e}");
+            return;
+        }
+    };
+    pty.wait_frame("offline root", 0, &["env", "↑/↓ move"]);
+    pty.send(b"\x03");
+    pty.wait_exit(130);
+}
