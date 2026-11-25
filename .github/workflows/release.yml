@@ -184,7 +184,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export PATH="$HOME/.nsh/bin:$LOCALAPPDATA/nsh/bin:$PATH"
+          export PATH="$HOME/.nsh/bin:${LOCALAPPDATA:-}/nsh/bin:$PATH"
           if [ "${{ matrix.target }}" = android ]; then
             export ANDROID_HOME="${ANDROID_HOME:-$HOME/android-sdk}"
             export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_HOME/ndk/27.2.12479018}"
