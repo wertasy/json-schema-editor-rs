@@ -21,6 +21,9 @@ cargo run -- -s examples/server.schema.json examples/server.config.json
 cargo fmt                           # keep formatting local to touched code
 cargo clippy --all-targets --all-features  # lint gate; lints live in [lints] (Cargo.toml) + clippy.toml
 cargo clippy --all-targets --all-features -- -D clippy::too_many_lines  # CI's architecture gate
+deslop-please                       # structural lints: module-cycle, tangle,
+                                    # field-leak, shallow-module, wide-directory,
+                                    # long-file (rust-analyzer must be on PATH)
 ```
 
 The e2e tests spawn the built binary. They isolate the schema cache with `JSE_CACHE_DIR`; never let tests touch the user's real cache or the public network. pty tests skip when no pty is available.
@@ -38,7 +41,8 @@ src/icons.rs         severity glyphs shared by UI/CLI/model
 src/doc/             leaf layer (may only use crate::doc and crate::paths)
   jsondoc.rs         arena document tree; order-preserving; exact numeric literals
                      (CopyMode, append_key/idx, encode_value, scalar_text)
-  jsoncdoc.rs        JSONC parse + comment capture/write
+  jsoncdoc.rs        JSON/JSONC parse: shared scanner with strict (parse_strict)
+                     and lenient (parse) entries; comment capture/write
   paste.rs           clipboard-text paste classification (members/items/single
                      value) for P and plain-text pastes
   yamldoc/           YAML parse (comments, anchors, merge keys) + block emitter
@@ -46,7 +50,12 @@ src/doc/             leaf layer (may only use crate::doc and crate::paths)
   mod.rs             Codec trait (label/raw_ext/parse_value/write_value + defaults), FORMATS, Meta
 src/fetch.rs         local/http(s)/file loading, 24h cache, conditional requests, offline fallback
 src/catalog.rs       SchemaStore catalog load + fileMatch glob matching
-src/smodel.rs        JSON Schema -> form tree (FormNode arena); degradation to raw
+src/smodel/          JSON Schema -> form tree (FormNode arena); degradation to raw
+  mod.rs             public API (load/untyped/root_has_property) + Doc helpers
+  build.rs           FormNode construction from the schema JSON
+  refs.rs            $ref resolution (cached_load/graft/percent_decode)
+  merge.rs           allOf merging
+src/progress.rs      in-flight fetch progress snapshots for the help-bar progress bar
 src/validate.rs      save-time validation via jsonschema; document-path error rendering
 src/ui/
   mod.rs             FileSession/Options/Outcome, MenuState/MenuCtx, ValidateFn
@@ -64,7 +73,10 @@ src/ui/
     clipboard.rs     copy/cut + paste, system clipboard IO
     search.rs        jumps, document search, anchors, merge keys
     overlays.rs      overlay handlers, macros
-    render.rs        list/overlay rendering, ANSI style layer (`style`)
+    render/            list/overlay rendering split by view domain; ANSI style
+                     layer (`style`)
+    tests.rs + tests/  model tests: tests.rs is the shared-harness entry
+                     (press/mk_app/fixtures), tests/ holds the topic modules
   rows/              pure row model split by feature:
     mod.rs           kinds, row construction, merge hooks
     summary.rs       value summaries
@@ -73,6 +85,7 @@ src/ui/
     search.rs        search index
     issues.rs        unknown-key issues
     filter.rs        search filtering
+    tests/           row-model tests split by topic (harness in tests.rs)
     issue_parse.rs   validator-message parsing
   util.rs            wrap_cursor/page_cursor and terminal-cell text measuring
                      shared by every list
@@ -80,8 +93,8 @@ src/ui/
   history.rs         undo/redo snapshots (100 steps)
   nav.rs             back/forward location history (100 steps)
   widgets.rs         TextInput/TextArea and schema value apply/validate helpers
-  accessible.rs      --accessible line protocol + one-line-per-read stdin
-                     reader (former lineio.rs)
+  accessible/        --accessible line protocol (mod.rs) + LineReader
+                     one-line-per-read stdin reader (line_reader.rs)
   schema_picker.rs   SchemaStore picker (TUI + accessible)
   command.rs         vi-style `:` grammar: builtins (w/wa/wq/waq, q/q!), shell
                      escapes and their execution (former shell.rs: `r !`
@@ -92,8 +105,10 @@ src/ui/
                      path arrives via Options)
 tests/
   arch.rs            A1–A7 architecture invariants (source scan)
-  common/mod.rs      pty + run helpers
-  e2e.rs             CLI, accessible scripts, pty flows, YAML anchors/merge, multi-file
+  common/            pty + run helpers
+  e2e.rs + e2e/      CLI, accessible scripts, pty flows, YAML anchors/merge,
+                     multi-file; e2e.rs is the shared-harness entry, e2e/
+                     holds the topic modules (mouse/shell/files/validation/...)
   schemastore.rs     catalog matching and picker against tiny_http
 ```
 
@@ -139,6 +154,19 @@ These are mechanical gates, not suggestions. A change that violates A1–A7 fail
 - **A6 per-file state lives in `FileState`.** The document, its `Meta`, its `Codec` and its `Options` are owned per file; no `Arc<Mutex<Meta>>` or other shared mutable document state. `Options` holds only environment I/O (save/write-to targets, clipboard, schema loader).
 - **A7 one open surface.** `App.overlay: Option<Overlay>` is the only overlay switch: help and the file picker are variants, and `route_key` matches every variant exhaustively. Adding a surface means adding a variant plus its `typing()` arm, never a new `App` flag.
 - **A8 no monoliths.** `clippy::too_many_lines` (threshold 250 in `clippy.toml`) blocks new 250+ line functions; move a feature into its `keys/`/`rows/` submodule instead of appending.
+
+## Structural checks (deslop-please)
+
+Run [`deslop-please`](https://github.com/deterministic-machines/deslop-please) before finishing structural changes (new modules, moved types, test-file splits). It reports `module-cycle`, `tangle`, `field-leak`, `shallow-module`, `wide-directory` and `long-file`; the target is **zero errors**. It needs a working `rust-analyzer` on PATH (the standalone binary from the rust-analyzer releases works; the rustup component may be missing).
+
+Rules of engagement, learned by using it here:
+
+- **Module cycles** include test modules: an inline `#[cfg(test)] mod tests` that does `use super::*` plus the parent's re-export of a sibling creates a parent↔child cycle. Keep codec/document tests in facade-level test files (`doc/jsondoc_tests.rs`, `src/ui/rows/tests.rs`, `src/ui/keys/tests.rs`) and import via `crate::` paths, or move the tested entry beside its implementation (`jsoncdoc::parse_strict` owns strict-JSON parsing; `jsondoc` is the pure arena).
+- **The `App` methods split across modules are one logical unit**, but cross-module *calls* between them still count. The convention that keeps `ui/` acyclic: `state.rs` holds the shared types (App, FileState, `Overlay`, overlay states, Msg, state helpers); `menu.rs` keeps construction, the event loop, mouse support and the render entry; `keys/overlays.rs` is the dispatch layer; `edit.rs`/`clipboard.rs` are actions; `render.rs` is the view. New methods go into the module that owns their domain; when a dispatcher must call back into `App`, prefer extracting a smaller composable function over re-entering `App::update`.
+- **Field leaks** are fields written or read outside the module that defines the struct — pure setters count. Expose intent-revealing methods that *compute* instead of assigning (e.g. `TextArea::set_viewport_within` absorbs the overlay margins/clamps; `App::set_viewport` clamps to a 1×1 minimum).
+- **shallow-module** fires when a module mostly re-exports free helpers: move each helper to its domain module (`command.rs` for the `:` completion family, `widgets.rs` for input views, `util.rs` for text wrapping) rather than widening the glob.
+- `wide-directory`/`long-file`: split test files by topic into directories (`src/ui/keys/tests/`, `tests/e2e/`) with a small entry file holding the shared harness; keep entry files under ~500 lines and modules under 2000.
+- `--allow <path>` records existing debt so only *new* errors fail; fix the recorded entries from first principles rather than growing the allowlist.
 
 ## Behavioral contracts
 
