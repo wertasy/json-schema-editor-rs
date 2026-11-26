@@ -1,7 +1,7 @@
 {
   "name": "jse",
   "id": "dev.jse.editor",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "build": 1,
   "rust": "gui-app",
   "root": "App",
