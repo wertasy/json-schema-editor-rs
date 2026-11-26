@@ -15,6 +15,12 @@
         "yaml",
         "yml",
         "toml"
+      ],
+      "mimeTypes": [
+        "application/json",
+        "application/yaml",
+        "application/toml",
+        "application/x-yaml"
       ]
     }
   ]
