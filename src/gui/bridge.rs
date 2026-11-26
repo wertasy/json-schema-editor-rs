@@ -447,13 +447,39 @@ impl Bridge {
         let Some(open) = &self.open else {
             return;
         };
+        // A lone file whose schema pointer cannot resolve — a picked copy,
+        // a config sent without its schema — opens schema-less instead of
+        // refusing.
         match open(path) {
             Ok(sess) => {
                 self.app.borrow_mut().add_file(FileState::new(sess));
                 self.views().open_path.set(String::new());
                 self.views().open_err.set(String::new());
+                self.views().notice.set(String::new());
             }
-            Err(e) => self.views().open_err.set(e),
+            Err(first) => {
+                let stripped = std::fs::read_to_string(path)
+                    .ok()
+                    .and_then(|text| crate::doc::strip_schema_pointer(path, &text));
+                match stripped {
+                    Some(text) => {
+                        std::fs::write(path, &text).ok();
+                        match open(path) {
+                            Ok(sess) => {
+                                self.app.borrow_mut().add_file(FileState::new(sess));
+                                self.views().open_path.set(String::new());
+                                self.views().open_err.set(String::new());
+                                self.views().notice.set(
+                                    "opened without schema: the schema file was not found next to it"
+                                        .to_string(),
+                                );
+                            }
+                            Err(e) => self.views().open_err.set(e),
+                        }
+                    }
+                    None => self.views().open_err.set(first),
+                }
+            }
         }
         self.publish();
     }

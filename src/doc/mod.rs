@@ -515,6 +515,34 @@ static FORMATS: [&dyn Codec; 3] = [&JsoncCodec, &YamlCodec, &TomlCodec];
 /// ForFormat returns the first registered format whose Extensions contains
 /// the lower-cased extension of path. No match falls back to the JSONC
 /// default; it never returns none.
+/// strip_schema_pointer removes the schema pointer a file records for
+/// itself (the JSON(C) `$schema` member, the YAML header directive, the
+/// TOML `#:schema` comment) and writes the document back. Front ends that
+/// receive a lone file — picked from a phone's document picker, the schema
+/// stays behind on the other device — open that copy schema-less instead
+/// of refusing it. None when the file carries no pointer or does not
+/// parse.
+pub fn strip_schema_pointer(path: &str, text: &str) -> Option<String> {
+    let codec = codec_for(path);
+    let mut parsed = codec.parse(text).ok()?;
+    codec.schema_location(&parsed.doc, &parsed.meta)?;
+    clear_schema_member(&mut parsed.doc);
+    for slot in parsed.meta.comments.values_mut() {
+        for part in [
+            &mut slot.key_head,
+            &mut slot.key_line,
+            &mut slot.key_foot,
+            &mut slot.head,
+            &mut slot.line,
+            &mut slot.foot,
+        ] {
+            let _ = take_directives(part);
+        }
+    }
+    parsed.meta.tail = take_directives(&mut parsed.meta.tail);
+    codec.write(&parsed.doc, &parsed.meta).ok()
+}
+
 pub fn codec_for(path: &str) -> &'static dyn Codec {
     let ext = file_ext(path).to_ascii_lowercase();
     for f in FORMATS {
@@ -599,6 +627,43 @@ mod tests {
 
     fn write_session(c: &dyn Codec, p: &Parsed) -> String {
         c.write(&p.doc, &p.meta).expect("write")
+    }
+
+    #[test]
+    fn strip_schema_pointer_drops_the_pointer() {
+        let cases = [
+            (
+                "c.json",
+                "{\n  \"$schema\": \"./missing.schema.json\",\n  \"port\": 8080\n}\n",
+            ),
+            (
+                "c.jsonc",
+                "{\n  \"$schema\": \"./m.json\",\n  \"port\": 8080\n}\n",
+            ),
+            (
+                "c.yml",
+                "# yaml-language-server: $schema=./m.json\nport: 8080\n",
+            ),
+            ("c.toml", "#:schema ./m.json\nport = 8080\n"),
+            (
+                "/tmp/whatever/picked-config.json",
+                "{\n  \"$schema\": \"./m.json\",\n  \"port\": 8080\n}\n",
+            ),
+        ];
+        for (name, text) in cases {
+            let stripped = strip_schema_pointer(name, &text)
+                .unwrap_or_else(|| panic!("{name}: pointer not stripped"));
+            assert!(
+                !stripped.contains("missing.schema.json") && !stripped.contains("./m.json"),
+                "{name}: pointer survived: {stripped}"
+            );
+            assert!(
+                stripped.contains("8080"),
+                "{name}: content lost: {stripped}"
+            );
+            // and a file without any pointer is reported, not rewritten
+            assert!(strip_schema_pointer(name, "port = 8080\n").is_none());
+        }
     }
 
     #[test]
@@ -842,5 +907,17 @@ mod tests {
             meta.comment_text(&[Key("port".into())]).as_deref(),
             Some("inline")
         );
+    }
+}
+
+#[cfg(test)]
+mod strip_repro {
+    #[test]
+    fn strip_real_picked_file() {
+        let text = std::fs::read_to_string("/tmp/picktest/picked-config.json").unwrap();
+        match crate::doc::strip_schema_pointer("picked-config.json", &text) {
+            Some(s) => println!("STRIPPED:\n{s}"),
+            None => println!("STRIP_NONE"),
+        }
     }
 }

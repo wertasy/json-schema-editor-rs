@@ -83,6 +83,7 @@ pub fn open_screen(ed: Rc<Bridge>) -> impl IntoElement {
     let ed_open = ed.clone();
     let ed_set = ed.clone();
     let ed_press = ed.clone();
+    let ed_submit = ed.clone();
     let ed_browse = ed.clone();
     let ed_err = ed.clone();
     view()
@@ -106,6 +107,7 @@ pub fn open_screen(ed: Rc<Bridge>) -> impl IntoElement {
             input()
                 .value(move || ed_open.open_path().get())
                 .on_change(move |s: &str| ed_set.open_path().set(s.to_string()))
+                .on_submit(move |s: &str| ed_submit.open_file(s))
                 .placeholder("config.(json|jsonc|yaml|toml)")
                 .auto_focus(true)
                 .h(px(42.0))
