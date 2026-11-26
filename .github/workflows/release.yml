@@ -146,11 +146,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Pinned: the runners must build with the nsh crates the app's
+          # Cargo.toml pins (=0.7.0).
           if [ "${{ runner.os }}" = Windows ]; then
-            powershell -NoProfile -Command "irm https://nsh.dev/install.ps1 | iex"
+            powershell -NoProfile -Command "$env:NSH_VERSION='v0.7.0'; irm https://nsh.dev/install.ps1 | iex"
             echo "$LOCALAPPDATA/nsh/bin" >> "$GITHUB_PATH"
           else
-            curl -fsSL https://nsh.dev/install.sh | sh
+            curl -fsSL https://nsh.dev/install.sh | NSH_VERSION=v0.7.0 sh
             echo "$HOME/.nsh/bin" >> "$GITHUB_PATH"
           fi
       - name: Linux build dependencies
