@@ -23,9 +23,9 @@ use nsh_core::prelude::SharedString;
 use nsh_core::prelude::Styled;
 use nsh_core::prelude::dynamic;
 use nsh_core::prelude::each;
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(target_os = "android")]
 use nsh_core::prelude::pick_files;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 use nsh_core::prelude::pick_paths;
 use nsh_core::prelude::px;
 use nsh_core::prelude::rgba;
@@ -38,32 +38,30 @@ use nsh_core::prelude::when;
 use crate::gui::bridge::{Bridge, SheetView};
 
 /// Opens the system's file picker and loads the picked config: the
-/// document picker (SAF) on Android/iOS — the picked bytes are stored in
-/// the app's data directory — and the open dialog on the desktops.
+/// document picker (SAF) on Android — the picked bytes are stored in the
+/// app's data directory — and the open dialog on the desktops.
 fn browse_for_config(ed: Rc<Bridge>) {
     spawn(async move {
-        #[cfg(any(target_os = "android", target_os = "ios"))]
+        #[cfg(target_os = "android")]
         {
             let mut request = nsh_core::picker::FilePickRequest::new(false, 0);
             request.filters = vec![nsh_core::file_dialog::FileFilter::new(
                 "Config",
                 ["json", "jsonc", "yaml", "yml", "toml"],
             )];
-            match pick_files(request).await {
-                Ok(files) if !files.is_empty() => {
-                    let f = &files[0];
-                    if f.status == nsh_core::picker::PickedStatus::Read {
-                        ed.open_picked(&f.name, &f.data);
-                    } else {
-                        ed.open_err()
-                            .set(format!("{} is too large to open", f.name));
-                    }
+            // On Android/iOS the picker answers with the picked files
+            // directly (none when cancelled).
+            let files = pick_files(request).await;
+            if let Some(f) = files.first() {
+                if f.status == nsh_core::picker::PickedStatus::Read {
+                    ed.open_picked(&f.name, &f.data);
+                } else {
+                    ed.open_err()
+                        .set(format!("{} is too large to open", f.name));
                 }
-                Ok(_) => {} // cancelled
-                Err(e) => ed.open_err().set(e),
             }
         }
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(target_os = "android"))]
         {
             match pick_paths(nsh_core::file_dialog::OpenDialog::files()).await {
                 Ok(Some(paths)) => {
