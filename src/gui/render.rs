@@ -33,6 +33,9 @@ pub fn tool_button(
 ) -> impl IntoElement {
     let label = SharedString::from(label);
     let mut b = button()
+        .flex_row()
+        .items_center()
+        .justify_center()
         .accessibility_label(tip)
         .px(px(10.0))
         .h(px(32.0))
@@ -80,6 +83,9 @@ pub fn header_bar(ed: &Rc<Bridge>) -> impl IntoElement {
         .border_color(move || theme().border)
         .child(
             button()
+                .flex_row()
+                .items_center()
+                .justify_center()
                 .accessibility_label("Back")
                 .px(px(8.0))
                 .h(px(32.0))
@@ -119,6 +125,9 @@ pub fn header_bar(ed: &Rc<Bridge>) -> impl IntoElement {
         )
         .child(
             button()
+                .flex_row()
+                .items_center()
+                .justify_center()
                 .accessibility_label("Toggle empty fields")
                 .px(px(8.0))
                 .h(px(32.0))
@@ -130,6 +139,9 @@ pub fn header_bar(ed: &Rc<Bridge>) -> impl IntoElement {
         )
         .child(
             button()
+                .flex_row()
+                .items_center()
+                .justify_center()
                 .accessibility_label("Add key or item")
                 .px(px(8.0))
                 .h(px(32.0))
@@ -140,6 +152,9 @@ pub fn header_bar(ed: &Rc<Bridge>) -> impl IntoElement {
         )
         .child(
             button()
+                .flex_row()
+                .items_center()
+                .justify_center()
                 .accessibility_label("Issues")
                 .px(px(8.0))
                 .h(px(32.0))
@@ -161,6 +176,9 @@ pub fn header_bar(ed: &Rc<Bridge>) -> impl IntoElement {
                 let ed_press = ed_files.clone();
                 let ed_label = ed_files.clone();
                 button()
+                    .flex_row()
+                    .items_center()
+                    .justify_center()
                     .accessibility_label("Files")
                     .px(px(8.0))
                     .h(px(32.0))
@@ -327,6 +345,9 @@ fn op_button(
 ) -> impl IntoElement {
     let label = SharedString::from(label);
     button()
+        .flex_row()
+        .items_center()
+        .justify_center()
         .accessibility_label(tip)
         .size(px(30.0))
         .rounded(move || theme().radius)

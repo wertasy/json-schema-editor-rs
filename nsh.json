@@ -5,5 +5,17 @@
   "build": 1,
   "rust": "gui-app",
   "root": "App",
-  "appearance": "system"
+  "appearance": "system",
+  "fileTypes": [
+    {
+      "name": "Config",
+      "extensions": [
+        "json",
+        "jsonc",
+        "yaml",
+        "yml",
+        "toml"
+      ]
+    }
+  ]
 }

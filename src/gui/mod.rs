@@ -28,6 +28,7 @@ use nsh_core::prelude::IntoElement;
 use nsh_core::prelude::ListLayout;
 use nsh_core::prelude::ParentElement;
 use nsh_core::prelude::Styled;
+use nsh_core::prelude::on_back_press;
 use nsh_core::prelude::px;
 use nsh_core::prelude::view;
 use nsh_core::prelude::virtual_list;
@@ -114,6 +115,9 @@ pub fn App() -> impl IntoElement {
     ed.attach(bridge::Views::new());
     ed.set_viewport(120, 40);
     ed.publish();
+    // The Android back button/gesture: sheet -> pop -> confirm -> app.
+    let ed_back = ed.clone();
+    on_back_press(move || ed_back.back_pressed());
     let content = move || shell(ed.clone());
     app_window().id("main").content(content)
 }

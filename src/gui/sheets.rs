@@ -23,20 +23,69 @@ use nsh_core::prelude::SharedString;
 use nsh_core::prelude::Styled;
 use nsh_core::prelude::dynamic;
 use nsh_core::prelude::each;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+use nsh_core::prelude::pick_files;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use nsh_core::prelude::pick_paths;
 use nsh_core::prelude::px;
 use nsh_core::prelude::rgba;
 use nsh_core::prelude::scroll;
+use nsh_core::prelude::spawn;
 use nsh_core::prelude::text;
 use nsh_core::prelude::view;
 use nsh_core::prelude::when;
 
 use crate::gui::bridge::{Bridge, SheetView};
 
+/// Opens the system's file picker and loads the picked config: the
+/// document picker (SAF) on Android/iOS — the picked bytes are stored in
+/// the app's data directory — and the open dialog on the desktops.
+fn browse_for_config(ed: Rc<Bridge>) {
+    spawn(async move {
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            let mut request = nsh_core::picker::FilePickRequest::new(false, 0);
+            request.filters = vec![nsh_core::file_dialog::FileFilter::new(
+                "Config",
+                ["json", "jsonc", "yaml", "yml", "toml"],
+            )];
+            match pick_files(request).await {
+                Ok(files) if !files.is_empty() => {
+                    let f = &files[0];
+                    if f.status == nsh_core::picker::PickedStatus::Read {
+                        ed.open_picked(&f.name, &f.data);
+                    } else {
+                        ed.open_err()
+                            .set(format!("{} is too large to open", f.name));
+                    }
+                }
+                Ok(_) => {} // cancelled
+                Err(e) => ed.open_err().set(e),
+            }
+        }
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            match pick_paths(nsh_core::file_dialog::OpenDialog::files()).await {
+                Ok(Some(paths)) => {
+                    if let Some(path) = paths.first() {
+                        let path = path.to_string_lossy().to_string();
+                        ed.open_file(&path);
+                    }
+                }
+                Ok(None) => {} // cancelled
+                Err(e) => ed.open_err().set(e),
+            }
+        }
+    });
+}
+
 /// The open screen: shown when no file is loaded (Android launch, or the
 /// binary started without arguments).
 pub fn open_screen(ed: Rc<Bridge>) -> impl IntoElement {
     let ed_open = ed.clone();
     let ed_set = ed.clone();
+    let ed_press = ed.clone();
+    let ed_browse = ed.clone();
     let ed_err = ed.clone();
     view()
         .flex_1()
@@ -71,19 +120,39 @@ pub fn open_screen(ed: Rc<Bridge>) -> impl IntoElement {
         )
         .child(
             button()
+                .flex_row()
+                .items_center()
+                .justify_center()
                 .px(px(16.0))
                 .h(px(42.0))
                 .rounded(move || theme().radius)
                 .bg(move || theme().primary)
                 .active(|s| s.opacity(0.8))
                 .on_press(move || {
-                    let p = ed_open_path(&ed);
-                    ed.open_file(&p);
+                    let p = ed_open_path(&ed_press);
+                    ed_press.open_file(&p);
                 })
                 .child(
                     text("Open")
                         .text_size(px(15.0))
                         .text_color(move || theme().primary_foreground),
+                ),
+        )
+        .child(
+            button()
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .px(px(16.0))
+                .h(px(42.0))
+                .rounded(move || theme().radius)
+                .bg(move || theme().muted)
+                .active(|s| s.opacity(0.8))
+                .on_press(move || browse_for_config(ed_browse.clone()))
+                .child(
+                    text("Browse…")
+                        .text_size(px(15.0))
+                        .text_color(move || theme().foreground),
                 ),
         )
         .child(
@@ -114,6 +183,13 @@ pub fn sheet_dialog(ed: Rc<Bridge>) -> impl IntoElement {
                 .bg(rgba(0x00000066))
                 .child(sheet_body(ed)),
         )
+}
+
+/// One row of a list sheet: its position (the each key) and its text.
+#[derive(Clone, Debug, PartialEq)]
+struct LineRow {
+    i: usize,
+    line: String,
 }
 
 /// One dynamic arm, type-erased into a concrete `View`.
@@ -361,6 +437,9 @@ fn confirm_sheet(ed: Rc<Bridge>, s: SheetView) -> impl IntoElement {
                 .gap_2()
                 .child(
                     button()
+                        .flex_row()
+                        .items_center()
+                        .justify_center()
                         .px(px(12.0))
                         .h(px(34.0))
                         .rounded(move || theme().radius)
@@ -370,6 +449,9 @@ fn confirm_sheet(ed: Rc<Bridge>, s: SheetView) -> impl IntoElement {
                 )
                 .child(
                     button()
+                        .flex_row()
+                        .items_center()
+                        .justify_center()
                         .px(px(12.0))
                         .h(px(34.0))
                         .rounded(move || theme().radius)
@@ -383,6 +465,9 @@ fn confirm_sheet(ed: Rc<Bridge>, s: SheetView) -> impl IntoElement {
                 )
                 .child(
                     button()
+                        .flex_row()
+                        .items_center()
+                        .justify_center()
                         .px(px(12.0))
                         .h(px(34.0))
                         .rounded(move || theme().radius)
@@ -420,9 +505,19 @@ fn list_sheet(ed: Rc<Bridge>, s: SheetView) -> impl IntoElement {
                 .py(px(6.0)),
         )
         .child(scroll().max_h(px(340.0)).child(view().gap_1().child(each(
-            move || items.clone(),
-            |item: &String| item.clone(),
-            move |item: nsh_core::prelude::ReadSignal<String>,
+            // keyed by position: duplicate texts must not collide
+            move || {
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, line)| LineRow {
+                        i,
+                        line: line.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            },
+            |row: &LineRow| row.i,
+            move |row: nsh_core::prelude::ReadSignal<LineRow>,
                   i: nsh_core::prelude::ReadSignal<usize>| {
                 let ed_row = ed_press.clone();
                 view()
@@ -434,7 +529,7 @@ fn list_sheet(ed: Rc<Bridge>, s: SheetView) -> impl IntoElement {
                     .style_when(move || i.get() == cursor, |st| st.bg(move || theme().muted))
                     .on_press(move || ed_row.sheet_pick_row(i.get()))
                     .child(
-                        text(move || item.get())
+                        text(move || row.with(|r| r.line.clone()))
                             .text_size(px(13.0))
                             .number_of_lines(2),
                     )
@@ -532,6 +627,9 @@ fn sheet_buttons(ed_apply: Rc<Bridge>, ed_cancel: Rc<Bridge>) -> impl IntoElemen
         .gap_2()
         .child(
             button()
+                .flex_row()
+                .items_center()
+                .justify_center()
                 .px(px(12.0))
                 .h(px(34.0))
                 .rounded(move || theme().radius)
@@ -541,6 +639,9 @@ fn sheet_buttons(ed_apply: Rc<Bridge>, ed_cancel: Rc<Bridge>) -> impl IntoElemen
         )
         .child(
             button()
+                .flex_row()
+                .items_center()
+                .justify_center()
                 .px(px(12.0))
                 .h(px(34.0))
                 .rounded(move || theme().radius)

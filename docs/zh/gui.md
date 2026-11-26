@@ -42,8 +42,12 @@ nsh package --target ios       # 设备包：--sign <identity> 时为 .ipa，
 
 GUI 二进制接受与终端版相同的参数——
 `jse [-s schema] config.(json|jsonc|yaml|yml|toml)`——为每个会话打开编辑窗口，第一个
-文件处于激活状态。不带参数时从打开页开始（也是 Android 的启动状态）：输入配置路径，
-点 Open。
+文件处于激活状态。不带参数时从打开页开始（也是 Android 的启动状态）：输入配置路径点
+Open，或点 **Browse…** 用系统选择器挑文件（桌面为打开对话框，Android/iOS
+为文档选择器）。选中的文件会复制到应用数据目录，后续编辑与保存都作用于
+该副本——移动端暂不支持写回提供方。另外 NSH 0.7.0 的 Android 应用无法注册
+为任意文件类型的打开方式（`nsh.json` 的 `fileTypes` 在 Android 只注册分享
+面板），文件管理器的"打开方式"列表暂时不会出现 jse。
 
 ## 编辑
 

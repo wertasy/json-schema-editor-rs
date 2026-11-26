@@ -13,6 +13,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use nsh_core::prelude::Signal;
+use nsh_core::prelude::data_dir;
 use nsh_core::prelude::signal;
 
 pub use crate::ui::rows::{RowOps, RowView};
@@ -363,11 +364,35 @@ impl Bridge {
         self.publish();
     }
 
-    /// Answers the confirm sheet: y/n/esc.
+    /// Answers the confirm sheet: y/n/esc. "Save & exit" writes every
+    /// dirty file and closes the window on the desktops (the Android app
+    /// stays, the user closes it).
     pub fn confirm(&self, yes: bool) {
         self.key(Msg::Char(if yes { 'y' } else { 'n' }, false));
         self.record_saves();
+        let exit = yes;
+        drop(self.app.borrow());
+        if exit {
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+            nsh_core::element::desktop::current_window().close();
+        }
         self.publish();
+    }
+
+    /// The Android back button/gesture: close the open sheet first, then
+    /// pop one menu level; an unsaved dirty state raises the confirm sheet.
+    /// False lets the system close the app (nothing to lose).
+    pub fn back_pressed(&self) -> bool {
+        let app = self.app.borrow();
+        if app.file_paths().is_empty() {
+            return false;
+        }
+        let handled = app.overlay_data().is_some() || app.depth() > 1 || app.active_dirty();
+        drop(app);
+        if handled {
+            self.back();
+        }
+        handled
     }
 
     /// Force-writes past the save-time errors (`--force` sessions).
@@ -375,6 +400,46 @@ impl Bridge {
         self.key(Msg::Char('y', false));
         self.record_saves();
         self.publish();
+    }
+
+    /// Opens bytes picked with the system's document picker (Android/iOS
+    /// SAF): stores them under the app's data directory and loads that
+    /// copy. Saves land on the copy — writing back through the SAF
+    /// provider is not available.
+    pub fn open_picked(&self, name: &str, bytes: &[u8]) {
+        let name = name.rsplit(['/', '\\']).next().unwrap_or(name);
+        let name = if name.is_empty() {
+            "picked.config"
+        } else {
+            name
+        };
+        let Some(base) = data_dir().or_else(|| std::env::temp_dir().into()) else {
+            self.views()
+                .open_err
+                .set("no app data directory".to_string());
+            return;
+        };
+        let dir = base.join("picked");
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.views()
+                .open_err
+                .set(format!("cannot create {}: {e}", dir.display()));
+            return;
+        }
+        let path = dir.join(name);
+        if let Err(e) = std::fs::write(&path, bytes) {
+            self.views()
+                .open_err
+                .set(format!("cannot store {}: {e}", path.display()));
+            return;
+        }
+        let Some(path) = path.to_str() else {
+            self.views()
+                .open_err
+                .set("picked file path is not UTF-8".to_string());
+            return;
+        };
+        self.open_file(path);
     }
 
     /// Opens a config file inside the session (the open screen).

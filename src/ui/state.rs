@@ -1071,6 +1071,11 @@ impl App {
         self.cur
     }
 
+    /// The menu stack's depth (1 at the root screen).
+    pub fn depth(&self) -> usize {
+        self.cur_file_state().map(|f| f.stack.len()).unwrap_or(0)
+    }
+
     /// Adds one file session and makes it active.
     pub fn add_file(&mut self, file: FileState) {
         self.cur = self.files.len();
