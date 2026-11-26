@@ -910,14 +910,3 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod strip_repro {
-    #[test]
-    fn strip_real_picked_file() {
-        let text = std::fs::read_to_string("/tmp/picktest/picked-config.json").unwrap();
-        match crate::doc::strip_schema_pointer("picked-config.json", &text) {
-            Some(s) => println!("STRIPPED:\n{s}"),
-            None => println!("STRIP_NONE"),
-        }
-    }
-}
